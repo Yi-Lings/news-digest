@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     send_email.add_argument(
         "--yes", action="store_true", help="确认真实发送（缺省只显示发送计划）"
     )
+    send_email.add_argument(
+        "--smoke",
+        action="store_true",
+        help="只发一封无链接的最小测试信，验证 SMTP 通道（不检查站点、不写防重记录）",
+    )
     return parser
 
 
@@ -102,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "preview-email":
         return _run_preview_email(args.date)
     if args.command == "send-email":
+        if args.smoke:
+            return _run_send_smoke(args.yes)
         return _run_send_email(args.date, args.resend, args.yes)
     parser.print_help()
     return 0
@@ -136,6 +143,37 @@ def _run_preview_email(date: str | None) -> int:
     print(f"主题：{subject}")
     print(f"邮件预览：{eml_path}（邮件客户端打开）")
     print(f"网页预览：{html_path}（浏览器打开看排版）")
+    return 0
+
+
+def _run_send_smoke(yes: bool) -> int:
+    from news_digest.config import load_env_file, smtp_config_from_env
+    from news_digest.delivery.mailer import MailError, compose, send, validate_smtp
+
+    load_env_file()
+    smtp = smtp_config_from_env()
+    try:
+        validate_smtp(smtp)
+    except MailError as error:
+        print(str(error))
+        return 1
+    print(f"服务器：{smtp.host}:{smtp.port}；收件人 {len(smtp.recipients)} 个")
+    if not yes:
+        print("通道测试预览模式；加 --yes 真实发送一封无链接测试信。")
+        return 0
+    message = compose(
+        "Cheapcoding News 投递通道测试",
+        "这是一封投递通道测试邮件。收到即说明 SMTP 配置与发信域名工作正常。",
+        "<p>这是一封投递通道测试邮件。收到即说明 SMTP 配置与发信域名工作正常。</p>",
+        smtp.sender,
+        smtp.recipients,
+    )
+    try:
+        send(message, smtp)
+    except MailError as error:
+        print(str(error))
+        return 1
+    print("通道测试邮件已发出，请检查收件箱与垃圾箱。")
     return 0
 
 
