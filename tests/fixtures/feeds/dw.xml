@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:sy="http://purl.org/rss/modules/syndication/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dwsyn="http://rss.dw.com/syndication/dwsyn/">
+ <channel rdf:about="https://rss.dw.com/syndication/feeds/rss-en-all.1573.rdf">
+  <description>Deutsche Welle</description>
+  <link>https://www.dw.com/english/?maca=en-rss-en-all-1573-rdf</link>
+  <title>Deutsche Welle</title>
+  <dc:date>2026-07-26T10:42:07Z</dc:date>
+  <items>
+   <rdf:Seq>
+    <rdf:li rdf:resource="https://www.dw.com/en/can-pakistan-administered-kashmir-elections-calm-tensions/a-78101422?maca=en-rss-en-all-1573-rdf"/>
+    <rdf:li rdf:resource="https://www.dw.com/en/sudan-civil-war-civilians-used-as-human-shields/a-78089487?maca=en-rss-en-all-1573-rdf"/>
+   </rdf:Seq>
+  </items>
+ </channel>
+ <item rdf:about="https://www.dw.com/en/can-pakistan-administered-kashmir-elections-calm-tensions/a-78101422?maca=en-rss-en-all-1573-rdf">
+  <title>Can Pakistan-administered Kashmir elections calm tensions?</title>
+  <link>https://www.dw.com/en/can-pakistan-administered-kashmir-elections-calm-tensions/a-78101422?maca=en-rss-en-all-1573-rdf</link>
+  <description>Pakistan-administered Kashmir heads to the polls after weeks of deadly protests over seats reserved for displaced people from India-administered Kashmir. One local group has called for the elections to be boycotted.</description>
+  <dc:date>2026-07-26T10:11:00Z</dc:date>
+  <dc:subject>World</dc:subject>
+  <dc:language>en</dc:language>
+  <dwsyn:contentID>78101422</dwsyn:contentID>
+ </item>
+ <item rdf:about="https://www.dw.com/en/sudan-civil-war-civilians-used-as-human-shields/a-78089487?maca=en-rss-en-all-1573-rdf">
+  <title>Sudan civil war: Civilians used as &apos;human shields&apos;</title>
+  <link>https://www.dw.com/en/sudan-civil-war-civilians-used-as-human-shields/a-78089487?maca=en-rss-en-all-1573-rdf</link>
+  <description>The situation in the besieged city of El Obeid in Sudan is worsening by the day, with rights organizations warning of mass atrocities. Children are traumatized and do not dare go to school.</description>
+  <dc:date>2026-07-26T09:56:00Z</dc:date>
+  <dc:subject>World</dc:subject>
+  <dc:language>en</dc:language>
+  <dwsyn:contentID>78089487</dwsyn:contentID>
+ </item>
+</rdf:RDF>

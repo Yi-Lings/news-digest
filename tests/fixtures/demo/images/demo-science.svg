@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" role="img" aria-label="演示图片">
+  <rect width="800" height="450" fill="#f4f1e8"/>
+  <circle cx="400" cy="215" r="26" fill="#ae2f24"/>
+  <ellipse cx="400" cy="215" rx="170" ry="64" fill="none" stroke="#1c1b17" stroke-width="2" transform="rotate(20 400 215)"/>
+  <ellipse cx="400" cy="215" rx="170" ry="64" fill="none" stroke="#1c1b17" stroke-width="2" transform="rotate(-20 400 215)"/>
+  <ellipse cx="400" cy="215" rx="170" ry="64" fill="none" stroke="#5c5a52" stroke-width="2" transform="rotate(90 400 215)"/>
+  <circle cx="545" cy="170" r="10" fill="#1c1b17"/>
+  <circle cx="255" cy="260" r="10" fill="#1c1b17"/>
+  <text x="400" y="420" text-anchor="middle" font-family="Georgia, serif" font-size="20" fill="#5c5a52">演示图片 · DEMO IMAGE</text>
+</svg>

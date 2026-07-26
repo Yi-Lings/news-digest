@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-mode="bi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="robots" content="noindex">
+<title>{{ page_title }}</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="icon" type="image/svg+xml" href="/assets/brandmark.svg">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="read-progress" data-read-progress aria-hidden="true"></div>
+<div class="demo-stamp" role="note" aria-label="本页为预览数据">样张<span>预览数据</span></div>
+<header class="masthead">
+  <div class="masthead-brand">
+    <svg class="brandmark" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+      <g fill="#1c1b17">
+        <rect x="6" y="14" width="42" height="7" rx="1.5"/>
+        <rect x="6" y="34" width="34" height="7" rx="1.5"/>
+        <rect x="6" y="54" width="42" height="7" rx="1.5"/>
+        <rect x="6" y="74" width="26" height="7" rx="1.5"/>
+        <rect x="70" y="14" width="9" height="34" rx="1.5"/>
+        <rect x="70" y="66" width="9" height="20" rx="1.5"/>
+        <rect x="86" y="14" width="7" height="72" rx="1.5"/>
+      </g>
+      <rect class="bm-bridge" x="52" y="54" width="27" height="7" rx="1.5" fill="#ae2f24"/>
+    </svg>
+    <div class="masthead-title">
+      <p class="masthead-kicker"><span class="kicker-rule" aria-hidden="true"></span>英语学习 · 中英对照日报<span class="kicker-rule is-end" aria-hidden="true"></span></p>
+      <p class="logotype"><a href="/">{{ site_name }}</a></p>
+      {% block dateline %}{% endblock %}
+    </div>
+  </div>
+  <nav class="topnav" aria-label="站点导航">
+    <div class="topnav-links">
+      <a href="/"{% if nav_active == "today" %} class="is-active" aria-current="page"{% endif %}>今日</a>
+      <a href="/archive/"{% if nav_active == "archive" %} class="is-active" aria-current="page"{% endif %}>往期归档</a>
+    </div>
+    <div class="mode-switch" role="group" aria-label="阅读模式">
+      <span class="mode-label">阅读模式</span>
+      <button type="button" data-mode-btn="en">英文</button>
+      <button type="button" data-mode-btn="bi">双语</button>
+      <button type="button" data-mode-btn="zh">中文</button>
+    </div>
+  </nav>
+</header>
+<main id="main" class="page">
+{% block content %}{% endblock %}
+</main>
+<footer class="footer">
+  <p>本页所有标题、正文与图片均为演示用预览数据，非真实报道。正式版本中每篇文章将链接并标注原始来源。</p>
+  <p>{{ site_name }} · {{ site_tagline }} · 个人英语学习用途，不公开转载受版权保护全文</p>
+</footer>
+<script src="/assets/app.js"></script>
+</body>
+</html>

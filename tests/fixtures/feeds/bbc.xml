@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+    <channel>
+        <title><![CDATA[BBC News]]></title>
+        <description><![CDATA[BBC News - World]]></description>
+        <link>https://www.bbc.co.uk/news/world</link>
+        <lastBuildDate>Sun, 26 Jul 2026 10:43:03 GMT</lastBuildDate>
+        <language><![CDATA[en-gb]]></language>
+        <item>
+            <title><![CDATA[What we know so far about the Berlin Pride ramming attack]]></title>
+            <description><![CDATA[A police manhunt is underway after a suspect rammed a car into a crowd at a Pride event in the German capital on Saturday night. ]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cevmdxz4872o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cevmdxz4872o#0</guid>
+            <pubDate>Sun, 26 Jul 2026 09:18:33 GMT</pubDate>
+            <media:thumbnail width="240" height="134" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/dda8/live/0a15f7b0-88c6-11f1-8155-cf5eb1f28fd2.jpg"/>
+        </item>
+        <item>
+            <title><![CDATA[France battles fire 'whirlwinds' as another 55,000 evacuated ]]></title>
+            <description><![CDATA[More than 340,000 people have now been evacuated from wildfires in France and Spain. ]]></description>
+            <link>https://www.bbc.co.uk/news/articles/clyj8k4nn5jo?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/clyj8k4nn5jo#0</guid>
+            <pubDate>Sun, 26 Jul 2026 09:16:46 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/d055/live/c69c5bb0-88b5-11f1-b7ca-b5f2b9ce39f1.png"/>
+        </item>
+        <item>
+            <title><![CDATA[Iran-backed Houthis claim missile attack on Saudi Arabia]]></title>
+            <description><![CDATA[US military says it disabled a tanker that was attempting to evade the American blockade on Iranian ports.]]></description>
+            <link>https://www.bbc.co.uk/news/articles/cj9d27v70j1o?at_medium=RSS&amp;at_campaign=rss</link>
+            <guid isPermaLink="false">https://www.bbc.co.uk/news/articles/cj9d27v70j1o#0</guid>
+            <pubDate>Sat, 25 Jul 2026 06:34:40 GMT</pubDate>
+            <media:thumbnail width="240" height="135" url="https://ichef.bbci.co.uk/ace/standard/240/cpsprodpb/8084/live/36c23a50-87f2-11f1-ab0e-efa86eca3823.jpg"/>
+        </item>
+    </channel>
+</rss>

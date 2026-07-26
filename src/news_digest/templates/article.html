@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block dateline %}
+<p class="dateline">
+  <span>{{ edition.date | date_zh }}</span>
+  <span class="dateline-sep" aria-hidden="true">·</span>
+  <span>{{ edition.date | weekday_zh }}</span>
+</p>
+{% endblock %}
+
+{% block content %}
+<article class="story">
+  <p class="crumb"><a href="/issues/{{ edition.date }}/">← 返回 {{ edition.date | date_zh }} 首页</a></p>
+
+  <header class="story-head">
+    <p class="card-meta">
+      <span class="source-tag">{{ article.source }}</span>
+      <span class="read-time">约 {{ article.reading_minutes }} 分钟</span>
+      <span class="pub-time">{{ article.published_at }}</span>
+    </p>
+    <h1 class="story-title">
+      {% if article.title_zh %}
+      <span class="lang-en">{{ article.title_en }}</span>
+      <span class="lang-zh story-title-zh">{{ article.title_zh }}</span>
+      {% else %}
+      <span>{{ article.title_en }}</span>
+      {% endif %}
+    </h1>
+    {% if article.author %}
+    <p class="byline">作者 {{ article.author }}</p>
+    {% endif %}
+    <div class="tts-bar" data-tts-bar hidden>
+      <span class="filter-label">英文朗读</span>
+      <button type="button" data-tts-play>朗读全文</button>
+      <button type="button" data-tts-stop>停止</button>
+      <label class="tts-rate">语速
+        <select data-tts-rate>
+          <option value="0.8">慢</option>
+          <option value="1" selected>正常</option>
+          <option value="1.25">快</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  {% if article.image %}
+  <figure class="story-figure">
+    <img src="{{ article.image.src }}" alt="{{ article.image.alt_en }}" width="800" height="450" loading="lazy">
+    <figcaption>{{ article.image.credit }}</figcaption>
+  </figure>
+  {% endif %}
+
+  <section class="story-summary">
+    <h2 class="panel-title">摘要</h2>
+    {% if article.summary_zh %}
+    <p class="lang-en">{{ article.summary_en }}</p>
+    <p class="lang-zh gloss"><span class="gloss-mark" aria-hidden="true">译</span>{{ article.summary_zh }}</p>
+    {% else %}
+    <p>{{ article.summary_en }}</p>
+    {% endif %}
+  </section>
+
+  {% if article.content_status == "summary" %}
+  <p class="issue-notice">本文未能提取全文，以上为来源提供的摘要；完整报道请见文末原文链接。</p>
+  {% else %}
+  <section class="story-body" data-article-body>
+    {% for paragraph in article.paragraphs %}
+    <div class="pair">
+      {% if paragraph.zh %}
+      <p class="para-en lang-en" data-tts-text>{{ paragraph.en }}</p>
+      <p class="para-zh lang-zh gloss"><span class="gloss-mark" aria-hidden="true">译</span>{{ paragraph.zh }}</p>
+      <button type="button" class="para-listen lang-en" data-tts-para hidden>朗读本段</button>
+      {% else %}
+      <p class="para-en" data-tts-text>{{ paragraph.en }}</p>
+      <button type="button" class="para-listen" data-tts-para hidden>朗读本段</button>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% if article.vocabulary %}
+  <section class="learn">
+    <h2 class="section-title">重点词汇</h2>
+    <table class="vocab">
+      <thead><tr><th>词</th><th>音标</th><th>释义</th><th>例句</th></tr></thead>
+      <tbody>
+        {% for item in article.vocabulary %}
+        <tr>
+          <td class="vocab-word">{{ item.word }}</td>
+          <td class="vocab-phonetic">{{ item.phonetic }}</td>
+          <td>{{ item.meaning_zh }}</td>
+          <td class="vocab-example">{{ item.example_en }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if article.collocations %}
+  <section class="learn">
+    <h2 class="section-title">固定搭配</h2>
+    <dl class="collocations">
+      {% for item in article.collocations %}
+      <div class="collocation">
+        <dt>{{ item.phrase }}</dt>
+        <dd>{{ item.meaning_zh }}<span class="collocation-example">{{ item.example_en }}</span></dd>
+      </div>
+      {% endfor %}
+    </dl>
+  </section>
+  {% endif %}
+
+  {% if article.sentence_notes %}
+  <section class="learn">
+    <h2 class="section-title">长难句解析</h2>
+    {% for note in article.sentence_notes %}
+    <div class="sentence-note">
+      <p class="sentence-en">{{ note.sentence_en }}</p>
+      <p class="gloss"><span class="gloss-mark" aria-hidden="true">译</span>{{ note.translation_zh }}</p>
+      <p class="sentence-analysis">{{ note.analysis_zh }}</p>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  <footer class="story-foot">
+    <p>原始来源：<a href="{{ article.url }}" rel="noopener">{{ article.source }}{% if "example.com" in article.url %}（演示占位链接）{% endif %}</a></p>
+  </footer>
+</article>
+{% endblock %}

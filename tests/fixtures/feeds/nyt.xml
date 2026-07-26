@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+  <channel>
+    <title>NYT &gt; World News</title>
+    <link>https://www.nytimes.com/section/world</link>
+    <description>World news from The New York Times</description>
+    <language>en-us</language>
+    <lastBuildDate>Sun, 26 Jul 2026 10:05:00 GMT</lastBuildDate>
+    <atom:link href="https://rss.nytimes.com/services/xml/rss/nyt/World.xml" rel="self" type="application/rss+xml"/>
+    <item>
+      <title>Glacier monitoring network doubles its alpine stations</title>
+      <link>https://www.nytimes.com/2026/07/26/world/europe/glacier-monitoring-alpine-stations.html</link>
+      <description>The expansion will give researchers a far denser picture of ice loss across the range.</description>
+      <dc:creator>Demo Byline</dc:creator>
+      <pubDate>Sun, 26 Jul 2026 09:40:00 GMT</pubDate>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/07/26/world/europe/glacier-monitoring-alpine-stations.html</guid>
+      <media:content height="151" medium="image" url="https://static01.nyt.com/images/demo/glacier-thumb.jpg" width="151"/>
+    </item>
+    <item>
+      <title>Historic lighthouse reopens as a coastal writing residency</title>
+      <link>https://www.nytimes.com/2026/07/26/world/europe/lighthouse-writing-residency.html</link>
+      <description>After a decade of restoration, the tower will host writers through the winter storms.</description>
+      <dc:creator>Demo Byline</dc:creator>
+      <pubDate>Sun, 26 Jul 2026 08:55:00 GMT</pubDate>
+      <guid isPermaLink="true">https://www.nytimes.com/2026/07/26/world/europe/lighthouse-writing-residency.html</guid>
+      <media:content height="151" medium="image" url="https://static01.nyt.com/images/demo/lighthouse-thumb.jpg" width="151"/>
+    </item>
+  </channel>
+</rss>

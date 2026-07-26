@@ -1,0 +1,182 @@
+/* Cheapcoding News 前端交互：阅读模式、来源筛选、朗读、进度与渐显。无任何网络请求。 */
+(function () {
+  "use strict";
+
+  var motionOK = window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+
+  /* ── 阅读模式（英文 / 双语 / 中文），localStorage 记忆 ── */
+  var MODE_KEY = "news-digest-mode";
+  var root = document.documentElement;
+  var modeButtons = document.querySelectorAll("[data-mode-btn]");
+
+  function applyMode(mode, animate) {
+    var doFade = animate && motionOK;
+    if (doFade) {
+      root.classList.add("mode-fade");
+    }
+    var commit = function () {
+      root.setAttribute("data-mode", mode);
+      modeButtons.forEach(function (button) {
+        var pressed = button.getAttribute("data-mode-btn") === mode;
+        button.setAttribute("aria-pressed", String(pressed));
+      });
+      if (doFade) {
+        root.classList.remove("mode-fade");
+      }
+    };
+    if (doFade) {
+      window.setTimeout(commit, 160);
+    } else {
+      commit();
+    }
+    try {
+      localStorage.setItem(MODE_KEY, mode);
+    } catch (error) {
+      /* 隐私模式下无法持久化，忽略 */
+    }
+  }
+
+  var savedMode = null;
+  try {
+    savedMode = localStorage.getItem(MODE_KEY);
+  } catch (error) {
+    savedMode = null;
+  }
+  applyMode(savedMode === "en" || savedMode === "zh" ? savedMode : "bi", false);
+
+  modeButtons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      applyMode(button.getAttribute("data-mode-btn"), true);
+    });
+  });
+
+  /* ── 来源筛选（首页） ── */
+  var filterBar = document.querySelector("[data-filter-bar]");
+  if (filterBar) {
+    filterBar.hidden = false;
+    var chips = filterBar.querySelectorAll(".chip");
+    var items = document.querySelectorAll("[data-source]");
+    chips.forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        var value = chip.getAttribute("data-filter");
+        chips.forEach(function (other) {
+          other.setAttribute("aria-pressed", String(other === chip));
+        });
+        items.forEach(function (item) {
+          item.hidden = value !== "*" && item.getAttribute("data-source") !== value;
+        });
+      });
+    });
+  }
+
+  /* ── 阅读进度条（文章页） ── */
+  var progressBar = document.querySelector("[data-read-progress]");
+  var articleBody = document.querySelector("[data-article-body]");
+  if (progressBar && articleBody) {
+    progressBar.classList.add("is-on");
+    var ticking = false;
+    var updateProgress = function () {
+      ticking = false;
+      var doc = document.documentElement;
+      var total = doc.scrollHeight - doc.clientHeight;
+      var ratio = total > 0 ? Math.min(1, Math.max(0, doc.scrollTop / total)) : 0;
+      progressBar.style.transform = "scaleX(" + ratio + ")";
+    };
+    window.addEventListener("scroll", function () {
+      if (!ticking) {
+        ticking = true;
+        window.requestAnimationFrame(updateProgress);
+      }
+    }, { passive: true });
+    updateProgress();
+  }
+
+  /* ── 滚动渐显（仅在允许动效时） ── */
+  if (motionOK && "IntersectionObserver" in window) {
+    var revealTargets = document.querySelectorAll(
+      ".lead, .card, .brief-list li, .archive-entry, .pair, .learn, .story-summary"
+    );
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-in");
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
+    revealTargets.forEach(function (target, index) {
+      target.classList.add("reveal");
+      target.style.setProperty("--reveal-delay", ((index % 5) * 70) + "ms");
+      observer.observe(target);
+    });
+  }
+
+  /* ── 浏览器朗读（英文正文，文章页） ── */
+  var ttsBar = document.querySelector("[data-tts-bar]");
+  var synth = window.speechSynthesis;
+  if (ttsBar && synth) {
+    ttsBar.hidden = false;
+    var rateSelect = ttsBar.querySelector("[data-tts-rate]");
+    var playButton = ttsBar.querySelector("[data-tts-play]");
+    var stopButton = ttsBar.querySelector("[data-tts-stop]");
+    var paraButtons = document.querySelectorAll("[data-tts-para]");
+    paraButtons.forEach(function (button) {
+      button.hidden = false;
+    });
+
+    var speak = function (text, onend) {
+      synth.cancel();
+      var utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-US";
+      utterance.rate = parseFloat(rateSelect.value || "1");
+      if (onend) {
+        utterance.onend = onend;
+      }
+      synth.speak(utterance);
+    };
+
+    var clearPlaying = function () {
+      paraButtons.forEach(function (button) {
+        button.classList.remove("is-playing");
+        button.textContent = "朗读本段";
+      });
+    };
+
+    playButton.addEventListener("click", function () {
+      clearPlaying();
+      var paragraphs = document.querySelectorAll("[data-tts-text]");
+      var text = Array.prototype.map
+        .call(paragraphs, function (paragraph) {
+          return paragraph.textContent;
+        })
+        .join("\n");
+      if (text.trim()) {
+        speak(text, null);
+      }
+    });
+
+    stopButton.addEventListener("click", function () {
+      synth.cancel();
+      clearPlaying();
+    });
+
+    paraButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var pair = button.closest(".pair");
+        var paragraph = pair ? pair.querySelector("[data-tts-text]") : null;
+        if (!paragraph) {
+          return;
+        }
+        clearPlaying();
+        button.classList.add("is-playing");
+        button.textContent = "朗读中…";
+        speak(paragraph.textContent, clearPlaying);
+      });
+    });
+
+    window.addEventListener("pagehide", function () {
+      synth.cancel();
+    });
+  }
+})();

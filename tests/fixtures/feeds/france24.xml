@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0">
+  <channel>
+    <title>France 24 - International news</title>
+    <link>https://www.france24.com/en/</link>
+    <description>France 24 English live news</description>
+    <language>en</language>
+    <lastBuildDate>Sun, 26 Jul 2026 10:20:00 GMT</lastBuildDate>
+    <item>
+      <title>Urban mining startups race to recycle rare metals from old phones</title>
+      <link>https://www.france24.com/en/environment/20260726-urban-mining-startups-recycle-rare-metals</link>
+      <description>Rising metal prices have turned drawers of forgotten electronics into a viable resource.</description>
+      <pubDate>Sun, 26 Jul 2026 09:05:00 GMT</pubDate>
+      <guid isPermaLink="false">urn:demo:f24:1</guid>
+      <enclosure url="https://s.france24.com/media/display/demo/urban-mining.jpg" length="120000" type="image/jpeg"/>
+    </item>
+    <item>
+      <title>European libraries reinvent themselves as shared living rooms</title>
+      <link>https://www.france24.com/en/culture/20260726-european-libraries-third-places</link>
+      <description>Lending books is now the smallest part of the job for the continent's public libraries.</description>
+      <pubDate>Sun, 26 Jul 2026 08:10:00 GMT</pubDate>
+      <guid isPermaLink="false">urn:demo:f24:2</guid>
+      <enclosure url="https://s.france24.com/media/display/demo/libraries.jpg" length="98000" type="image/jpeg"/>
+    </item>
+  </channel>
+</rss>

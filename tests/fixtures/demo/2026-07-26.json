@@ -1,0 +1,421 @@
+{
+  "date": "2026-07-26",
+  "articles": [
+    {
+      "slug": "sponge-streets",
+      "source": "BBC News",
+      "title_en": "Coastal Cities Turn to 'Sponge Streets' as Storms Intensify",
+      "title_zh": "风暴加剧，沿海城市转向“海绵街道”",
+      "summary_en": "A port city rebuilt its streets to absorb floodwater instead of pumping it away. Early results suggest the gamble is paying off, and other regions are watching closely.",
+      "summary_zh": "一座港口城市改造街道，让雨洪就地吸收而非抽排。初步效果表明这场豪赌正在见效，其他地区正密切关注。",
+      "author": "Tom Weller",
+      "published_at": "2026-07-26 08:20",
+      "url": "https://example.com/demo/sponge-streets",
+      "reading_minutes": 5,
+      "image": {
+        "src": "/assets/demo/demo-city.svg",
+        "alt_en": "Stylised skyline of a coastal city",
+        "credit": "演示图片 · 正式版本将使用来源提供的新闻图片并标注出处"
+      },
+      "paragraphs": [
+        {
+          "en": "When a summer downpour hit the port city of Aldermere last week, its newly rebuilt streets did something unusual: they drank the water. Permeable pavement, sunken gardens and gravel-filled trenches absorbed most of the flood within an hour, sparing thousands of homes.",
+          "zh": "上周夏季暴雨袭击港口城市奥德米尔时，新改造的街道做出了不同寻常的反应：它们“喝”掉了雨水。透水路面、下沉式花园和碎石沟渠在一小时内吸收了大部分洪水，让数千户住宅免受浸泡。"
+        },
+        {
+          "en": "The idea, often called the 'sponge city' model, treats rain as a resource to be captured rather than a threat to be pumped away. Engineers estimate that Aldermere's retrofitted districts can now hold back roughly 60 percent of a typical storm surge.",
+          "zh": "这一理念常被称为“海绵城市”模式：把雨水视为可收集的资源，而非需要抽排的威胁。工程师估计，奥德米尔完成改造的城区如今能滞留约六成的常规风暴水量。"
+        },
+        {
+          "en": "The retrofit did not come cheap. City officials spent four years and a considerable share of the municipal budget tearing up asphalt, and some residents questioned whether the money would have been better spent on sea walls.",
+          "zh": "改造并不便宜。市政官员花了四年时间和相当一部分市政预算来翻修沥青路面，一些居民质疑这笔钱是否更应该用于修建海堤。"
+        },
+        {
+          "en": "Yet as storms grow more intense, planners from other coastal regions are arriving to take notes. If concrete once defined the modern city, Aldermere suggests the next one may be built, in part, on soil.",
+          "zh": "然而随着风暴日益猛烈，其他沿海地区的规划者纷纷前来取经。如果说混凝土定义了现代城市，奥德米尔则预示着：下一代城市可能有一部分建立在土壤之上。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "permeable",
+          "phonetic": "/ˈpɜːrmiəbl/",
+          "meaning_zh": "可渗透的",
+          "example_en": "Permeable pavement lets rainwater soak into the ground."
+        },
+        {
+          "word": "retrofit",
+          "phonetic": "/ˈretroʊfɪt/",
+          "meaning_zh": "（对既有设施）改造、加装",
+          "example_en": "The city retrofitted old streets with drainage gardens."
+        },
+        {
+          "word": "surge",
+          "phonetic": "/sɜːrdʒ/",
+          "meaning_zh": "涌浪；激增",
+          "example_en": "The storm surge pushed seawater into low-lying districts."
+        },
+        {
+          "word": "municipal",
+          "phonetic": "/mjuːˈnɪsɪpl/",
+          "meaning_zh": "市政的",
+          "example_en": "The project consumed a large share of the municipal budget."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "hold back",
+          "meaning_zh": "阻挡；滞留",
+          "example_en": "The wetlands hold back floodwater during heavy rain."
+        },
+        {
+          "phrase": "pay off",
+          "meaning_zh": "（冒险、努力）见效，获得回报",
+          "example_en": "Early results suggest the gamble is paying off."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "If concrete once defined the modern city, Aldermere suggests the next one may be built, in part, on soil.",
+          "translation_zh": "如果说混凝土定义了现代城市，奥德米尔则预示着：下一代城市可能有一部分建立在土壤之上。",
+          "analysis_zh": "if 引导的并非真实条件句，而是“如果说……那么……”的对照修辞；主句中 suggests 后接省略 that 的宾语从句，the next one 指代 the next city，插入语 in part 限定 be built on soil 的程度。混凝土与土壤的对比呼应全文主题。"
+        }
+      ]
+    },
+    {
+      "slug": "night-trains",
+      "source": "The Guardian",
+      "title_en": "Europe's Night Trains Quietly Stage a Comeback",
+      "title_zh": "欧洲夜行列车悄然回归",
+      "summary_en": "Once dismissed as relics, sleeper services are being revived by travellers who want to trade airport queues for a berth and a sunrise arrival.",
+      "summary_zh": "曾被视为过时产物的卧铺列车正在复兴：旅客宁愿放弃机场长队，换一张卧铺和一个清晨抵达的目的地。",
+      "author": "Ines Duarte",
+      "published_at": "2026-07-26 07:45",
+      "url": "https://example.com/demo/night-trains",
+      "reading_minutes": 4,
+      "paragraphs": [
+        {
+          "en": "At platform nine of a central station, a deep-blue train hums as families, students and a few business travellers climb aboard. By the time they wake, they will be six hundred kilometres away, without having passed a single security queue.",
+          "zh": "在中央车站九号站台，一列深蓝色列车低声轰鸣，家庭旅客、学生和少数商务人士陆续登车。一觉醒来，他们已在六百公里之外——全程没有经过任何一条安检长队。"
+        },
+        {
+          "en": "A decade ago, most operators were cutting sleeper routes, arguing that budget flights had made them obsolete. The calculation has shifted: carbon budgets, airport fatigue and a certain romance have put night trains back on the timetable.",
+          "zh": "十年前，多数运营商还在削减卧铺线路，理由是廉价航班已令其过时。如今算盘变了：碳排放预算、机场疲惫感，再加上几分旅途浪漫，让夜行列车重新回到时刻表上。"
+        },
+        {
+          "en": "Profitability remains fragile, and rolling stock is scarce. Yet bookings on several revived routes have exceeded forecasts for three consecutive seasons, persuading operators to order new carriages for the first time in a generation.",
+          "zh": "盈利仍然脆弱，车辆也依旧短缺。但多条复开线路的订票量已连续三季超出预期，促使运营商一代人以来首次订购新车厢。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "obsolete",
+          "phonetic": "/ˌɑːbsəˈliːt/",
+          "meaning_zh": "过时的，被淘汰的",
+          "example_en": "Cheap flights once made sleeper trains seem obsolete."
+        },
+        {
+          "word": "berth",
+          "phonetic": "/bɜːrθ/",
+          "meaning_zh": "（火车、船上的）卧铺",
+          "example_en": "She booked a lower berth on the night train."
+        },
+        {
+          "word": "consecutive",
+          "phonetic": "/kənˈsekjətɪv/",
+          "meaning_zh": "连续的",
+          "example_en": "Bookings rose for three consecutive seasons."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "stage a comeback",
+          "meaning_zh": "卷土重来，重新流行",
+          "example_en": "Vinyl records staged a comeback in the streaming era."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "By the time they wake, they will be six hundred kilometres away, without having passed a single security queue.",
+          "translation_zh": "一觉醒来，他们已在六百公里之外——全程没有经过任何一条安检长队。",
+          "analysis_zh": "by the time 引导时间状语从句，主句用将来时 will be 表示届时状态；without having passed 使用完成式动名词，强调“到那时为止都未经历”，single 加强否定语气。"
+        }
+      ]
+    },
+    {
+      "slug": "seafloor-atlas",
+      "source": "NPR",
+      "title_en": "Scientists Complete an Atlas of the Ocean's Hidden Mountains",
+      "title_zh": "科学家绘成海底“隐藏山脉”图集",
+      "summary_en": "A ten-year mapping effort has charted thousands of underwater peaks, revealing ecosystems that flourish far from sunlight.",
+      "summary_zh": "一项历时十年的测绘工程标记出数千座水下山峰，揭示了远离阳光却生机勃勃的生态系统。",
+      "author": "Farah Idris",
+      "published_at": "2026-07-26 06:10",
+      "url": "https://example.com/demo/seafloor-atlas",
+      "reading_minutes": 4,
+      "image": {
+        "src": "/assets/demo/demo-globe.svg",
+        "alt_en": "Abstract globe with meridian lines",
+        "credit": "演示图片 · 正式版本将使用来源提供的新闻图片并标注出处"
+      },
+      "paragraphs": [
+        {
+          "en": "We have better maps of the Moon than of our own seafloor. A coalition of research vessels set out ten years ago to narrow that gap, bouncing sound off the deep to trace mountains no human eye had seen.",
+          "zh": "我们拥有的月球地图比自家海底的还要精细。十年前，一支科考船联合编队启程缩小这一差距，用声呐在深海中回响，勾勒出人眼从未见过的山脉。"
+        },
+        {
+          "en": "The finished atlas records more than forty thousand seamounts, many of them taller than any peak in the Alps. Around their slopes, cold-water corals and sponge gardens form oases of life in otherwise sparse plains.",
+          "zh": "完成的图集记录了四万多座海底山，其中许多比阿尔卑斯山任何一座山峰都高。在它们的山坡周围，冷水珊瑚和海绵丛在原本荒芜的深海平原上形成一片片生命绿洲。"
+        },
+        {
+          "en": "The data is already reshaping conservation debates, because you cannot protect what you have not mapped. Negotiators drawing up new marine reserves are, for the first time, working from a nearly complete picture.",
+          "zh": "这些数据已经在重塑保护议题——因为无法保护尚未测绘之物。划定新海洋保护区的谈判者们第一次得以依据一幅近乎完整的图景开展工作。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "seamount",
+          "phonetic": "/ˈsiːmaʊnt/",
+          "meaning_zh": "海底山",
+          "example_en": "The atlas records more than forty thousand seamounts."
+        },
+        {
+          "word": "coalition",
+          "phonetic": "/ˌkoʊəˈlɪʃn/",
+          "meaning_zh": "联盟，联合体",
+          "example_en": "A coalition of research vessels mapped the deep sea."
+        },
+        {
+          "word": "sparse",
+          "phonetic": "/spɑːrs/",
+          "meaning_zh": "稀疏的，贫瘠的",
+          "example_en": "Life is sparse on the deep ocean plains."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "set out to do",
+          "meaning_zh": "着手做，立志做",
+          "example_en": "The team set out to map the entire seafloor."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "The data is already reshaping conservation debates, because you cannot protect what you have not mapped.",
+          "translation_zh": "这些数据已经在重塑保护议题——因为无法保护尚未测绘之物。",
+          "analysis_zh": "because 从句中包含 what 引导的宾语从句 what you have not mapped，作 protect 的宾语；泛指人称 you 使句子带有格言色彩，现在完成时 have not mapped 强调“至今仍未完成”的状态。"
+        }
+      ]
+    },
+    {
+      "slug": "urban-mining",
+      "source": "DW English",
+      "title_en": "Old Phones, New Chips: The Rise of Urban Mining",
+      "title_zh": "旧手机，新芯片：“城市采矿”的兴起",
+      "summary_en": "Recyclers are extracting gold, copper and rare metals from drawers full of forgotten electronics, and the economics finally add up.",
+      "summary_zh": "回收企业正从抽屉里被遗忘的旧电子产品中提取黄金、铜和稀有金属——这笔账如今终于算得过来了。",
+      "author": "Jonas Brehme",
+      "published_at": "2026-07-26 09:05",
+      "url": "https://example.com/demo/urban-mining",
+      "reading_minutes": 4,
+      "image": {
+        "src": "/assets/demo/demo-market.svg",
+        "alt_en": "Abstract bar chart rising",
+        "credit": "演示图片 · 正式版本将使用来源提供的新闻图片并标注出处"
+      },
+      "paragraphs": [
+        {
+          "en": "A tonne of discarded smartphones contains more gold than a tonne of ore from many working mines. For years that fact was a curiosity; rising metal prices and cheaper sorting robots have turned it into a business plan.",
+          "zh": "一吨废弃智能手机的含金量，超过许多在产矿山一吨矿石的含金量。多年来这只是个趣闻；而金属价格上涨和分拣机器人成本下降，把它变成了一份商业计划书。"
+        },
+        {
+          "en": "Inside a converted warehouse, conveyor belts shake loose screws and shattered glass while cameras flag circuit boards worth keeping. The plant processes in a day what its founders once sorted by hand in a year.",
+          "zh": "在一座改建仓库里，传送带抖落螺丝和碎玻璃，摄像头标记出值得保留的电路板。这家工厂一天处理的量，相当于创始人当年手工分拣一整年的量。"
+        },
+        {
+          "en": "Supporters call urban mining a rehearsal for a circular economy, in which yesterday's products become tomorrow's raw material. The bottleneck is no longer technology but collection: most old devices still never leave the drawer.",
+          "zh": "支持者称城市采矿是循环经济的一场预演：昨天的产品成为明天的原材料。瓶颈已不再是技术，而是回收本身——大多数旧设备至今仍未离开过抽屉。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "ore",
+          "phonetic": "/ɔːr/",
+          "meaning_zh": "矿石",
+          "example_en": "The ore is crushed before the metal is extracted."
+        },
+        {
+          "word": "bottleneck",
+          "phonetic": "/ˈbɑːtlnek/",
+          "meaning_zh": "瓶颈，制约环节",
+          "example_en": "Collection, not technology, is the real bottleneck."
+        },
+        {
+          "word": "circular economy",
+          "phonetic": "/ˌsɜːrkjələr ɪˈkɑːnəmi/",
+          "meaning_zh": "循环经济",
+          "example_en": "In a circular economy, waste becomes raw material."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "add up",
+          "meaning_zh": "（账目、道理）说得通，划得来",
+          "example_en": "With prices this high, the economics finally add up."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "Supporters call urban mining a rehearsal for a circular economy, in which yesterday's products become tomorrow's raw material.",
+          "translation_zh": "支持者称城市采矿是循环经济的一场预演：昨天的产品成为明天的原材料。",
+          "analysis_zh": "call + 宾语 + 宾语补足语结构（call A B，称 A 为 B）；in which 引导非限制性定语从句修饰 a circular economy，从句内 yesterday's 与 tomorrow's 的对仗强化“循环”意象。"
+        }
+      ]
+    },
+    {
+      "slug": "fog-harvesting",
+      "source": "Al Jazeera English",
+      "title_en": "Desert Farms Bet on Harvesting Water from Fog",
+      "title_zh": "沙漠农场押注“雾中取水”",
+      "summary_en": "Fine mesh nets strung across arid hillsides are catching enough droplets to irrigate orchards where rain rarely falls.",
+      "summary_zh": "张挂在干旱山坡上的细密网幕正收集足够的水珠，灌溉着少雨之地的果园。",
+      "author": "Leila Mansour",
+      "published_at": "2026-07-26 05:30",
+      "url": "https://example.com/demo/fog-harvesting",
+      "reading_minutes": 3,
+      "paragraphs": [
+        {
+          "en": "Before dawn, banks of fog roll off the cold sea and drift up the valley. By the time the sun burns through, rows of mesh panels have combed millions of droplets out of the air, channelling them into cisterns below.",
+          "zh": "黎明前，浓雾从冰冷的海面涌起，沿山谷向上漂移。待太阳驱散雾气时，一排排网幕已从空气中“梳”下数以百万计的水珠，汇入下方的蓄水池。"
+        },
+        {
+          "en": "The technique is old, but new materials have tripled the yield. On a good morning, a single hectare of nets can gather several thousand litres, enough to keep young olive trees alive through the dry season.",
+          "zh": "这项技术并不新鲜，但新材料让产水量翻了三倍。在条件好的清晨，一公顷网幕能收集数千升水，足以让幼橄榄树熬过旱季。"
+        },
+        {
+          "en": "Villagers who once queued for water trucks now debate what to plant next. Fog will never replace rain, researchers caution, yet at the margins of the desert, the margins are exactly what matter.",
+          "zh": "曾经排队等水车的村民，如今讨论的是接下来种什么。研究者提醒，雾水永远无法取代降雨；但在沙漠的边缘地带，恰恰是这些“边际”最为关键。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "arid",
+          "phonetic": "/ˈærɪd/",
+          "meaning_zh": "干旱的",
+          "example_en": "Few crops survive in such an arid climate."
+        },
+        {
+          "word": "cistern",
+          "phonetic": "/ˈsɪstərn/",
+          "meaning_zh": "蓄水池，水箱",
+          "example_en": "The nets channel droplets into stone cisterns."
+        },
+        {
+          "word": "yield",
+          "phonetic": "/jiːld/",
+          "meaning_zh": "产量；收益",
+          "example_en": "New materials tripled the water yield."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "bet on",
+          "meaning_zh": "把希望押在……上",
+          "example_en": "The farms are betting on fog as a water source."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "Fog will never replace rain, researchers caution, yet at the margins of the desert, the margins are exactly what matter.",
+          "translation_zh": "研究者提醒，雾水永远无法取代降雨；但在沙漠的边缘地带，恰恰是这些“边际”最为关键。",
+          "analysis_zh": "researchers caution 为插入语；yet 转折后，margins 一词双关——既指地理上的“边缘地带”，也指“边际增量”；what matter 是 what 引导的表语从句，exactly 加强语气。"
+        }
+      ]
+    },
+    {
+      "slug": "handwriting-classroom",
+      "source": "France 24 English",
+      "title_en": "Why Handwriting Still Matters in a Digital Classroom",
+      "title_zh": "数字课堂里，手写为何依然重要",
+      "summary_en": "New research suggests forming letters by hand wires the brain for reading in ways a keyboard cannot match.",
+      "summary_zh": "新研究表明：亲手写字对大脑阅读回路的塑造，是键盘无法替代的。",
+      "author": "Camille Roux",
+      "published_at": "2026-07-26 10:15",
+      "url": "https://example.com/demo/handwriting-classroom",
+      "reading_minutes": 3,
+      "paragraphs": [
+        {
+          "en": "In a classroom where every pupil owns a tablet, the teacher still begins the day with paper and pencils. She is not being nostalgic; she is following the evidence.",
+          "zh": "在一间人手一台平板电脑的教室里，老师仍用纸和铅笔开始一天的课程。她并非怀旧，而是在遵循科学证据。"
+        },
+        {
+          "en": "Brain-imaging studies keep finding the same pattern: when children draw letters by hand, reading circuits light up that stay quiet during typing. The slow, messy act of forming a shape appears to be part of how the shape is learned.",
+          "zh": "脑成像研究反复发现同一模式：孩子手写字母时，阅读相关脑区被点亮，而打字时这些区域保持沉寂。缓慢而笨拙的“造形”过程，似乎正是学会这个形状的一部分。"
+        },
+        {
+          "en": "Nobody is proposing to abandon keyboards, which children will use for the rest of their lives. The emerging consensus is narrower and more practical: in the first years of school, the pencil is not an obstacle to digital skills but a foundation for them.",
+          "zh": "没有人主张放弃键盘——孩子们此后一生都要用到它。正在形成的共识更狭窄也更务实：在入学最初几年，铅笔不是数字技能的障碍，而是它的地基。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "nostalgic",
+          "phonetic": "/nəˈstældʒɪk/",
+          "meaning_zh": "怀旧的",
+          "example_en": "She is not being nostalgic; she is following the evidence."
+        },
+        {
+          "word": "consensus",
+          "phonetic": "/kənˈsensəs/",
+          "meaning_zh": "共识",
+          "example_en": "A narrow consensus is emerging among researchers."
+        },
+        {
+          "word": "circuit",
+          "phonetic": "/ˈsɜːrkɪt/",
+          "meaning_zh": "回路；电路",
+          "example_en": "Reading circuits in the brain light up during handwriting."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "light up",
+          "meaning_zh": "亮起；（脑区）被激活",
+          "example_en": "Reading circuits light up when children write by hand."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "The emerging consensus is narrower and more practical: in the first years of school, the pencil is not an obstacle to digital skills but a foundation for them.",
+          "translation_zh": "正在形成的共识更狭窄也更务实：在入学最初几年，铅笔不是数字技能的障碍，而是它的地基。",
+          "analysis_zh": "冒号后为对 consensus 的具体说明；not A but B 结构（不是……而是……）连接两个并列表语 an obstacle 与 a foundation，介词短语 to digital skills 与 for them 分别依附于两个名词，them 回指 digital skills。"
+        }
+      ]
+    }
+  ],
+  "briefs": [
+    {
+      "title_en": "Regional lawmakers approve funding for cross-border cycling network",
+      "title_zh": "地区议会批准跨境自行车道网络拨款",
+      "source": "Reuters",
+      "url": "https://example.com/demo/brief-cycling"
+    },
+    {
+      "title_en": "Astronomers confirm smallest exoplanet found by amateur network",
+      "title_zh": "天文学家确认业余观测网络发现的最小系外行星",
+      "source": "The New York Times",
+      "url": "https://example.com/demo/brief-exoplanet"
+    },
+    {
+      "title_en": "Global tea prices ease after record harvest in highland regions",
+      "title_zh": "高地产区创纪录丰收后，全球茶价回落",
+      "source": "Reuters",
+      "url": "https://example.com/demo/brief-tea"
+    },
+    {
+      "title_en": "Museum returns century-old manuscripts to island community",
+      "title_zh": "博物馆向岛屿社区归还百年手稿",
+      "source": "The New York Times",
+      "url": "https://example.com/demo/brief-manuscripts"
+    }
+  ]
+}

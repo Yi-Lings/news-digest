@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% set nav_active = "today" if is_today else none %}
+
+{% macro bilingual(en, zh) %}
+{% if zh %}
+<span class="lang-en">{{ en }}</span>
+<span class="lang-zh">{{ zh }}</span>
+{% else %}
+<span>{{ en }}</span>
+{% endif %}
+{% endmacro %}
+
+{% block dateline %}
+<p class="dateline">
+  <span>{{ edition.date | date_zh }}</span>
+  <span class="dateline-sep" aria-hidden="true">·</span>
+  <span>{{ edition.date | weekday_zh }}</span>
+  <span class="dateline-sep" aria-hidden="true">·</span>
+  <span>主文章 {{ edition.articles | length }} 篇，简讯 {{ edition.briefs | length }} 条</span>
+</p>
+{% endblock %}
+
+{% block content %}
+{% if not is_today %}
+<p class="issue-notice">你正在阅读 {{ edition.date | date_zh }} 的往期内容。<a href="/">回到今日</a></p>
+{% endif %}
+
+<div class="filter-bar" data-filter-bar hidden>
+  <span class="filter-label">来源筛选</span>
+  <button type="button" class="chip" data-filter="*" aria-pressed="true">全部</button>
+  {% for source in edition.sources %}
+  <button type="button" class="chip" data-filter="{{ source }}" aria-pressed="false">{{ source }}</button>
+  {% endfor %}
+</div>
+
+{% if edition.articles %}
+{% set lead = edition.articles[0] %}
+<section class="front" aria-label="今日主文章">
+  <article class="lead" data-source="{{ lead.source }}">
+    {% if lead.image %}
+    <a class="lead-figure" href="/issues/{{ edition.date }}/{{ lead.slug }}.html" tabindex="-1" aria-hidden="true">
+      <img src="{{ lead.image.src }}" alt="{{ lead.image.alt_en }}" width="800" height="450" loading="lazy">
+    </a>
+    {% endif %}
+    <p class="card-meta">
+      <span class="source-tag">{{ lead.source }}</span>
+      <span class="read-time">约 {{ lead.reading_minutes }} 分钟</span>
+    </p>
+    <h2 class="lead-title">
+      <a href="/issues/{{ edition.date }}/{{ lead.slug }}.html">{{ bilingual(lead.title_en, lead.title_zh) }}</a>
+    </h2>
+    <p class="lead-summary">{{ bilingual(lead.summary_en, lead.summary_zh) }}</p>
+  </article>
+
+  <div class="front-side">
+    {% for article in edition.articles[1:3] %}
+    <article class="card" data-source="{{ article.source }}">
+      <p class="card-meta">
+        <span class="source-tag">{{ article.source }}</span>
+        <span class="read-time">约 {{ article.reading_minutes }} 分钟</span>
+      </p>
+      <h3 class="card-title">
+        <a href="/issues/{{ edition.date }}/{{ article.slug }}.html">{{ bilingual(article.title_en, article.title_zh) }}</a>
+      </h3>
+      <p class="card-summary">{{ bilingual(article.summary_en, article.summary_zh) }}</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+{% if edition.articles | length > 3 %}
+<section class="front-row" aria-label="更多主文章">
+  {% for article in edition.articles[3:] %}
+  <article class="card" data-source="{{ article.source }}">
+    <p class="card-meta">
+      <span class="source-tag">{{ article.source }}</span>
+      <span class="read-time">约 {{ article.reading_minutes }} 分钟</span>
+    </p>
+    <h3 class="card-title">
+      <a href="/issues/{{ edition.date }}/{{ article.slug }}.html">{{ bilingual(article.title_en, article.title_zh) }}</a>
+    </h3>
+    <p class="card-summary">{{ bilingual(article.summary_en, article.summary_zh) }}</p>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+{% endif %}
+
+{% if edition.briefs %}
+<section class="briefs" aria-label="简讯">
+  <h2 class="section-title">简讯</h2>
+  <ul class="brief-list">
+    {% for brief in edition.briefs %}
+    <li data-source="{{ brief.source }}">
+      <span class="source-tag">{{ brief.source }}</span>
+      <span class="brief-title">
+        {% if brief.url %}<a href="{{ brief.url }}" rel="noopener">{{ bilingual(brief.title_en, brief.title_zh) }}</a>
+        {% else %}{{ bilingual(brief.title_en, brief.title_zh) }}{% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<nav class="issue-nav" aria-label="日期导航">
+  <span class="filter-label">按日期浏览</span>
+  {% for date in all_dates %}
+  {% if date == edition.date %}
+  <span class="issue-link is-current" aria-current="date">{{ date }}</span>
+  {% else %}
+  <a class="issue-link" href="/issues/{{ date }}/">{{ date }}</a>
+  {% endif %}
+  {% endfor %}
+  <a class="issue-link" href="/archive/">全部归档 →</a>
+</nav>
+{% endblock %}

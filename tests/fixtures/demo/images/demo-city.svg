@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" role="img" aria-label="演示图片">
+  <rect width="800" height="450" fill="#f4f1e8"/>
+  <rect x="170" y="180" width="70" height="180" fill="#1c1b17"/>
+  <rect x="260" y="120" width="80" height="240" fill="#5c5a52"/>
+  <rect x="360" y="200" width="60" height="160" fill="#1c1b17"/>
+  <rect x="440" y="90" width="90" height="270" fill="#1c1b17"/>
+  <rect x="550" y="230" width="70" height="130" fill="#5c5a52"/>
+  <rect x="463" y="115" width="12" height="12" fill="#ae2f24"/>
+  <rect x="487" y="115" width="12" height="12" fill="#f4f1e8"/>
+  <rect x="463" y="140" width="12" height="12" fill="#f4f1e8"/>
+  <line x1="140" y1="360" x2="660" y2="360" stroke="#1c1b17" stroke-width="3"/>
+  <text x="400" y="420" text-anchor="middle" font-family="Georgia, serif" font-size="20" fill="#5c5a52">演示图片 · DEMO IMAGE</text>
+</svg>

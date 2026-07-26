@@ -1,0 +1,44 @@
+[project]
+name = "news-digest"
+description = "Daily bilingual news digest generator for English learning."
+requires-python = ">=3.13,<3.14"
+dynamic = ["version"]
+dependencies = [
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "feedparser>=6.0",
+    "trafilatura>=2.0",
+    "nh3>=0.2",
+    "tzdata>=2024.1",
+]
+
+[project.scripts]
+news-digest = "news_digest.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/news_digest/__init__.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not network'"
+markers = [
+    "network: 真实公网连通性测试，默认跳过，需显式 -m network 运行",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

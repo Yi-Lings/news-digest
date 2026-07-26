@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% set nav_active = "archive" %}
+
+{% block dateline %}
+<p class="dateline"><span>往期归档</span></p>
+{% endblock %}
+
+{% block content %}
+<section class="archive" aria-label="往期归档">
+  <h2 class="section-title">全部日期</h2>
+  <ul class="archive-list">
+    {% for entry in entries %}
+    <li class="archive-entry">
+      <a class="archive-date" href="/issues/{{ entry.date }}/">{{ entry.date }}</a>
+      <span class="archive-lead">
+        {% if entry.lead_title_zh %}
+        <span class="lang-en">{{ entry.lead_title_en }}</span>
+        <span class="lang-zh">{{ entry.lead_title_zh }}</span>
+        {% else %}
+        <span>{{ entry.lead_title_en }}</span>
+        {% endif %}
+      </span>
+      <span class="archive-count">主文章 {{ entry.article_count }} 篇 · 简讯 {{ entry.brief_count }} 条</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

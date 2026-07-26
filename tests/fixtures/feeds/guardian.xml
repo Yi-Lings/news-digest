@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:media="http://search.yahoo.com/mrss/" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+  <channel>
+    <title>World news | The Guardian</title>
+    <link>https://www.theguardian.com/world</link>
+    <description>Latest world news from the Guardian</description>
+    <language>en-gb</language>
+    <lastBuildDate>Sun, 26 Jul 2026 10:30:00 GMT</lastBuildDate>
+    <item>
+      <title>Wildfire evacuations expand across southern Europe as heatwave peaks</title>
+      <link>https://www.theguardian.com/world/2026/jul/26/wildfire-evacuations-southern-europe-heatwave?CMP=rss</link>
+      <description><![CDATA[<p>Authorities in three countries widened evacuation zones on Sunday as forecasters warned the heatwave would peak within days.</p>]]></description>
+      <dc:creator>Demo Correspondent</dc:creator>
+      <pubDate>Sun, 26 Jul 2026 08:45:00 GMT</pubDate>
+      <guid>https://www.theguardian.com/world/2026/jul/26/wildfire-evacuations-southern-europe-heatwave</guid>
+      <media:content width="140" url="https://i.guim.co.uk/img/media/demo140.jpg"/>
+      <media:content width="460" url="https://i.guim.co.uk/img/media/demo460.jpg"/>
+    </item>
+    <item>
+      <title>Night trains return to two more European capitals</title>
+      <link>https://www.theguardian.com/world/2026/jul/26/night-trains-return-european-capitals?CMP=rss</link>
+      <description><![CDATA[<p>Operators announced new sleeper routes as demand for low-carbon travel keeps climbing.</p>]]></description>
+      <dc:creator>Demo Reporter</dc:creator>
+      <pubDate>Sun, 26 Jul 2026 07:20:00 GMT</pubDate>
+      <guid>https://www.theguardian.com/world/2026/jul/26/night-trains-return-european-capitals</guid>
+      <media:content width="460" url="https://i.guim.co.uk/img/media/demo-train460.jpg"/>
+    </item>
+  </channel>
+</rss>

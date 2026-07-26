@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" role="img" aria-label="演示图片">
+  <rect width="800" height="450" fill="#f4f1e8"/>
+  <rect x="180" y="240" width="60" height="120" fill="#1c1b17"/>
+  <rect x="280" y="190" width="60" height="170" fill="#1c1b17"/>
+  <rect x="380" y="270" width="60" height="90" fill="#5c5a52"/>
+  <rect x="480" y="140" width="60" height="220" fill="#ae2f24"/>
+  <line x1="150" y1="360" x2="650" y2="360" stroke="#1c1b17" stroke-width="3"/>
+  <polyline points="180,220 310,170 440,240 540,110" fill="none" stroke="#1c1b17" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="400" y="420" text-anchor="middle" font-family="Georgia, serif" font-size="20" fill="#5c5a52">演示图片 · DEMO IMAGE</text>
+</svg>

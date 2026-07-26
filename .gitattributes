@@ -1,0 +1,15 @@
+# Force LF for all text files: content hashes for dedup and translation
+# cache must be identical between Windows dev and Linux production.
+* text=auto eol=lf
+
+# Windows batch files require CRLF
+*.bat text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff2 binary

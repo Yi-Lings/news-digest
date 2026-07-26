@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0">
+  <channel>
+    <title>Al Jazeera – All news</title>
+    <link>https://www.aljazeera.com</link>
+    <description>Al Jazeera English news feed</description>
+    <language>en</language>
+    <lastBuildDate>Sun, 26 Jul 2026 10:15:00 GMT</lastBuildDate>
+    <item>
+      <title>Desert farms expand fog harvesting as drought deepens</title>
+      <link>https://www.aljazeera.com/news/2026/7/26/desert-farms-expand-fog-harvesting-drought</link>
+      <description>Mesh nets on arid hillsides are catching enough moisture to irrigate orchards through the dry season.</description>
+      <pubDate>Sun, 26 Jul 2026 05:30:00 GMT</pubDate>
+      <guid>https://www.aljazeera.com/news/2026/7/26/desert-farms-expand-fog-harvesting-drought</guid>
+    </item>
+    <item>
+      <title>Container shipping lines turn to sails to cut fuel bills</title>
+      <link>https://www.aljazeera.com/economy/2026/7/26/container-shipping-sails-fuel-bills</link>
+      <description>Rigid sails and slower schedules are quietly transforming the industry that carries most world trade.</description>
+      <pubDate>Sun, 26 Jul 2026 04:55:00 GMT</pubDate>
+      <guid>https://www.aljazeera.com/economy/2026/7/26/container-shipping-sails-fuel-bills</guid>
+    </item>
+  </channel>
+</rss>

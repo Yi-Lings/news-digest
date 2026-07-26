@@ -1,0 +1,144 @@
+{
+  "date": "2026-07-25",
+  "articles": [
+    {
+      "slug": "libraries-third-places",
+      "source": "The Guardian",
+      "title_en": "Libraries Reinvent Themselves as the City's 'Third Place'",
+      "title_zh": "图书馆自我重塑，成为城市“第三空间”",
+      "summary_en": "Lending books is now the smallest part of the job. Modern libraries host job clubs, repair cafés and quiet corners for people with nowhere else to go.",
+      "summary_zh": "借书如今只是最小的一部分职能。现代图书馆里有求职互助会、维修咖啡角，还有留给无处可去者的安静角落。",
+      "author": "Priya Shah",
+      "published_at": "2026-07-25 08:40",
+      "url": "https://example.com/demo/libraries-third-places",
+      "reading_minutes": 4,
+      "image": {
+        "src": "/assets/demo/demo-science.svg",
+        "alt_en": "Abstract orbital diagram",
+        "credit": "演示图片 · 正式版本将使用来源提供的新闻图片并标注出处"
+      },
+      "paragraphs": [
+        {
+          "en": "On a wet Tuesday morning, the reading room is full before ten. Some visitors are here for novels; more are here for warmth, wifi, a printer, or simply a place where nobody expects them to buy anything.",
+          "zh": "一个阴雨的周二早晨，阅览室不到十点便座无虚席。有人为小说而来；更多人是为了暖气、无线网络、一台打印机，或者只是一个没人指望你消费的地方。"
+        },
+        {
+          "en": "Sociologists call such spots 'third places', distinct from home and work, and warn that cities are quietly running out of them. As cafés grow pricier and offices emptier, the public library has become the last room in town that belongs to everyone.",
+          "zh": "社会学家称这类场所为“第三空间”——区别于家庭与工作场所——并警告城市正悄悄失去它们。随着咖啡馆越来越贵、写字楼越来越空，公共图书馆成了城里最后一间属于所有人的房间。"
+        },
+        {
+          "en": "The librarians' job description has stretched accordingly, from cataloguing to counselling. Funding, as ever, has not stretched with it, and that tension now defines the debate over what a library is for.",
+          "zh": "图书馆员的职责范围随之拉长，从编目一路延伸到心理疏导。而经费一如既往并未同步增长——这种张力如今定义着“图书馆为何而存在”的争论。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "counselling",
+          "phonetic": "/ˈkaʊnsəlɪŋ/",
+          "meaning_zh": "心理疏导，咨询",
+          "example_en": "Staff now offer informal counselling to regular visitors."
+        },
+        {
+          "word": "catalogue",
+          "phonetic": "/ˈkætəlɔːɡ/",
+          "meaning_zh": "编目；目录",
+          "example_en": "Every new donation must be catalogued by hand."
+        },
+        {
+          "word": "tension",
+          "phonetic": "/ˈtenʃn/",
+          "meaning_zh": "张力；紧张关系",
+          "example_en": "The tension between demand and funding keeps growing."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "run out of",
+          "meaning_zh": "耗尽，逐渐失去",
+          "example_en": "Cities are quietly running out of shared spaces."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "As cafés grow pricier and offices emptier, the public library has become the last room in town that belongs to everyone.",
+          "translation_zh": "随着咖啡馆越来越贵、写字楼越来越空，公共图书馆成了城里最后一间属于所有人的房间。",
+          "analysis_zh": "as 引导伴随变化的时间状语从句，grow + 比较级表示渐变，offices (grow) emptier 承前省略动词；主句现在完成时 has become 表示状态达成，that belongs to everyone 为限定 the last room 的定语从句。"
+        }
+      ]
+    },
+    {
+      "slug": "container-shipping",
+      "source": "BBC News",
+      "title_en": "A Quiet Revolution Is Under Way in Container Shipping",
+      "title_zh": "集装箱航运正经历一场静悄悄的革命",
+      "summary_en": "Sails, batteries and slower schedules: the industry that carries ninety percent of world trade is relearning old tricks to cut its fuel bill.",
+      "summary_zh": "风帆、电池与放慢的船期：承载全球九成贸易的行业正在重拾旧智慧，只为削减燃料账单。",
+      "author": "Daniel Okafor",
+      "published_at": "2026-07-25 09:10",
+      "url": "https://example.com/demo/container-shipping",
+      "reading_minutes": 3,
+      "paragraphs": [
+        {
+          "en": "The newest vessel in the fleet looks almost old-fashioned: two rigid sails tower above the containers, trimming themselves to the wind under computer control. On a good crossing they shave a tenth off the fuel bill.",
+          "zh": "船队里最新的一艘船看上去几乎有些复古：两面硬质风帆高耸于集装箱之上，在计算机控制下自行调整迎风角度。顺利的航次里，它们能削减一成燃料开支。"
+        },
+        {
+          "en": "Nothing about the change is glamorous. Hulls are scrubbed more often, engines run slower, and routes bend to catch favourable currents. Together these unglamorous measures are cutting emissions faster than any single breakthrough.",
+          "zh": "这场变革毫无光鲜之处：船体清洗更勤，主机转速更低，航线也为顺流而弯折。这些不起眼的措施叠加起来，减排速度胜过任何单项技术突破。"
+        },
+        {
+          "en": "Shipping executives once treated fuel as weather, something endured rather than managed. A decade of volatile prices has ended that fatalism, and the ocean's oldest energy source is again its most modern.",
+          "zh": "航运高管们曾把燃料当作天气——只能忍受、无从管理。十年剧烈波动的油价终结了这种宿命论；海洋最古老的能源，如今再度成为最时兴的能源。"
+        }
+      ],
+      "vocabulary": [
+        {
+          "word": "hull",
+          "phonetic": "/hʌl/",
+          "meaning_zh": "船体，船壳",
+          "example_en": "A clean hull slides through the water with less drag."
+        },
+        {
+          "word": "volatile",
+          "phonetic": "/ˈvɑːlətl/",
+          "meaning_zh": "剧烈波动的；不稳定的",
+          "example_en": "A decade of volatile prices changed the industry's habits."
+        },
+        {
+          "word": "fatalism",
+          "phonetic": "/ˈfeɪtəlɪzəm/",
+          "meaning_zh": "宿命论",
+          "example_en": "High costs ended the industry's fatalism about fuel."
+        }
+      ],
+      "collocations": [
+        {
+          "phrase": "shave off",
+          "meaning_zh": "削减（少量比例、时间等）",
+          "example_en": "The sails shave a tenth off the fuel bill."
+        }
+      ],
+      "sentence_notes": [
+        {
+          "sentence_en": "Shipping executives once treated fuel as weather, something endured rather than managed.",
+          "translation_zh": "航运高管们曾把燃料当作天气——只能忍受、无从管理。",
+          "analysis_zh": "treat A as B 结构（把 A 当作 B）；something endured rather than managed 是 weather 的同位语，其中 endured 与 managed 均为过去分词作后置定语，rather than 连接并对比二者。"
+        }
+      ]
+    }
+  ],
+  "briefs": [
+    {
+      "title_en": "Alpine glacier monitoring network expands to fifty stations",
+      "title_zh": "阿尔卑斯冰川监测网络扩展至五十个站点",
+      "source": "Reuters",
+      "url": "https://example.com/demo/brief-glacier"
+    },
+    {
+      "title_en": "Historic lighthouse reopens as coastal writing residency",
+      "title_zh": "百年灯塔重新开放，变身海岸写作驻留地",
+      "source": "The New York Times",
+      "url": "https://example.com/demo/brief-lighthouse"
+    }
+  ]
+}
