@@ -11,9 +11,11 @@ from dataclasses import dataclass, field
 
 from news_digest.models import Article, Collocation, Paragraph, SentenceNote, VocabularyItem
 
-PROMPT_VERSION = "p1"
+PROMPT_VERSION = "p2"
 
 SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与教学助理。
+文风要求：规范的新闻书面语（参照通讯社译文风格），正式、克制、准确；
+避免口语化表达与网络用语；专有名词用通行译名，生僻者可在首次出现时括注英文。
 对给定英文新闻，输出一个 JSON 对象（不要任何 JSON 以外的文字），字段如下：
 - "title_zh": 中文标题，信达雅，不超过 40 字
 - "summary_zh": 中文摘要，一到两句

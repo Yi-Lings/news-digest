@@ -34,3 +34,6 @@ def test_subcommands_parse():
     assert args.yes is True
     args = parser.parse_args(["translate"])
     assert args.yes is False
+    assert args.redo == []
+    args = parser.parse_args(["translate", "--redo", "a", "--redo", "b", "--yes"])
+    assert args.redo == ["a", "b"]

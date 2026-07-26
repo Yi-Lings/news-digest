@@ -63,8 +63,12 @@ def translate_edition(
     limit: int | None = None,
     max_attempts: int = 2,
     on_progress: Callable[[str], None] | None = None,
+    redo: frozenset[str] = frozenset(),
 ) -> tuple[DailyEdition, TranslateReport]:
-    """翻译一期内容；单篇失败不阻塞其余，已翻译文章直接跳过（断点续跑）。"""
+    """翻译一期内容；单篇失败不阻塞其余，已翻译文章直接跳过（断点续跑）。
+
+    redo 中的 slug 强制重新请求（跳过缓存读取、覆盖已有结果），不受 limit 约束。
+    """
     progress = on_progress or (lambda message: None)
     cache_dir.mkdir(parents=True, exist_ok=True)
     report = TranslateReport(total=len(edition.articles))
@@ -72,18 +76,19 @@ def translate_edition(
     translated_count = 0
 
     for article in edition.articles:
-        if article.translated_by:
+        force = article.slug in redo
+        if article.translated_by and not force:
             report.already_done += 1
             articles.append(article)
             continue
-        if limit is not None and translated_count >= limit:
+        if not force and limit is not None and translated_count >= limit:
             articles.append(article)
             continue
 
         cache_file = cache_dir / f"{cache_key(article, translator.model)}.json"
         result: TranslationResult | None = None
 
-        if cache_file.is_file():
+        if not force and cache_file.is_file():
             try:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 result = _result_from_dict(cached, len(article.paragraphs))

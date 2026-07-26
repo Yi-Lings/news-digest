@@ -159,6 +159,22 @@ def test_invalid_response_not_cached_and_not_fatal(tmp_path):
     assert len(list(tmp_path.glob("*.json"))) == 1
 
 
+def test_redo_forces_fresh_call_and_overwrites(tmp_path):
+    edition = DailyEdition(date="2026-07-26", articles=[_article()])
+    first = FakeTranslator(_valid_raw())
+    translated, _ = translate_edition(edition, first, tmp_path)
+    assert translated.articles[0].translated_by == "fake-model@p1"
+
+    second = FakeTranslator(_valid_raw())
+    redone, report = translate_edition(
+        translated, second, tmp_path, redo=frozenset({"berlin-pride"})
+    )
+    # 已翻译 + 缓存存在的情况下仍强制走 API
+    assert second.calls == 1
+    assert report.api_calls == 1 and report.already_done == 0
+    assert redone.articles[0].translated_by == "fake-model@p1"
+
+
 def test_limit_controls_batch_size(tmp_path):
     import dataclasses
 

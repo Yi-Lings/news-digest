@@ -45,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, metavar="N", help="本次最多翻译几篇（受控测试用）"
     )
     translate.add_argument(
+        "--redo",
+        action="append",
+        default=[],
+        metavar="SLUG",
+        help="强制重翻指定文章（可多次使用），不受 --limit 约束",
+    )
+    translate.add_argument(
         "--yes", action="store_true", help="确认执行真实 API 调用（会产生费用）"
     )
 
@@ -63,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "build":
         return _run_build(args.fixtures)
     if args.command == "translate":
-        return _run_translate(args.date, args.limit, args.yes)
+        return _run_translate(args.date, args.limit, args.yes, frozenset(args.redo))
     if args.command == "preview":
         return _run_preview(args.port)
     parser.print_help()
@@ -91,7 +98,9 @@ def _run_preview(port: int) -> int:
     return 0
 
 
-def _run_translate(date: str | None, limit: int | None, yes: bool) -> int:
+def _run_translate(
+    date: str | None, limit: int | None, yes: bool, redo: frozenset[str]
+) -> int:
     import json
 
     from news_digest.config import (
@@ -121,11 +130,18 @@ def _run_translate(date: str | None, limit: int | None, yes: bool) -> int:
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     edition = edition_from_dict(payload["edition"])
-    pending = [a for a in edition.articles if not a.translated_by]
-    planned = len(pending) if limit is None else min(limit, len(pending))
+    known_slugs = {a.slug for a in edition.articles}
+    unknown = sorted(redo - known_slugs)
+    if unknown:
+        print(f"--redo 中不存在的 slug：{', '.join(unknown)}")
+        return 1
+    pending = [a for a in edition.articles if not a.translated_by and a.slug not in redo]
+    planned = (len(pending) if limit is None else min(limit, len(pending))) + len(redo)
     config = translation_config_from_env()
 
     print(f"日期：{edition.date}；文章 {len(edition.articles)} 篇，其中未翻译 {len(pending)} 篇")
+    if redo:
+        print(f"强制重翻：{', '.join(sorted(redo))}")
     print(f"接口：{config.base_url or '（未配置）'}；模型：{config.model or '（未配置）'}")
     print(f"本次计划翻译：{planned} 篇；预计 API 请求 {planned} 次（缓存命中会减少）")
     if not yes:
@@ -139,7 +155,7 @@ def _run_translate(date: str | None, limit: int | None, yes: bool) -> int:
         return 1
     try:
         updated, report = translate_edition(
-            edition, translator, config.cache_dir, limit=limit, on_progress=print
+            edition, translator, config.cache_dir, limit=limit, on_progress=print, redo=redo
         )
     except KeyboardInterrupt:
         print("\n已中断。已成功的篇目在缓存中，重跑同一命令会瞬时续接。")
