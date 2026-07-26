@@ -27,12 +27,17 @@ def test_canonicalize_strips_tracking_params():
         canonicalize_url("https://example.com/p?id=7&utm_source=x#frag")
         == "https://example.com/p?id=7"
     )
+    assert (
+        canonicalize_url("https://www.aljazeera.com/news/2026/7/26/story?traffic_source=rss")
+        == "https://www.aljazeera.com/news/2026/7/26/story"
+    )
 
 
 def test_non_article_urls_excluded():
     assert not is_article_url("https://www.bbc.co.uk/news/videos/c74gzknyyz2o")
     assert not is_article_url("https://www.dw.com/en/middle-east-live/live-78117732")
     assert not is_article_url("https://www.theguardian.com/world/live/2026/jul/26/blog")
+    assert not is_article_url("https://www.aljazeera.com/news/liveblog/2026/7/26/israel-raids")
     assert is_article_url("https://www.bbc.co.uk/news/articles/cevmdxz4872o")
     assert is_article_url("https://www.dw.com/en/olive-harvest-in-spain/a-78101422")
 

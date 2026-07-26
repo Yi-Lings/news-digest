@@ -232,7 +232,10 @@ def load_fetched_editions(data_dir: Path) -> list[DailyEdition]:
 def build_site(fixtures_dir: Path, config: BuildConfig) -> Path:
     """Render the demo site from fixture data, validate, then publish."""
     return build_editions(
-        load_fixture_editions(fixtures_dir), config, fixture_images=fixtures_dir / "images"
+        load_fixture_editions(fixtures_dir),
+        config,
+        fixture_images=fixtures_dir / "images",
+        demo=True,
     )
 
 
@@ -240,6 +243,7 @@ def build_editions(
     editions: list[DailyEdition],
     config: BuildConfig,
     fixture_images: Path | None = None,
+    demo: bool = False,
 ) -> Path:
     output_root = config.output_root
     build_dir = output_root / ".build-tmp"
@@ -247,7 +251,7 @@ def build_editions(
         shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True)
 
-    env = create_environment()
+    env = create_environment(demo=demo)
     latest = editions[0]
     all_dates = [edition.date for edition in editions]
 

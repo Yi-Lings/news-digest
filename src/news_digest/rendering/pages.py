@@ -22,14 +22,15 @@ def weekday_zh(date: str) -> str:
     return WEEKDAY_ZH[datetime.date(year, month, day).weekday()]
 
 
-def create_environment() -> Environment:
+def create_environment(*, demo: bool = False) -> Environment:
+    """demo=True 时页面渲染「样张·预览数据」标识与演示声明。"""
     env = Environment(
         loader=PackageLoader("news_digest", "templates"),
         autoescape=select_autoescape(["html"]),
         trim_blocks=True,
         lstrip_blocks=True,
     )
-    env.globals.update(site_name=SITE_NAME, site_tagline=SITE_TAGLINE)
+    env.globals.update(site_name=SITE_NAME, site_tagline=SITE_TAGLINE, is_demo=demo)
     env.filters["date_zh"] = format_date_zh
     env.filters["weekday_zh"] = weekday_zh
     return env

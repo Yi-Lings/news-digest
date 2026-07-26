@@ -123,6 +123,10 @@ def test_persisted_json_and_rebuild(fetched, tmp_path):
     index = (output_root / "current" / "index.html").read_text(encoding="utf-8")
     assert "Cheapcoding News" in index
     assert edition.articles[0].title_en in index
+    # 真实数据构建不得出现演示标识，页脚为正式来源声明
+    assert "样张" not in index
+    assert "预览数据" not in index
+    assert "版权归原出版方" in index
     article_page = release / "issues" / "2026-07-26" / f"{edition.articles[0].slug}.html"
     assert article_page.is_file()
     page_html = article_page.read_text(encoding="utf-8")

@@ -11,12 +11,30 @@ from news_digest.sources.registry import SourceConfig
 from news_digest.textutil import collapse_ws, html_to_text
 
 # 实测确认的各来源跟踪参数（BBC: at_*；DW: maca），加上通用营销参数。
-_TRACKING_PARAMS = {"maca", "cmp", "ns_campaign", "ns_mchannel", "ns_source", "ocid", "cmpid"}
+_TRACKING_PARAMS = {
+    "maca",
+    "cmp",
+    "ns_campaign",
+    "ns_mchannel",
+    "ns_source",
+    "ocid",
+    "cmpid",
+    "traffic_source",  # Al Jazeera 实测
+}
 _TRACKING_PREFIXES = ("utm_", "at_")
 
 # 非文章类页面（直播贴、视频、音频），对文字学习无用且提取结果污染严重。
-# 实测：BBC /news/videos/、DW /live-、France 24 视频页。
-_EXCLUDED_PATH_PARTS = ("/live/", "/live-", "/videos/", "/video/", "/av/", "/audio/", "/podcast")
+# 实测：BBC /news/videos/、DW /live-、AJE /news/liveblog/、France 24 视频页。
+_EXCLUDED_PATH_PARTS = (
+    "/live/",
+    "/live-",
+    "/liveblog",
+    "/videos/",
+    "/video/",
+    "/av/",
+    "/audio/",
+    "/podcast",
+)
 
 
 def is_article_url(url: str) -> bool:

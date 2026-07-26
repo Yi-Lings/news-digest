@@ -12,7 +12,9 @@
 <body>
 <a class="skip-link" href="#main">跳到正文</a>
 <div class="read-progress" data-read-progress aria-hidden="true"></div>
+{% if is_demo %}
 <div class="demo-stamp" role="note" aria-label="本页为预览数据">样张<span>预览数据</span></div>
+{% endif %}
 <header class="masthead">
   <div class="masthead-brand">
     <svg class="brandmark" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
@@ -50,7 +52,11 @@
 {% block content %}{% endblock %}
 </main>
 <footer class="footer">
+  {% if is_demo %}
   <p>本页所有标题、正文与图片均为演示用预览数据，非真实报道。正式版本中每篇文章将链接并标注原始来源。</p>
+  {% else %}
+  <p>内容取自各新闻来源的公开 RSS 与页面，版权归原出版方所有；每篇文章均标注并链接原始来源，中文与学习内容由 AI 生成（阶段 3 起提供）。</p>
+  {% endif %}
   <p>{{ site_name }} · {{ site_tagline }} · 个人英语学习用途，不公开转载受版权保护全文</p>
 </footer>
 <script src="/assets/app.js"></script>
