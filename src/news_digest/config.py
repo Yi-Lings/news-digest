@@ -26,7 +26,7 @@ def build_config_from_env(environ: Mapping[str, str] | None = None) -> BuildConf
     env = os.environ if environ is None else environ
     return BuildConfig(
         output_root=Path(env.get("NEWS_OUTPUT_PATH", "var/site")),
-        site_url=env.get("NEWS_SITE_URL", "http://127.0.0.1:8000").rstrip("/"),
+        site_url=env.get("NEWS_SITE_URL", "http://127.0.0.1:8618").rstrip("/"),
     )
 
 
@@ -72,6 +72,37 @@ def translation_config_from_env(environ: Mapping[str, str] | None = None) -> Tra
         # Claude 系后端强制要求 max_tokens；长文译文需要充足余量
         max_tokens=int(env.get("TRANSLATION_MAX_TOKENS", "8192")),
         cache_dir=Path(env.get("NEWS_DATA_DIR", "var/data")) / "translations",
+    )
+
+
+@dataclass(frozen=True)
+class SmtpConfig:
+    """SMTP 投递配置；仅 send-email 命令使用。"""
+
+    host: str
+    port: int
+    username: str
+    password: str
+    sender: str
+    recipients: tuple[str, ...]
+    use_tls: bool
+
+
+def smtp_config_from_env(environ: Mapping[str, str] | None = None) -> SmtpConfig:
+    env = os.environ if environ is None else environ
+    recipients = tuple(
+        address.strip()
+        for address in env.get("SMTP_RECIPIENTS", "").split(",")
+        if address.strip()
+    )
+    return SmtpConfig(
+        host=env.get("SMTP_HOST", ""),
+        port=int(env.get("SMTP_PORT", "465") or "465"),
+        username=env.get("SMTP_USERNAME", ""),
+        password=env.get("SMTP_PASSWORD", ""),
+        sender=env.get("SMTP_FROM", ""),
+        recipients=recipients,
+        use_tls=env.get("SMTP_USE_TLS", "true").strip().lower() != "false",
     )
 
 

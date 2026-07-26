@@ -117,6 +117,22 @@ def get_edition(conn: sqlite3.Connection, date: str) -> DailyEdition | None:
     )
 
 
+def mark_sent(conn: sqlite3.Connection, date: str, detail: str) -> None:
+    """记录某日简报已发送（meta 表，键 sent:<date>），用于防重复投递。"""
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (f"sent:{date}", detail),
+        )
+
+
+def sent_detail(conn: sqlite3.Connection, date: str) -> str | None:
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (f"sent:{date}",)
+    ).fetchone()
+    return row["value"] if row else None
+
+
 def list_dates(conn: sqlite3.Connection) -> list[str]:
     """articles 与 briefs 两表出现过的日期并集,降序。"""
     rows = conn.execute(

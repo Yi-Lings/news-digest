@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="color-scheme" content="light"></head>
+<body style="margin:0;padding:0;background:#fbfaf7;">
+<div style="max-width:600px;margin:0 auto;padding:26px 18px 34px;color:#1c1b17;font-family:Georgia,'Times New Roman','Noto Serif SC',serif;">
+  <div style="text-align:center;border-bottom:3px double #1c1b17;padding-bottom:14px;">
+    <div style="font-size:26px;font-weight:bold;letter-spacing:-0.5px;">Cheapcoding News</div>
+    <div style="font-size:12px;color:#5c5a52;font-family:'Microsoft YaHei','PingFang SC',sans-serif;letter-spacing:3px;margin-top:4px;">
+      每日双语 · {{ edition.date | date_zh }} · {{ edition.date | weekday_zh }}
+    </div>
+  </div>
+
+  {% for article in edition.articles %}
+  <div style="border-bottom:1px dotted #ddd8cc;padding:16px 0;">
+    <div style="font-size:11px;color:#ae2f24;font-family:'Microsoft YaHei',sans-serif;letter-spacing:1px;font-weight:bold;">
+      {{ article.source }}&nbsp;&nbsp;<span style="color:#5c5a52;font-weight:normal;">约 {{ article.reading_minutes }} 分钟</span>
+    </div>
+    <a href="{{ site_url }}/issues/{{ edition.date }}/{{ article.slug }}.html" style="text-decoration:none;color:#1c1b17;">
+      <div style="font-size:17px;font-weight:bold;line-height:1.35;margin-top:5px;">{{ article.title_en }}</div>
+      {% if article.title_zh %}
+      <div style="font-size:14px;color:#5c5a52;line-height:1.5;margin-top:3px;">{{ article.title_zh }}</div>
+      {% endif %}
+    </a>
+    <div style="font-size:13px;color:#3c3a33;line-height:1.7;margin-top:6px;">
+      {{ article.summary_zh or article.summary_en }}
+    </div>
+  </div>
+  {% endfor %}
+
+  {% if edition.briefs %}
+  <div style="padding:16px 0 4px;">
+    <div style="font-size:12px;color:#ae2f24;font-family:'Microsoft YaHei',sans-serif;letter-spacing:3px;font-weight:bold;">简讯 · {{ edition.briefs | length }} 条</div>
+    {% for brief in edition.briefs[:5] %}
+    <div style="font-size:13px;line-height:1.7;margin-top:8px;">
+      <span style="color:#ae2f24;font-size:11px;font-family:sans-serif;">{{ brief.source }}</span><br>
+      <a href="{{ brief.url }}" style="color:#1c1b17;">{{ brief.title_zh or brief.title_en }}</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div style="text-align:center;margin:26px 0 6px;">
+    <a href="{{ site_url }}/" style="display:inline-block;background:#1c1b17;color:#fbfaf7;text-decoration:none;font-family:'Microsoft YaHei',sans-serif;font-size:13px;padding:10px 26px;">在网站阅读全文与学习解析</a>
+  </div>
+
+  <div style="border-top:3px double #1c1b17;margin-top:22px;padding-top:10px;font-size:11px;color:#5c5a52;font-family:'Microsoft YaHei',sans-serif;line-height:1.8;">
+    内容取自各新闻来源公开 RSS 与页面，版权归原出版方；中文与学习内容由 AI 生成，仅供学习参考。<br>
+    Cheapcoding News · 个人英语学习用途
+  </div>
+</div>
+</body>
+</html>

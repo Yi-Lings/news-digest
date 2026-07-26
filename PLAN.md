@@ -11,7 +11,7 @@
 - 开发环境：当前 Windows 本机 `E:\new\news-digest`。
 - 生产环境：用户现有 Linux 服务器。
 - 最终入口：`https://news.cheapcoding.top`。
-- 本地 `http://127.0.0.1:8000` 仅用于开发验收，不作为最终运行方式。
+- 本地 `http://127.0.0.1:8618` 仅用于开发验收，不作为最终运行方式（原定 8000，因被本机常驻程序占用改为 8618）。
 
 本计划采用以下执行顺序：
 
@@ -52,7 +52,7 @@
 | 能力 | 本地开发 | 生产服务器 |
 |---|---|---|
 | 应用运行 | `uv run ...` 原生运行 | Docker Compose |
-| 页面访问 | `http://127.0.0.1:8000` | `https://news.cheapcoding.top` |
+| 页面访问 | `http://127.0.0.1:8618` | `https://news.cheapcoding.top` |
 | 静态文件服务 | Python 本地 HTTP server | 容器内 Nginx + 宿主机 Nginx |
 | 定时执行 | 手动 CLI；测试中模拟时间 | systemd timer |
 | 数据 | 本地 SQLite 和生成目录 | 持久化 volume |
@@ -192,7 +192,7 @@ tests/fixtures 或真实 RSS
  静态网页       .eml 预览
        |
        v
- http://127.0.0.1:8000
+ http://127.0.0.1:8618
 ```
 
 本地生成先写入 `var/site/releases/<日期-序号>`，校验通过后将 `var/site/current` 切换到新版本；生成失败时 `current` 不变，保留上一版页面。
@@ -390,7 +390,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 5：本地邮件预览与受控 SMTP 测试
 
-状态：`进行中`
+状态：`暂缓（2026-07-26 用户决定砍掉邮件功能，站点为唯一交付物；本阶段整体推迟，未写入任何邮件代码。日后恢复时按本节原范围执行）`
 
 工作范围：
 
@@ -551,3 +551,5 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 3 | 真实调用跑通 | 排障链：网关 504（Nginx 读超时截断长文生成）→ 改流式 SSE 根治（`97f2353`）；逐篇进度输出 + 180s 超时 + Ctrl+C 续接（`8511417`）。用户验收译文质量通过，意见「文风更官方」→ prompt 升 p2（规范新闻书面语）+ `--redo` 单篇重翻（`cf64a35`）；71 项测试 |
 | 2026-07-26 | 阶段 3 | 已验收 | 全量真实翻译 43/44 跑通（1 篇模型输出瑕疵 --redo 修复），p2 文风获认可；合并 main，`phase-3-accepted`（`cab25ef`） |
 | 2026-07-26 | 阶段 4 | 待验收 | 并行子代理完成存储层（SQLite 文章池，抓取刷新不覆盖翻译）与选题层（时效+全文+篇幅评分、来源配额≤2、相似标题互斥、确定性）；集成 `run` 一键流水线（抓取→选题→仅译 6 篇→构建），溢出候选转双语外链简讯，旧 JSON 自动导入；`daily.bat` 即完整流水线；89 项离线测试（`ed30579`） |
+| 2026-07-26 | 阶段 4 | 已验收 | 用户确认首页收敛（6 主文章 + 双语简讯）；合并 main，`phase-4-accepted` |
+| 2026-07-26 | 阶段 5 | 待验收 | 用户曾指示砍掉阶段 5（邮件），实现中途干净回退；随后决定恢复。完成：双语摘要邮件（HTML+纯文本多部件）、`preview-email` 输出 .eml/.html 到 var/mail、`send-email` 三重门（--yes + 站点已含当日 + meta 防重记录，--resend 可越过）、SMTP 465 隐式 SSL / 587 STARTTLS、fake SMTP 测试；本地预览地址统一为 8618（含 NEWS_SITE_URL 默认值）；95 项离线测试 |

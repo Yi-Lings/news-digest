@@ -37,3 +37,8 @@ def test_subcommands_parse():
     assert args.redo == []
     args = parser.parse_args(["translate", "--redo", "a", "--redo", "b", "--yes"])
     assert args.redo == ["a", "b"]
+    args = parser.parse_args(["preview-email"])
+    assert args.command == "preview-email" and args.date is None
+    args = parser.parse_args(["send-email", "--date", "2026-07-26", "--resend", "--yes"])
+    assert args.command == "send-email"
+    assert args.resend is True and args.yes is True
