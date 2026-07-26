@@ -9,19 +9,11 @@ if (-not $env:NEWS_HTTP_PROXY -and -not $env:HTTPS_PROXY) {
     $env:NEWS_HTTP_PROXY = "http://127.0.0.1:2231"
 }
 
-"[1/3] fetch real news"
-uv run news-digest fetch
+"[1/2] full pipeline: fetch -> select -> translate -> build"
+uv run news-digest run --yes
 if ($LASTEXITCODE -ne 0) {
-    "fetch failed - see the per-source report above."
-    exit 1
+    "pipeline reported failures - see output above (site may still have been built)."
 }
 
-"[2/3] build site"
-uv run news-digest build
-if ($LASTEXITCODE -ne 0) {
-    "build failed."
-    exit 1
-}
-
-"[3/3] open preview"
+"[2/2] open preview"
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "preview.ps1")

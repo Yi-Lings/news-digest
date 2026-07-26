@@ -83,13 +83,21 @@ class FetchConfig:
     window_hours: int
     timezone: str
     data_dir: Path
+    db_path: Path | None = None  # None 时取 data_dir/news.db
+
+    @property
+    def database(self) -> Path:
+        return self.db_path if self.db_path is not None else self.data_dir / "news.db"
 
 
 def fetch_config_from_env(environ: Mapping[str, str] | None = None) -> FetchConfig:
     env = os.environ if environ is None else environ
+    data_dir = Path(env.get("NEWS_DATA_DIR", "var/data"))
+    db_env = env.get("NEWS_DATABASE_PATH", "")
     return FetchConfig(
         proxy=env.get("NEWS_HTTP_PROXY") or None,
         window_hours=int(env.get("NEWS_FETCH_WINDOW_HOURS", "24")),
         timezone=env.get("NEWS_TIMEZONE") or "Asia/Shanghai",
-        data_dir=Path(env.get("NEWS_DATA_DIR", "var/data")),
+        data_dir=data_dir,
+        db_path=Path(db_env) if db_env else None,
     )
