@@ -6,6 +6,8 @@
 #       or the repo) -> server GHCR login via `gh auth token` pipe ->
 #       server-push.ps1 -AutoYes (upload + preflight + bootstrap) -> smoke check.
 
+param([switch]$Elevated)  # 内部使用：提权重启后置位，用于收尾时暂停窗口
+
 $KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
 $Server  = "root@cheapcoding.top"
 $Owner   = "yi-lings"
@@ -21,6 +23,7 @@ function Stop-OnError {
     if ($Code -ne 0) {
         Write-Host ""
         Write-Host "[FAIL] Step '$Step' exited with code $Code. Aborting." -ForegroundColor Red
+        if ($Elevated) { Read-Host "Press Enter to close" | Out-Null }
         exit $Code
     }
 }
@@ -35,17 +38,39 @@ foreach ($tool in @("ssh", "scp", "git", "gh")) {
 # ---- [0/6] ssh-agent: enter the key passphrase once ----
 Write-Host "[0/6] ssh-agent setup..."
 $svc = Get-Service ssh-agent -ErrorAction SilentlyContinue
+$agentReady = $false
 if ($svc) {
-    if ($svc.StartType -eq "Disabled") { Set-Service ssh-agent -StartupType Manual }
-    if ($svc.Status -ne "Running") { Start-Service ssh-agent }
+    try {
+        if ($svc.StartType -eq "Disabled") {
+            Set-Service ssh-agent -StartupType Manual -ErrorAction Stop
+        }
+        if ((Get-Service ssh-agent).Status -ne "Running") {
+            Start-Service ssh-agent -ErrorAction Stop
+        }
+        $agentReady = $true
+    } catch {
+        $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+        $isAdmin = $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Write-Host "Enabling ssh-agent needs admin once; relaunching elevated - accept the UAC prompt." -ForegroundColor Yellow
+            Start-Process powershell -Verb RunAs -ArgumentList @(
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated"
+            )
+            exit 0
+        }
+        Write-Host "[FAIL] Cannot enable ssh-agent even as admin: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "[NOTE] ssh-agent service not found; ssh may prompt for the passphrase several times." -ForegroundColor Yellow
+}
+if ($agentReady) {
     ssh-add -l *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Enter the SSH key passphrase once; it stays in ssh-agent afterwards."
         ssh-add $KeyPath
         Stop-OnError $LASTEXITCODE "ssh-add"
     }
-} else {
-    Write-Host "[NOTE] ssh-agent service not found; ssh may prompt for the passphrase several times." -ForegroundColor Yellow
 }
 
 # ---- [1/6] push branches and tags (tag v* triggers the CI image build) ----
@@ -127,4 +152,5 @@ ssh -i $KeyPath $Server "curl -sk -o /dev/null -w 'https status: %{http_code}\n'
 
 Write-Host ""
 Write-Host "[DONE] https://news.cheapcoding.top/  (daily rebuild: 08:00 Asia/Shanghai)"
+if ($Elevated) { Read-Host "Press Enter to close" | Out-Null }
 exit 0
