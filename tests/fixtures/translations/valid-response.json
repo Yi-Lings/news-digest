@@ -1,0 +1,43 @@
+{
+  "title_zh": "柏林骄傲游行冲撞事件：目前已知的情况",
+  "summary_zh": "一辆汽车周六晚冲入柏林骄傲活动人群，造成一死十六伤，警方正在全城搜捕嫌疑人。",
+  "paragraphs_zh": [
+    "德国首都一场骄傲活动的现场，周六晚一辆汽车被驾入人群，造成至少十六人受伤、一人死亡，警方搜捕正在进行。",
+    "调查人员表示，事发前几分钟一道路障因救护车通行被挪开，涉事车辆随即加速冲过缺口驶向游行路线。",
+    "官方呼吁目击者将视频上传至专用平台，并告诫公众在搜捕结束前不要传播关于嫌疑人身份的未经证实的说法。"
+  ],
+  "vocabulary": [
+    {
+      "word": "manhunt",
+      "phonetic": "/ˈmænhʌnt/",
+      "meaning_zh": "（对逃犯的）搜捕",
+      "example_en": "A police manhunt is under way in the German capital."
+    },
+    {
+      "word": "barrier",
+      "phonetic": "/ˈbæriər/",
+      "meaning_zh": "路障，屏障",
+      "example_en": "The vehicle accelerated through a barrier."
+    },
+    {
+      "word": "unverified",
+      "phonetic": "/ʌnˈverɪfaɪd/",
+      "meaning_zh": "未经证实的",
+      "example_en": "Officials cautioned against sharing unverified claims."
+    }
+  ],
+  "collocations": [
+    {
+      "phrase": "under way",
+      "meaning_zh": "正在进行中",
+      "example_en": "A police manhunt is under way."
+    }
+  ],
+  "sentence_notes": [
+    {
+      "sentence_en": "Investigators said the vehicle approached the parade route shortly before ten o'clock and accelerated through a barrier that had been moved minutes earlier to let an ambulance pass.",
+      "translation_zh": "调查人员说，车辆在将近十点时接近游行路线，并加速冲过一道几分钟前为救护车放行而被挪开的路障。",
+      "analysis_zh": "said 后为省略 that 的宾语从句，从句内 approached 与 accelerated 并列；that had been moved... 是修饰 barrier 的定语从句，用过去完成时被动语态表示动作先于主句，to let an ambulance pass 为目的状语。"
+    }
+  ]
+}

@@ -72,6 +72,7 @@ class Article:
     sentence_notes: list[SentenceNote] = field(default_factory=list)
     image: ArticleImage | None = None
     content_status: str = "full"  # "full" | "summary"
+    translated_by: str = ""  # 例如 "gpt-4o-mini@p1"；空表示未翻译
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ def article_from_dict(data: dict[str, Any]) -> Article:
         url=data["url"],
         reading_minutes=int(data["reading_minutes"]),
         content_status=data.get("content_status", "full"),
+        translated_by=data.get("translated_by", ""),
         paragraphs=[Paragraph(en=p["en"], zh=p.get("zh", "")) for p in data["paragraphs"]],
         vocabulary=[
             VocabularyItem(
@@ -162,6 +164,7 @@ def article_to_dict(article: Article) -> dict[str, Any]:
         "url": article.url,
         "reading_minutes": article.reading_minutes,
         "content_status": article.content_status,
+        "translated_by": article.translated_by,
         "paragraphs": [{"en": p.en, "zh": p.zh} for p in article.paragraphs],
         "vocabulary": [vars(v) for v in article.vocabulary],
         "collocations": [vars(c) for c in article.collocations],

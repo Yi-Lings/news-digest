@@ -28,3 +28,9 @@ def test_subcommands_parse():
     args = parser.parse_args(["fetch", "--window-hours", "12"])
     assert args.command == "fetch"
     assert args.window_hours == 12
+    args = parser.parse_args(["translate", "--limit", "3", "--yes"])
+    assert args.command == "translate"
+    assert args.limit == 3
+    assert args.yes is True
+    args = parser.parse_args(["translate"])
+    assert args.yes is False
