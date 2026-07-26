@@ -5,6 +5,7 @@
 """
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -20,6 +21,20 @@ USER_AGENT = f"news-digest/{__version__} (personal English-learning digest)"
 
 class FetchError(RuntimeError):
     """Any fetch failure the pipeline should degrade on."""
+
+
+def proxy_active(explicit_proxy: str | None) -> bool:
+    """代理是否生效：显式配置或环境变量（HTTPS_PROXY 等）任一即视为生效。
+
+    fake-ip 模式的代理（如 Clash 系）会让本地 DNS 返回 198.18.0.0/15 假地址，
+    此时本地公网校验无意义且必然误拦，应交由代理侧解析；域名 allowlist 不受影响。
+    """
+    if explicit_proxy:
+        return True
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        if os.environ.get(name) or os.environ.get(name.lower()):
+            return True
+    return False
 
 
 def build_client(proxy: str | None = None) -> httpx.Client:
@@ -56,7 +71,7 @@ def assert_public_host(host: str) -> None:
             raise FetchError(f"目标解析到非公网地址，已阻断：{host} -> {address}")
 
 
-def _validate_url(url: str, allowed_domains: tuple[str, ...]) -> None:
+def _validate_url(url: str, allowed_domains: tuple[str, ...], check_ip: bool) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise FetchError(f"不允许的协议：{url}")
@@ -64,14 +79,24 @@ def _validate_url(url: str, allowed_domains: tuple[str, ...]) -> None:
         raise FetchError(f"无效 URL：{url}")
     if not host_allowed(parsed.hostname, allowed_domains):
         raise FetchError(f"域名不在 allowlist：{parsed.hostname}")
-    assert_public_host(parsed.hostname)
+    if check_ip:
+        assert_public_host(parsed.hostname)
 
 
-def safe_get(client: httpx.Client, url: str, allowed_domains: tuple[str, ...]) -> bytes:
-    """GET with per-hop validation, redirect cap, and response size cap."""
+def safe_get(
+    client: httpx.Client,
+    url: str,
+    allowed_domains: tuple[str, ...],
+    *,
+    skip_ip_check: bool = False,
+) -> bytes:
+    """GET with per-hop validation, redirect cap, and response size cap.
+
+    skip_ip_check 仅应在代理生效时为 True（见 proxy_active）。
+    """
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        _validate_url(current, allowed_domains)
+        _validate_url(current, allowed_domains, check_ip=not skip_ip_check)
         try:
             with client.stream("GET", current) as response:
                 if response.is_redirect:

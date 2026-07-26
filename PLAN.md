@@ -511,7 +511,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 以下项目不阻塞阶段 0；在对应阶段开始前确认即可：
 
-- GitHub 私有仓库名称或 URL：最迟在阶段 1 验收前确认。
+- GitHub 私有仓库名称或 URL：已确认 `news-digest`（2026-07-26，滞后于原定的阶段 1 验收前）。
 - 站点显示名称、默认主文章数量：阶段 1 前确认。
 - 发布与发信时区：当前本地环境为 `Asia/Hong_Kong`，原服务器计划为 `Asia/Shanghai`；两者同为 UTC+8 无实际偏移差异，阶段 4 前指定其一写入配置即可。
 - SUB2API base URL、模型、单次测试文章数和费用边界：阶段 3 真实调用前确认。
@@ -533,3 +533,6 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 1 | 已验收 | Windows 端 pytest 14 项全绿（junction 实测通过）、8618 端口预览确认；视觉两轮迭代后用户确认：印章方案被否（“俗”），改为抽象编辑风字组标（对照双栏隐喻）+ favicon，动效与页面质感获认可；`preview.bat` 作为日常预览入口；排查沉淀：PyPI 需阿里镜像、8080 被占固定用 8618 |
 | 2026-07-26 | 阶段 2 | 进行中 | 开始真实新闻获取与正文提取；GitHub 远程与首次提交仍未补齐（已到期，等待用户提供 git 身份与仓库名） |
 | 2026-07-26 | 阶段 2 | 待验收 | 完成：来源注册表（6 全文 + NYT 简讯，Reuters 因无公开 RSS 暂缓）、加固 HTTP 层（allowlist/私网阻断/重定向与大小上限）、feedparser 规范化与跟踪参数剥离（BBC/DW 真实样本实测）、三重去重、trafilatura+nh3 提取清洗、摘要降级、`fetch` 子命令与 var/data 落盘、EN-only 渲染兼容；42 项离线测试 + 7 项 network 冒烟（默认跳过）；ruff 干净 |
+| 2026-07-26 | Git | 完成本地历史 | 配置身份 Yi-Lings；首次提交 `614cf46` 合并阶段 0-2 历史（远程补建较晚，单一提交入库，提交信息已注明）；仓库名确认 `news-digest`，推送与私有仓库创建由用户以 gh 执行；自阶段 3 起恢复阶段分支 + `phase-N-accepted` 标签流程 |
+| 2026-07-26 | Git | 远程同步完成 | 账号下已存在服务器时期的同名旧仓库，采用覆盖方案：`614cf46` 强推至 `https://github.com/Yi-Lings/news-digest`（旧 `633e000` 被取代），`main` 已跟踪 `origin/main` |
+| 2026-07-26 | 阶段 2 | 修复 | 用户首次真实抓取全源被阻断：本机代理为 fake-ip 模式（DNS 返回 198.18.0.0/15 假地址），私网阻断误拦。修复：`proxy_active` 检测显式/环境代理，代理生效时本地 DNS 公网校验交由代理（域名 allowlist 不变，生产无代理时防护完整）；pytest 临时目录迁至 `.pytest-tmp` 规避 Windows %TEMP% 清理崩溃；44 项离线测试全绿 |

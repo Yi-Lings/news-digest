@@ -30,7 +30,7 @@ from news_digest.rendering.pages import (
 )
 from news_digest.selection.dedupe import dedupe
 from news_digest.sources.feeds import parse_feed
-from news_digest.sources.http import FetchError, build_client, safe_get
+from news_digest.sources.http import FetchError, build_client, proxy_active, safe_get
 from news_digest.sources.registry import SOURCES, SourceConfig
 from news_digest.textutil import slugify
 
@@ -63,11 +63,14 @@ def _collect_candidates(
     now: datetime.datetime,
     window_hours: int,
     report: FetchReport,
+    skip_ip_check: bool,
 ) -> list[Candidate]:
     collected: list[Candidate] = []
     for source in sources:
         try:
-            raw = safe_get(client, source.feed_url, source.allowed_domains)
+            raw = safe_get(
+                client, source.feed_url, source.allowed_domains, skip_ip_check=skip_ip_check
+            )
             candidates = [
                 candidate
                 for candidate in parse_feed(raw, source)
@@ -87,12 +90,15 @@ def _candidate_to_article(
     candidate: Candidate,
     source: SourceConfig,
     report: FetchReport,
+    skip_ip_check: bool,
 ) -> Article:
     paragraphs: list[str] = []
     author = candidate.author
     image_url = candidate.image_url
     try:
-        page = safe_get(client, candidate.url, source.allowed_domains)
+        page = safe_get(
+            client, candidate.url, source.allowed_domains, skip_ip_check=skip_ip_check
+        )
         extracted = extract_body(page.decode("utf-8", errors="replace"), candidate.url)
     except FetchError:
         extracted = None
@@ -144,20 +150,23 @@ def fetch_daily(
     now = now or datetime.datetime.now(datetime.UTC)
     own_client = client is None
     client = client or build_client(config.proxy)
+    skip_ip = proxy_active(config.proxy)
     try:
         full = tuple(s for s in SOURCES if s.kind == "full")
         brief = tuple(s for s in SOURCES if s.kind == "brief")
         by_key = {s.key: s for s in SOURCES}
 
         candidates = dedupe(
-            _collect_candidates(client, full, now, config.window_hours, report)
+            _collect_candidates(client, full, now, config.window_hours, report, skip_ip)
         )
         articles = [
-            _candidate_to_article(client, candidate, by_key[candidate.source_key], report)
+            _candidate_to_article(
+                client, candidate, by_key[candidate.source_key], report, skip_ip
+            )
             for candidate in candidates
         ]
         brief_candidates = dedupe(
-            _collect_candidates(client, brief, now, config.window_hours, report)
+            _collect_candidates(client, brief, now, config.window_hours, report, skip_ip)
         )
         briefs = [
             BriefItem(title_en=c.title, source=c.source_name, url=c.url)

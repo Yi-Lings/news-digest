@@ -30,7 +30,7 @@ path = "src/news_digest/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not network'"
+addopts = "-m 'not network' --basetemp=.pytest-tmp"
 markers = [
     "network: 真实公网连通性测试，默认跳过，需显式 -m network 运行",
 ]

@@ -58,7 +58,14 @@ def _run_fetch(window_hours: int | None) -> int:
     if window_hours is not None:
         config = dataclasses.replace(config, window_hours=window_hours)
 
-    print(f"抓取窗口：最近 {config.window_hours} 小时；时区：{config.timezone}")
+    from news_digest.sources.http import proxy_active
+
+    proxy_note = (
+        "代理已生效，本地 DNS 公网校验交由代理处理"
+        if proxy_active(config.proxy)
+        else "未检测到代理，本地 DNS 公网校验生效"
+    )
+    print(f"抓取窗口：最近 {config.window_hours} 小时；时区：{config.timezone}；{proxy_note}")
     edition, report = fetch_daily(config)
     for source, status in report.per_source.items():
         print(f"  {source}: {status}")

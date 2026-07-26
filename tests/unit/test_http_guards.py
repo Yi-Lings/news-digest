@@ -7,6 +7,7 @@ from news_digest.sources.http import (
     FetchError,
     assert_public_host,
     host_allowed,
+    proxy_active,
     safe_get,
 )
 
@@ -93,3 +94,24 @@ def test_oversized_response_rejected(monkeypatch):
     with _client(lambda request: httpx.Response(200, content=big)) as client:
         with pytest.raises(FetchError, match="大小上限"):
             safe_get(client, "https://example.com/big", ALLOWED)
+
+
+def test_proxy_active_detection(monkeypatch):
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    assert not proxy_active(None)
+    assert proxy_active("http://127.0.0.1:2231")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    assert proxy_active(None)
+
+
+def test_skip_ip_check_delegates_dns_to_proxy(monkeypatch):
+    def boom(host):
+        raise FetchError("本地 DNS 校验不应被调用")
+
+    monkeypatch.setattr("news_digest.sources.http.assert_public_host", boom)
+    with _client(lambda request: httpx.Response(200, content=b"ok")) as client:
+        assert safe_get(client, "https://example.com/x", ALLOWED, skip_ip_check=True) == b"ok"
+        with pytest.raises(FetchError, match="不应被调用"):
+            safe_get(client, "https://example.com/x", ALLOWED)
