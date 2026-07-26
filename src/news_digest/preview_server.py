@@ -202,6 +202,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 - 基类命名
+        if self.path.startswith("/admin/api/"):
+            # API 只接受 POST（providers 除外）；浏览器误 GET 时引导回面板而非裸 JSON
+            if self.path != "/admin/api/providers":
+                self.send_response(302)
+                self.send_header("Location", "/admin/")
+                self.end_headers()
+                return
         if self.path in ("/admin", "/admin/"):
             if not self._authed():
                 self._html(LOGIN_HTML)
