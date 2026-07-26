@@ -460,6 +460,7 @@ uv run python -m http.server 8000 --directory var/site/current
 - 配置 Nginx、HTTPS、登录保护、`noindex`、CSP、安全响应头和限速。
 - 配置 systemd timer 调用 `docker compose run --rm news-worker`。
 - 部署生产模型切换面板（已确认形态：仅切换预置档案，密钥不经网页传输；复用本地 `/admin/` 面板裁剪版，置于登录保护与 HTTPS 之后，仅绑定宿主 `127.0.0.1` 由 Nginx 代理）。
+- 一键 Docker 部署包（用户 2026-07-26 增补需求，类 sub2api）：CI 在发布时将 `deploy/` 打包为 Release 附件，配 `install.sh` 实现服务器端一条命令部署；排在首次部署跑通之后实现，避免在部署中途变更 CI。
 - 使用非 root 用户、只读根文件系统、移除 capabilities 并启用 `no-new-privileges`。
 - 设置 worker 256 MB、web 32 MB 的初始内存上限，并根据实测调整。
 - 配置日志轮转、健康检查、持久化目录、备份和版本回滚。
