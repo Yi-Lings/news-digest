@@ -26,14 +26,16 @@ def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
         shutil.rmtree(target)
     shutil.move(str(build_dir), str(target))
     switch_current(output_root, target)
-    _prune_releases(releases)
+    _prune_releases(releases, keep_name=target.name)
     return target
 
 
-def _prune_releases(releases: Path) -> None:
-    """按名称排序（日期-序号即时间序）删除最旧的多余版本；current 永远指向最新，不受影响。"""
+def _prune_releases(releases: Path, keep_name: str) -> None:
+    """按名称排序删除最旧的多余版本；无论排序结果如何，绝不删除刚发布的版本。"""
     names = sorted(entry.name for entry in releases.iterdir() if entry.is_dir())
     for name in names[:-_KEEP_RELEASES]:
+        if name == keep_name:
+            continue
         shutil.rmtree(releases / name)
 
 

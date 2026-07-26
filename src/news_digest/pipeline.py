@@ -392,11 +392,17 @@ def build_editions(
 
 
 def _release_name(output_root: Path, date: str) -> str:
+    """当日最大序号 +1。不得复用空缺序号：修剪按名称排序删最旧，
+    复用低序号会让新版本被误判为最旧而在发布后立即被删除（悬空 current → 404）。"""
     releases = output_root / "releases"
-    sequence = 1
-    while (releases / f"{date}-{sequence:02d}").exists():
-        sequence += 1
-    return f"{date}-{sequence:02d}"
+    highest = 0
+    if releases.is_dir():
+        prefix = f"{date}-"
+        for entry in releases.iterdir():
+            suffix = entry.name.removeprefix(prefix)
+            if entry.name.startswith(prefix) and suffix.isdigit():
+                highest = max(highest, int(suffix))
+    return f"{date}-{highest + 1:02d}"
 
 
 def _validate_build(build_dir: Path) -> None:

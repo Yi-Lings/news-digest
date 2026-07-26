@@ -21,7 +21,7 @@
 # 参数化部署：以下 ND_* 环境变量在执行前 export 即可覆盖默认值（bootstrap.sh 读取，
 # 经 exec 链自动透传），换域名/换端口/换目录部署不用改任何脚本：
 #   ND_OWNER          GHCR 命名空间（全小写）        默认 yi-lings
-#   ND_VERSION        镜像 tag                      默认 v0.6.0rc5
+#   ND_VERSION        镜像 tag                      默认 v0.6.0rc6
 #   ND_APP_DIR        服务器部署目录                 默认 /srv/news-digest
 #   ND_DOMAIN         站点域名（nginx/certbot/站点URL） 默认 news.cheapcoding.top
 #   ND_WEB_PORT       web 宿主回环端口               默认 8618
