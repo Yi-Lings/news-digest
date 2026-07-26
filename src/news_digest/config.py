@@ -57,6 +57,7 @@ class TranslationConfig:
     api_key: str
     model: str
     timeout_seconds: float
+    max_tokens: int
     cache_dir: Path
 
 
@@ -67,6 +68,8 @@ def translation_config_from_env(environ: Mapping[str, str] | None = None) -> Tra
         api_key=env.get("TRANSLATION_API_KEY", ""),
         model=env.get("TRANSLATION_MODEL", ""),
         timeout_seconds=float(env.get("TRANSLATION_TIMEOUT_SECONDS", "60")),
+        # Claude 系后端强制要求 max_tokens；长文译文需要充足余量
+        max_tokens=int(env.get("TRANSLATION_MAX_TOKENS", "8192")),
         cache_dir=Path(env.get("NEWS_DATA_DIR", "var/data")) / "translations",
     )
 

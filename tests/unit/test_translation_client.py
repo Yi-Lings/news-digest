@@ -1,5 +1,6 @@
 """OpenAI 兼容客户端（MockTransport，离线）。"""
 
+import json
 from pathlib import Path
 
 import httpx
@@ -16,6 +17,7 @@ def _config(**overrides) -> TranslationConfig:
         "api_key": "test-key",
         "model": "demo-model",
         "timeout_seconds": 10.0,
+        "max_tokens": 8192,
         "cache_dir": Path("unused"),
     }
     values.update(overrides)
@@ -49,6 +51,8 @@ def test_successful_call_returns_content():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/chat/completions")
         assert request.headers["authorization"] == "Bearer test-key"
+        payload = json.loads(request.content)
+        assert payload["max_tokens"] == 8192  # Anthropic 兼容后端必填
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},

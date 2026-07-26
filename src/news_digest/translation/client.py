@@ -49,6 +49,7 @@ class ApiTranslator:
         payload = {
             "model": self._config.model,
             "temperature": 0.3,
+            "max_tokens": self._config.max_tokens,  # Anthropic 兼容后端必填
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": build_user_prompt(article)},
@@ -61,7 +62,8 @@ class ApiTranslator:
                 f"请求失败：{error.__class__.__name__}（{article.slug}）"
             ) from error
         if response.status_code != 200:
-            raise TranslationError(f"HTTP {response.status_code}（{article.slug}）")
+            detail = response.text[:160].replace("\n", " ")
+            raise TranslationError(f"HTTP {response.status_code}（{article.slug}）{detail}")
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, ValueError) as error:
