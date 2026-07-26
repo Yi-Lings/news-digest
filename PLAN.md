@@ -436,7 +436,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 7：CI 镜像构建与服务器部署
 
-状态：`rc5 已上线（面板四项修复生效，创刊号 44 篇已入库）；生产发现发布器自删缺陷（build 后站点 404，用户手动切 current 恢复），修复已定版 rc6 待 deploy.bat 升级；升级后重跑 build 使创刊号出归档 → 观察期（两个生成周期 + 回滚演练）→ 1.0.0`
+状态：`rc6 已上线且全面复核通过：发布器修复实证（序号 -08 递增、current 自动接管）；创刊号进归档（三页外网验证，12 条缓存复水译文在线）；面板三连验收完成（用户）+ 外网安全复核 7 项全绿。进入观察期：07-28/29 两个 08:00 自动周期 + 回滚演练 + send-email 复测 → merge main + 1.0.0`
 
 前置条件：
 
@@ -565,3 +565,4 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 6 | 进行中 | 用户指示并发推进。子代理C：docs/OPERATIONS.md 运维文档（日常/配置/踩坑/恢复/备份/重建，104 行）；子代理D：阶段 7 部署工件模板 8 件（Dockerfile×2、compose、systemd timer、nginx、GitHub Actions release、部署 README，全部固定版本+非 root+只读+内存上限，标注"服务器实测前不视为最终版"）；主线：`uv sync --locked` 通过、95→96 项测试、许可证核查（全为 BSD/MIT/Apache 宽松许可）、敏感信息扫描干净、fixture 构建 0.36s/峰值 50MB、实测单期站点 ~300KB 与 DB 400KB（年归档远低于 1GB 目标）、新增 releases 保留 5 版修剪、版本升至 `0.6.0rc1`；send-email 站点检查在特殊文件系统上的崩溃改为干净报错 |
 | 2026-07-27 | 阶段 7 | rc4 分叉→rc5 上线 | 用户实测定位标签分叉：本地 rc4 重打过标签（a72ff52，含 import-edition），远端仍是旧 rc4（70609b3），服务器镜像无 import-edition；我的外网探测误判（302 判别式只能证明 CSP 批次）。处置：标签一经推送永不移动（教训第二次，固化为纪律），干净发 `v0.6.0rc5`（`269e630`）。用户完成部署与导入：创刊号 44 篇（18 译）+ 简讯 10 条入库 |
 | 2026-07-27 | 阶段 7 | 生产缺陷：发布器自删 | 用户发现 build 报成功但 releases/ 无新目录、current 悬空 404（手动 ln 到 -06 临时恢复）。根因组合缺陷：`_release_name` 复用被修剪的 -01 低序号 + 修剪器按名称排序删"最旧"恰为刚发布版本——每次构建发布后立即被自己删除。修复 `v0.6.0rc6`（`921de16`）：序号改当日最大值+1 永不复用；修剪器绝不删刚发布版本（双保险）；2 条事故回归测试，106 项全绿。待用户 deploy.bat 升级后重跑 build |
+| 2026-07-27 | 阶段 7 | rc6 上线 + 全面复核 | 复审会话放行后用户部署 rc6：build 产出 -08（序号递增修复实证）、current 自动接管、创刊号归档上线（外网验证 /issues/2026-07-26/ 完整渲染：6 双语主文 + 33 简讯其中 12 条双语——缓存复水译文全部在线）。面板三连验收用户完成（登录页/初始口令/录密钥+改口令）。外网安全复核 7 项全绿：/admin/ 独立 CSP 与安全头在位；未登录 providers、改口令均 401；错误口令 401+恒定延迟（实测 1.26s）；7 条配置路径探测（.env/providers/htpasswd/session-secret + 3 种路径穿越）全 404 零泄漏标记。新 backlog（低危）：两处 CSP 增加 frame-ancestors 'none'（server 层与 /admin/ location 同加，同 HSTS 双处陷阱；SameSite=Strict 已使带会话点击劫持失效） |
