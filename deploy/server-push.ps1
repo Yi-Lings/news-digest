@@ -20,6 +20,13 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 # Resolve the deploy directory even if the script body is pasted interactively.
 if ($PSScriptRoot) { $DeployDir = $PSScriptRoot } else { $DeployDir = (Get-Location).Path }
 
+# All remote output is mirrored into var\deploy-log.txt so failures can be
+# diagnosed from the file instead of scrolling the console.
+$LogDir = Join-Path (Split-Path $DeployDir -Parent) "var"
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+$LogPath = Join-Path $LogDir "deploy-log.txt"
+"== deploy log $(Get-Date -Format s) ==" | Out-File -FilePath $LogPath
+
 $Files = @(
     (Join-Path $DeployDir "compose.yaml"),
     (Join-Path $DeployDir "systemd\news-digest.service"),
@@ -82,7 +89,7 @@ Stop-OnError $LASTEXITCODE "normalize line endings"
 
 # ---- step 3: read-only preflight, shown verbatim ----
 Write-Host "[3/4] Running preflight.sh (read-only health check)..."
-ssh -i $KeyPath $Server "bash $Incoming/preflight.sh"
+ssh -i $KeyPath $Server "bash $Incoming/preflight.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
 Stop-OnError $LASTEXITCODE "preflight"
 
 Write-Host ""
@@ -94,7 +101,7 @@ if (-not $AutoYes) {
 
 # ---- step 4: idempotent bootstrap ----
 Write-Host "[4/4] Running bootstrap.sh (idempotent deploy)..."
-ssh -i $KeyPath $Server "bash $Incoming/bootstrap.sh"
+ssh -i $KeyPath $Server "bash $Incoming/bootstrap.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
 $BootstrapExit = $LASTEXITCODE
 
 # Bootstrap stops itself on purpose when manual input is required
