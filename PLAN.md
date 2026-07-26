@@ -114,6 +114,7 @@ https://news.cheapcoding.top
 
 ```text
 news-digest fetch          获取并规范化候选新闻
+news-digest translate      翻译已抓取内容并生成学习注解（阶段 3 增补；真实调用需显式确认）
 news-digest build          生成指定日期的静态站点
 news-digest run            执行完整的每日流水线
 news-digest preview-email  生成本地邮件预览
@@ -315,7 +316,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 2：真实新闻获取与正文提取
 
-状态：`实现完成，待用户本地验收（离线测试已全绿，真实抓取试运行待用户执行）`
+状态：`已验收（2026-07-26）`
 
 工作范围：
 
@@ -339,7 +340,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 3：翻译与英语学习内容
 
-状态：`未开始`
+状态：`进行中（fixture 先行部分）`
 
 工作范围：
 
@@ -538,3 +539,5 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 2 | 修复 | 用户首次真实抓取全源被阻断：本机代理为 fake-ip 模式（DNS 返回 198.18.0.0/15 假地址），私网阻断误拦。修复：`proxy_active` 检测显式/环境代理，代理生效时本地 DNS 公网校验交由代理（域名 allowlist 不变，生产无代理时防护完整）；pytest 临时目录迁至 `.pytest-tmp` 规避 Windows %TEMP% 清理崩溃；44 项离线测试全绿 |
 | 2026-07-26 | 阶段 2 | 修复 | 第二次真实抓取成功（7/7 源、44 篇全文），抽样发现三类脏数据：BBC 页脚样板句、DW live 直播贴当文章、F24 视频页占位文案。修复：候选阶段按 URL 排除 live/视频/音频页，提取阶段过滤短样板句（正则 + 140 字符上限防误伤），全段重复视为提取失败转摘要；46 项离线测试全绿 |
 | 2026-07-26 | 阶段 2 | 修复 | 第三次抓取数据复查：补排除 AJE `/news/liveblog/`、补剥 `traffic_source` 跟踪参数；样张印章与演示页脚改为仅 `--fixtures` 构建渲染，真实构建页脚为正式来源声明（`cb11b35`） |
+| 2026-07-26 | 阶段 2 | 已验收 | 用户经 `daily.bat` 一键流程确认真实新闻页面（头条为柏林事件报道、无演示标识）；新增 `daily.bat`/`preview.bat` 一键脚本（用户多次漏跑 build 的流程教训固化为工具）；打 `phase-2-accepted` 标签，创建 `phase/3-translation` 分支 |
+| 2026-07-26 | 阶段 3 | 进行中 | 开始 fixture 先行部分：模型输出 schema、严格校验、内容哈希+模型+prompt 版本缓存、`translate` 子命令（真实调用需 `--yes` 且先展示接口/模型/文章数/预计请求数）；SUB2API 接口、模型与费用边界待用户确认后才做受控真实调用 |
