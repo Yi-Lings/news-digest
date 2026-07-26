@@ -12,6 +12,7 @@ $KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
 $Server  = "root@cheapcoding.top"
 $Owner   = "yi-lings"
 $AppDir  = "/srv/news-digest"
+$Version = "v0.6.0rc1"
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
@@ -73,10 +74,15 @@ if ($agentReady) {
     }
 }
 
-# ---- [1/6] push branches and tags (tag v* triggers the CI image build) ----
-Write-Host "[1/6] git push (branches + tags)..."
-git push origin main phase/5-email phase/6-release phase/7-deploy --tags
-Stop-OnError $LASTEXITCODE "git push"
+# ---- [1/6] push branches, then the release tag ALONE ----
+# GitHub suppresses push events when more than 3 tags arrive in one push,
+# so the version tag must be pushed by itself to trigger the CI build.
+Write-Host "[1/6] git push (branches, then release tag $Version)..."
+git push origin main phase/5-email phase/6-release phase/7-deploy
+Stop-OnError $LASTEXITCODE "git push branches"
+git push origin phase-2-accepted phase-3-accepted phase-4-accepted phase-5-accepted phase-6-accepted 2>$null
+git push origin $Version
+Stop-OnError $LASTEXITCODE "git push release tag"
 
 # ---- [2/6] wait for the GitHub Actions release build ----
 Write-Host "[2/6] Waiting for GitHub Actions to build and publish images..."
