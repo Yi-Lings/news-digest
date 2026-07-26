@@ -1,0 +1,16 @@
+# news-digest.timer —— 每日 06:30（Asia/Shanghai）触发生成（阶段 7 源码侧模板）
+# 安装位置：/etc/systemd/system/news-digest.timer
+# 启用：systemctl daemon-reload && systemctl enable --now news-digest.timer
+
+[Unit]
+Description=Run news-digest daily at 06:30 Asia/Shanghai
+
+[Timer]
+# 在表达式里显式写时区，不依赖宿主机本地时区设置（服务器时区改动不影响发布时间）。
+# 需要 systemd >= 236；语法可用 `systemd-analyze calendar '*-*-* 06:30:00 Asia/Shanghai'` 验证。
+OnCalendar=*-*-* 06:30:00 Asia/Shanghai
+# 停机错过后开机补跑一次：保证每天至多且尽量恰好生成一期
+Persistent=true
+
+[Install]
+WantedBy=timers.target

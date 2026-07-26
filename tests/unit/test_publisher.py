@@ -35,3 +35,16 @@ def test_publish_moves_build_dir_into_releases(tmp_path):
     assert target == tmp_path / "releases" / "r-01"
     assert not build.exists()
     assert (tmp_path / "current" / "index.html").read_text(encoding="utf-8") == "x"
+
+
+def test_publish_prunes_old_releases_keeps_five(tmp_path):
+    for index in range(1, 8):
+        build = tmp_path / ".build-tmp"
+        build.mkdir()
+        (build / "index.html").write_text(str(index), encoding="utf-8")
+        publish(build, tmp_path, f"2026-07-26-{index:02d}")
+
+    kept = sorted(p.name for p in (tmp_path / "releases").iterdir())
+    assert kept == [f"2026-07-26-{i:02d}" for i in range(3, 8)]
+    # current 指向最新版本，未被误删
+    assert (tmp_path / "current" / "index.html").read_text(encoding="utf-8") == "7"

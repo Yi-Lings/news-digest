@@ -1,0 +1,137 @@
+# ---------------------------------------------------------------------------
+# 发布流水线（阶段 7）：只在推送 v* 版本 tag 时运行。
+# 链路：Linux 上复跑完整离线测试（兼作 Windows 开发 / Linux 生产的平台差异守门）
+#       → 通过后 buildx 构建 worker/web 两个镜像并推送私有 GHCR
+#       → 输出不可变 digest，供服务器 compose 固定引用。
+# 不使用 latest tag；测试与构建使用同一提交中的同一 uv.lock（PLAN 阶段 7 验收标准）。
+# ---------------------------------------------------------------------------
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# 默认最小权限；只有 build job 单独追加 packages:write
+permissions:
+  contents: read
+
+env:
+  # 构建架构必须与服务器 CPU 一致（部署前用 `uname -m` 核验；
+  # x86_64 → linux/amd64，aarch64 → linux/arm64）。只改这一处即可。
+  PLATFORMS: linux/amd64
+
+jobs:
+  test:
+    # 固定 runner 版本而不用 ubuntu-latest：发布链路的每个环节版本都要可复现
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # uv 固定为与本地开发一致的版本（PLAN.md 环境表），锁文件解析行为完全相同
+      - name: 安装 uv 0.11.28
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+
+      - name: 安装 .python-version 指定的 Python
+        run: uv python install
+
+      # --locked：uv.lock 与 pyproject.toml 不一致时直接失败，而不是悄悄重解析
+      - name: 同步依赖
+        run: uv sync --locked
+
+      - name: Ruff 检查
+        run: uv run ruff check .
+
+      # pyproject 的 addopts 默认排除 network 标记，CI 里即离线套件
+      - name: 离线测试套件
+        run: uv run pytest
+
+      # tag 必须与包内 __version__ 一致，镜像的 version label 才可信；
+      # 也防止随手打错 tag 就发布
+      - name: 校验 tag 与包版本一致
+        run: |
+          pkg_version="v$(uv run python -c 'import news_digest; print(news_digest.__version__)')"
+          if [ "${pkg_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 __version__ 推导的 ${pkg_version} 不一致"
+            exit 1
+          fi
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write   # 推送 GHCR 所需的唯一附加权限
+    outputs:
+      # 供发布记录/后续 job 引用；部署时以此 digest 固定 compose（PLAN §10）
+      worker-digest: ${{ steps.push-worker.outputs.digest }}
+      web-digest: ${{ steps.push-web.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # GHCR 仓库路径必须全小写；用户名含大写时不能直接用 github.repository_owner
+      - name: 计算镜像仓库前缀
+        id: vars
+        run: echo "image_prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # provenance 显式关闭：默认的 provenance attestation 会把推送产物变成
+      # image index（多条 manifest），人工按 digest 固定部署时容易拿错；
+      # 单一 manifest 的 digest 最直白，可追溯性已由 OCI labels 承担。
+      # tag 策略：版本 tag + 完整 commit sha，两者都推，不推 latest。
+      - name: 构建并推送 worker 镜像
+        id: push-worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.worker
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-worker:${{ github.ref_name }}
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-worker:sha-${{ github.sha }}
+          build-args: |
+            SOURCE_URL=https://github.com/${{ github.repository }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      - name: 构建并推送 web 镜像
+        id: push-web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.web
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-web:${{ github.ref_name }}
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-web:sha-${{ github.sha }}
+          build-args: |
+            SOURCE_URL=https://github.com/${{ github.repository }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      # 把可直接粘贴进 compose.yaml 的 digest 引用写进运行摘要，
+      # 部署时从这里复制，不必翻查 registry
+      - name: 输出镜像 digest
+        run: |
+          {
+            echo "## 发布镜像（复制整段引用到 /srv/news-digest/compose.yaml 的 image 字段）"
+            echo ""
+            echo "| 服务 | 引用 |"
+            echo "|---|---|"
+            echo "| worker | \`${{ steps.vars.outputs.image_prefix }}/news-digest-worker@${{ steps.push-worker.outputs.digest }}\` |"
+            echo "| web | \`${{ steps.vars.outputs.image_prefix }}/news-digest-web@${{ steps.push-web.outputs.digest }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

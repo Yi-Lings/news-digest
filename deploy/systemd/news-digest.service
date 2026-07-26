@@ -1,0 +1,22 @@
+# news-digest.service —— 每日生成任务（阶段 7 源码侧模板，服务器实测前不视为最终版）
+# 安装位置：/etc/systemd/system/news-digest.service
+# 由 news-digest.timer 触发；不要 enable 本 service，只 enable timer。
+# ExecStart 的 docker 绝对路径以服务器 `command -v docker` 实测为准（docker-ce 默认 /usr/bin/docker）。
+
+[Unit]
+Description=news-digest daily pipeline (one-shot container via docker compose)
+# 抓取与翻译都要出网：等网络真正可用，且 docker 守护进程必须在
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+# oneshot：进程退出即任务结束，退出码非 0 记为失败，journal 中可直接看到
+Type=oneshot
+# 复用 compose 中 worker 的完整定义（digest、只读、内存上限、env_file 都只在 compose 维护一处）
+ExecStart=/usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker
+# 兜底时限：抓取+翻译+构建正常在几分钟内完成；超时按失败处理并回收容器，
+# 防止卡死的任务悬挂到下一次 timer 触发
+TimeoutStartSec=45min
+
+# 无 [Install] 段：本单元只应被 timer 拉起，不随系统启动自动运行

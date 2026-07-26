@@ -14,6 +14,8 @@ import shutil
 import sys
 from pathlib import Path
 
+_KEEP_RELEASES = 5  # 保留最近版本数：满足回滚需要，防止磁盘无限增长
+
 
 def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
     """Move build_dir under releases/<release_name> and point current at it."""
@@ -24,7 +26,15 @@ def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
         shutil.rmtree(target)
     shutil.move(str(build_dir), str(target))
     switch_current(output_root, target)
+    _prune_releases(releases)
     return target
+
+
+def _prune_releases(releases: Path) -> None:
+    """按名称排序（日期-序号即时间序）删除最旧的多余版本；current 永远指向最新，不受影响。"""
+    names = sorted(entry.name for entry in releases.iterdir() if entry.is_dir())
+    for name in names[:-_KEEP_RELEASES]:
+        shutil.rmtree(releases / name)
 
 
 def switch_current(output_root: Path, target: Path) -> None:

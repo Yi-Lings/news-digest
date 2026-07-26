@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# news-digest 生产 Compose（阶段 7 源码侧模板；未经服务器实测不视为最终版）
+# 放置位置：/srv/news-digest/compose.yaml
+#
+# 镜像引用规则（PLAN §10：生产固定不可变 digest，不使用 latest）：
+# - 部署时必须把下方 image 改为 digest 形式，例如：
+#     image: ghcr.io/OWNER/news-digest-worker@sha256:DIGEST
+#     image: ghcr.io/OWNER/news-digest-web@sha256:DIGEST
+#   DIGEST 从 release.yml 的 Actions 运行摘要复制，或用
+#   `docker buildx imagetools inspect` 查询——具体步骤见 deploy/README.md。
+# - 下方 tag 写法（:VERSION）仅为占位与可读性示例；tag 可被覆盖，不得用于生产。
+# - 本文件不含 build、不挂源码：服务器只拉取 GHCR 已发布镜像（PLAN 发布链路）。
+# ---------------------------------------------------------------------------
+
+# 固定项目名：卷名从而固定为 news-digest_news-data / news-digest_news-site，
+# 备份与回滚脚本不受部署目录名影响
+name: news-digest
+
+services:
+  worker:
+    # 部署时替换为 @sha256:DIGEST（见文件头注释；OWNER/VERSION 为占位符）
+    image: ghcr.io/OWNER/news-digest-worker:VERSION
+    # 一次性任务：由 systemd timer 经 `docker compose run --rm worker` 触发。
+    # 不常驻、失败不自动重启——避免翻译 API 重复计费；停机漏跑由 timer 的
+    # Persistent=true 补跑，而不是靠容器重启策略
+    restart: "no"
+    # 一次性任务用 init 收割子进程、正确转发信号
+    init: true
+    env_file:
+      # 生产密钥唯一注入点；文件必须 root 所有、权限 600（README 有创建步骤）。
+      # 注意：.env 中不得设置 NEWS_DATA_DIR / NEWS_OUTPUT_PATH / NEWS_DATABASE_PATH，
+      # 这三项已在镜像内固定为卷挂载点，覆盖会写到只读路径导致任务失败
+      - /srv/news-digest/.env
+    # 只读根文件系统：可写面收敛到 /tmp（tmpfs）与两个数据卷
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # PLAN §11 初始内存上限，观察实测峰值后再调整
+    mem_limit: 256m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        # 容器侧日志轮转，防止长期运行占满磁盘
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - news-data:/data   # SQLite、抓取快照、翻译缓存、邮件归档
+      - news-site:/site   # releases/ + current 符号链接（发布器原子切换）
+
+  web:
+    # 部署时替换为 @sha256:DIGEST（见文件头注释）
+    image: ghcr.io/OWNER/news-digest-web:VERSION
+    restart: unless-stopped
+    ports:
+      # 只绑宿主机回环地址：公网入口统一经宿主机 Nginx（TLS、认证、限速、安全头）
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      # nginx 的 pid 与临时目录都指向 /tmp（见 Dockerfile.web 内联配置）
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 32m
+    pids_limit: 64
+    healthcheck:
+      # /healthz 在容器 nginx 内直接返回 200，不依赖站点内容是否已生成
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      # 站点卷对 web 只读：写入只发生在 worker，一次性任务失败不会破坏在线站点
+      - news-site:/site:ro
+
+volumes:
+  news-data:
+  news-site:
