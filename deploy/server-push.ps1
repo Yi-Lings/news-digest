@@ -6,6 +6,8 @@
 # Secrets never pass through this script: .env is edited on the server itself,
 # and the GHCR token is pasted by the user into docker login on the server.
 
+param([switch]$AutoYes)  # -AutoYes: skip the pause between preflight and bootstrap
+
 # ---- variables ----
 $KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
 $Server  = "root@cheapcoding.top"
@@ -84,7 +86,11 @@ ssh -i $KeyPath $Server "bash $Incoming/preflight.sh"
 Stop-OnError $LASTEXITCODE "preflight"
 
 Write-Host ""
-Read-Host "Preflight passed. Press Enter to run bootstrap.sh, or Ctrl+C to abort" | Out-Null
+if (-not $AutoYes) {
+    Read-Host "Preflight passed. Press Enter to run bootstrap.sh, or Ctrl+C to abort" | Out-Null
+} else {
+    Write-Host "Preflight passed; -AutoYes set, continuing to bootstrap."
+}
 
 # ---- step 4: idempotent bootstrap ----
 Write-Host "[4/4] Running bootstrap.sh (idempotent deploy)..."
