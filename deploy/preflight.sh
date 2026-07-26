@@ -92,7 +92,7 @@ check_port() {
   line="$(ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$")' | head -n1)"
   if [ -z "$line" ]; then
     if [ "$port" = "8080" ]; then
-      ok "端口 8080 空闲——web 容器可绑定 127.0.0.1:8080"
+      ok "端口 8618 空闲——web 容器可绑定 127.0.0.1:8618"
     else
       ok "端口 ${port} 空闲——当前部署未使用该端口（信息项）"
     fi

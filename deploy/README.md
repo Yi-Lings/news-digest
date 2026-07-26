@@ -109,8 +109,8 @@ sudo docker compose pull
 cd /srv/news-digest
 sudo docker compose run --rm worker            # 首次全量：抓取→选题→翻译→构建；观察输出
 sudo docker compose up -d web
-curl -fsS http://127.0.0.1:8080/healthz        # 期望输出 ok
-curl -fsS http://127.0.0.1:8080/ | head -5     # 期望看到站点 HTML
+curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
+curl -fsS http://127.0.0.1:8618/ | head -5     # 期望看到站点 HTML
 sudo docker compose ps                         # web 应为 healthy
 ```
 

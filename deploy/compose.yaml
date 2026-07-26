@@ -58,7 +58,8 @@ services:
     restart: unless-stopped
     ports:
       # 只绑宿主机回环地址：公网入口统一经宿主机 Nginx（TLS、认证、限速、安全头）
-      - "127.0.0.1:8080:8080"
+      # 宿主侧 8618（服务器 8080 已被既有服务占用）；容器内 nginx 仍监听 8080
+      - "127.0.0.1:8618:8080"
     read_only: true
     tmpfs:
       # nginx 的 pid 与临时目录都指向 /tmp（见 Dockerfile.web 内联配置）

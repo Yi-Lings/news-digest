@@ -221,7 +221,7 @@ server {
 
     # 证书未就绪期间临时反代，保证站点先以 HTTP 可用
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8618;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -255,7 +255,7 @@ fi
 
 # ---------------------------------------------------------------
 section "8/8 收尾自检"
-HEALTH_LINE="$(curl -sI --max-time 10 http://127.0.0.1:8080/healthz | head -n1 || true)"
+HEALTH_LINE="$(curl -sI --max-time 10 http://127.0.0.1:8618/healthz | head -n1 || true)"
 echo "web /healthz         ：${HEALTH_LINE:-（无响应——检查 docker compose ps 与 web 容器日志）}"
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
