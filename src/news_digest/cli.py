@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     translate.add_argument(
         "--yes", action="store_true", help="确认执行真实 API 调用（会产生费用）"
     )
+
+    preview = subparsers.add_parser(
+        "preview", help="本地预览站点并提供模型供应商切换面板（仅 127.0.0.1）"
+    )
+    preview.add_argument("--port", type=int, default=8618)
     return parser
 
 
@@ -59,7 +64,30 @@ def main(argv: list[str] | None = None) -> int:
         return _run_build(args.fixtures)
     if args.command == "translate":
         return _run_translate(args.date, args.limit, args.yes)
+    if args.command == "preview":
+        return _run_preview(args.port)
     parser.print_help()
+    return 0
+
+
+def _run_preview(port: int) -> int:
+    from news_digest.config import build_config_from_env
+    from news_digest.preview_server import create_server
+
+    root = Path.cwd()
+    site_dir = build_config_from_env().output_root / "current"
+    if not (site_dir / "index.html").is_file():
+        print(f"提示：{site_dir} 尚无站点，先运行 build（或双击 daily.bat）")
+    print(f"站点预览：http://127.0.0.1:{port}/")
+    print(f"模型设置：http://127.0.0.1:{port}/admin/")
+    print("按 Ctrl+C 停止。")
+    server = create_server(root, site_dir, port)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 

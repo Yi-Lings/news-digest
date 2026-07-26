@@ -23,12 +23,12 @@ $existing = Get-NetTCPConnection -LocalPort 8618 -State Listen -ErrorAction Sile
 if ($existing) {
     "[serve] port 8618 already serving, reusing it."
 } else {
-    $python = "py"
-    if (Get-Command python -ErrorAction SilentlyContinue) { $python = "python" }
-    Start-Process -FilePath $python `
-        -ArgumentList @("-m", "http.server", "8618", "--bind", "127.0.0.1", "--directory", "`"$serveDir`"") `
+    Start-Process -FilePath "uv" `
+        -ArgumentList @("run", "news-digest", "preview", "--port", "8618") `
         -WorkingDirectory $root -WindowStyle Minimized
     Start-Sleep -Seconds 2
 }
 Start-Process "http://127.0.0.1:8618/"
-"Preview: http://127.0.0.1:8618/  (server window is minimized; closing it stops the preview)"
+"Site : http://127.0.0.1:8618/"
+"Admin: http://127.0.0.1:8618/admin/  (model provider switcher)"
+"Server window is minimized; closing it stops the preview."
