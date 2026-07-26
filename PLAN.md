@@ -436,7 +436,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 7：CI 镜像构建与服务器部署
 
-状态：`进行中——一键部署链已备好（deploy.bat），待用户执行`
+状态：`部署成功（2026-07-27 02:31 UTC 上线）——进入观察期：验收标准要求连续观察至少两个生成周期 + 一次回滚演练，完成后发布 1.0.0`
 
 前置条件：
 
@@ -556,4 +556,6 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 5 | 待验收 | 用户曾指示砍掉阶段 5（邮件），实现中途干净回退；随后决定恢复。完成：双语摘要邮件（HTML+纯文本多部件）、`preview-email` 输出 .eml/.html 到 var/mail、`send-email` 三重门（--yes + 站点已含当日 + meta 防重记录，--resend 可越过）、SMTP 465 隐式 SSL / 587 STARTTLS、fake SMTP 测试；本地预览地址统一为 8618（含 NEWS_SITE_URL 默认值）；95 项离线测试 |
 | 2026-07-26 | 阶段 5/6 | 已验收 | 阶段 5：SMTP 通道 `--smoke` 实测送达（554 根因=简报链接指向尚无证书的空子域，完整简报送达率待部署后复测）；阶段 6：用户批准 `0.6.0rc1` 为部署候选。两阶段合并 main 并打标；决定：生产站点公开访问（不启用 Basic Auth）|
 | 2026-07-26 | 阶段 7 | 进行中 | 服务器 Docker 29.6.2 确认；SSH 仅公钥认证（沙箱代执行不可行，改为用户侧一键链）；子代理E交付 preflight.sh/bootstrap.sh/server-push.ps1；主线交付 deploy-all.ps1 + deploy.bat（推送→等 CI→注入 .env（密钥 Windows 直达服务器）→GHCR 登录（gh token 管道）→上传体检部署→冒烟）；定时器按用户要求定为每日 08:00 Asia/Shanghai |
+| 2026-07-27 | 阶段 7 | 部署成功 | 首次部署排障三连：ssh-agent 需提权（脚本自提权 UAC）、一次推 6 个 tag 触发 GitHub 事件抑制（版本标签改单独推）、宿主 8080 被占（web 改绑 127.0.0.1:8618）。最终全链贯通：CI 构建推 GHCR、服务器拉取、web 起、worker 首刊（6 篇双语 + 49 简讯）、timer 就位（UTC 00:00 = 北京 08:00）、certbot 签发（至 2026-10-24 自动续期）、Nginx 接管、healthz 与公网 https 均 200；外网实测首页为 07-27 真实双语内容。preflight 的 IPv4/IPv6 出口对比误报待修正 |
+| 2026-07-27 | 阶段 7 | 增补 | 一键 Docker 部署包（类 sub2api）：install.sh（远程下载 Release 附件或本地解包两模式）+ CI release-bundle 任务（拍平打包、显式 create/upload 分支）+ README 一键章节；QA 子代理审查出的 6 项问题（含 2 项阻断：包布局 vs bootstrap 扁平查找、preflight 端口角色颠倒）全部修复；随下一个 v* 标签自动发布附件 |
 | 2026-07-26 | 阶段 6 | 进行中 | 用户指示并发推进。子代理C：docs/OPERATIONS.md 运维文档（日常/配置/踩坑/恢复/备份/重建，104 行）；子代理D：阶段 7 部署工件模板 8 件（Dockerfile×2、compose、systemd timer、nginx、GitHub Actions release、部署 README，全部固定版本+非 root+只读+内存上限，标注"服务器实测前不视为最终版"）；主线：`uv sync --locked` 通过、95→96 项测试、许可证核查（全为 BSD/MIT/Apache 宽松许可）、敏感信息扫描干净、fixture 构建 0.36s/峰值 50MB、实测单期站点 ~300KB 与 DB 400KB（年归档远低于 1GB 目标）、新增 releases 保留 5 版修剪、版本升至 `0.6.0rc1`；send-email 站点检查在特殊文件系统上的崩溃改为干净报错 |

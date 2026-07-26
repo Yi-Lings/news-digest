@@ -82,7 +82,7 @@ else
   warn "certbot 未安装——bootstrap 将跳过 HTTPS（安装：apt-get update && apt-get install -y certbot）"
 fi
 
-# --- 端口占用：8080 是 web 容器要绑的回环端口；8618 为信息项 ---
+# --- 端口占用：8618 是 web 容器要绑的宿主回环端口；8080 仅信息项（被既有服务占用属预期） ---
 check_port() {
   local port="$1" line proc
   if ! command -v ss >/dev/null 2>&1; then
@@ -91,27 +91,27 @@ check_port() {
   fi
   line="$(ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$")' | head -n1)"
   if [ -z "$line" ]; then
-    if [ "$port" = "8080" ]; then
+    if [ "$port" = "8618" ]; then
       ok "端口 8618 空闲——web 容器可绑定 127.0.0.1:8618"
     else
-      ok "端口 ${port} 空闲——当前部署未使用该端口（信息项）"
+      ok "端口 ${port} 空闲（信息项）"
     fi
     return
   fi
   proc="$(printf '%s\n' "$line" | grep -oE '"[^"]+"' | head -n1 | tr -d '"')"
-  if [ "$port" = "8080" ]; then
+  if [ "$port" = "8618" ]; then
     case "$line" in
       *docker-proxy*)
-        ok "端口 8080 由 docker-proxy 占用——多为本项目 web 容器已在运行（幂等重跑属正常）" ;;
+        ok "端口 8618 由 docker-proxy 占用——多为本项目 web 容器已在运行（幂等重跑属正常）" ;;
       *)
-        fail "端口 8080 被 ${proc:-未知进程} 占用——web 容器将无法绑定，请先释放该端口" ;;
+        fail "端口 8618 被 ${proc:-未知进程} 占用——web 容器将无法绑定，请先释放该端口" ;;
     esac
   else
-    warn "端口 ${port} 被 ${proc:-未知进程} 占用——当前部署未用到 ${port}，仅提示留意"
+    warn "端口 ${port} 被 ${proc:-未知进程} 占用——本项目不使用 ${port}，仅提示留意"
   fi
 }
-check_port 8080
 check_port 8618
+check_port 8080
 
 # --- 部署目录现状：存在与否都不阻断，只影响 bootstrap 是全新安装还是复用 ---
 if [ -d "$APP_DIR" ]; then

@@ -7,6 +7,22 @@
 服务器上不保存 Git 仓库与源码（PLAN 发布链路）：应用代码只存在于 GHCR 预构建镜像内，
 服务器只保留 Compose manifest、`.env`、systemd 单元、宿主机 Nginx 配置与持久化卷。
 
+## 一键部署（类 sub2api）
+
+新服务器上一条命令完成部署（root 执行）：
+
+```bash
+export GH_TOKEN=你的repo只读token   # 仓库转公开后无需此行与认证头
+bash <(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+  https://raw.githubusercontent.com/Yi-Lings/news-digest/main/deploy/install.sh)
+```
+
+自动完成：下载最新 Release 部署包 → 只读体检（preflight）→ 幂等部署（bootstrap：镜像、
+web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/srv/news-digest/.env`
+生成密钥模板并暂停，在服务器上填好真实值后重跑同一命令续接。部署包
+（`news-digest-deploy.tgz`）由 CI 在每次推送 `v*` 标签时自动附到 Release；
+已解包场景直接 `sudo bash deploy/install.sh`。
+
 ## 0. 占位符对照表
 
 模板中所有大写占位符及替换方法：
