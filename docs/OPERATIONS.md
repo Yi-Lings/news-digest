@@ -58,6 +58,8 @@
 
 **模型参数兼容。** Claude 系后端必填 `max_tokens`（对应 `TRANSLATION_MAX_TOKENS`）；推理系模型拒绝 `temperature`（代码已不发送）。均已在代码处理；换供应商报 400 时先想到这两条，错误信息会带响应体片段。
 
+**邮件被 554 内容反垃圾拒发**：`NEWS_SITE_URL` 必须是公网正式域名——默认的 `127.0.0.1:8618` 会让邮件正文布满 localhost 链接，触发服务商内容反垃圾（阿里云 DirectMail 实测 554 spam content）。
+
 ## 4. 故障恢复
 
 **项目目录整体移动后预览空白**：`var\site\current` 的 NTFS 目录联接存的是绝对路径，移动项目目录后会失效；重跑一次 `uv run news-digest build`（或双击 daily.bat）即可重建。
