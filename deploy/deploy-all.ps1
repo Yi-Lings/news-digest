@@ -36,6 +36,24 @@ foreach ($tool in @("ssh", "scp", "git", "gh")) {
     }
 }
 
+# ---- GitHub reachability: fall back to the local proxy when direct 443 fails ----
+# git and gh both honor HTTPS_PROXY; ssh/scp to the server are unaffected.
+if (-not $env:HTTPS_PROXY) {
+    $direct = Test-NetConnection github.com -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $direct) {
+        $proxyUp = Test-NetConnection 127.0.0.1 -Port 2231 -InformationLevel Quiet -WarningAction SilentlyContinue
+        if ($proxyUp) {
+            Write-Host "[NOTE] github.com direct connect failed; routing git/gh via local proxy 127.0.0.1:2231." -ForegroundColor Yellow
+            $env:HTTPS_PROXY = "http://127.0.0.1:2231"
+            $env:HTTP_PROXY  = "http://127.0.0.1:2231"
+        } else {
+            Write-Host "[FAIL] Cannot reach github.com directly and local proxy 127.0.0.1:2231 is not running." -ForegroundColor Red
+            Write-Host "       Start your proxy client, then re-run deploy.bat." -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
 # ---- [0/6] ssh-agent: enter the key passphrase once ----
 Write-Host "[0/6] ssh-agent setup..."
 $svc = Get-Service ssh-agent -ErrorAction SilentlyContinue
