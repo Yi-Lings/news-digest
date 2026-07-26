@@ -67,6 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
         "preview", help="本地预览站点并提供模型供应商切换面板（仅 127.0.0.1）"
     )
     preview.add_argument("--port", type=int, default=8618)
+
+    preview_email = subparsers.add_parser(
+        "preview-email", help="生成当日简报邮件预览（.eml + .html 到 var/mail，不联网）"
+    )
+    preview_email.add_argument("--date", default=None, metavar="YYYY-MM-DD")
+
+    send_email = subparsers.add_parser(
+        "send-email", help="发送当日简报（需 --yes；站点已生成且当日未发送过）"
+    )
+    send_email.add_argument("--date", default=None, metavar="YYYY-MM-DD")
+    send_email.add_argument(
+        "--resend", action="store_true", help="忽略防重记录，强制再次发送"
+    )
+    send_email.add_argument(
+        "--yes", action="store_true", help="确认真实发送（缺省只显示发送计划）"
+    )
     return parser
 
 
@@ -83,8 +99,94 @@ def main(argv: list[str] | None = None) -> int:
         return _run_daily(args.window_hours, args.yes)
     if args.command == "preview":
         return _run_preview(args.port)
+    if args.command == "preview-email":
+        return _run_preview_email(args.date)
+    if args.command == "send-email":
+        return _run_send_email(args.date, args.resend, args.yes)
     parser.print_help()
     return 0
+
+
+def _email_payload(date: str | None):
+    """定位日期与选题后版次，渲染邮件三件套；失败打印原因返回 None。"""
+    from news_digest.config import build_config_from_env
+    from news_digest.rendering.email import render_email
+
+    fetch_config = _fetch_config(None)
+    located = _translate_edition_for(date, fetch_config)
+    if located is None:
+        return None
+    date, edition = located
+    subject, text, html = render_email(edition, build_config_from_env().site_url)
+    return fetch_config, date, edition, subject, text, html
+
+
+def _run_preview_email(date: str | None) -> int:
+    from news_digest.delivery.mailer import compose, write_eml
+
+    payload = _email_payload(date)
+    if payload is None:
+        return 1
+    fetch_config, date, _, subject, text, html = payload
+    message = compose(subject, text, html, "preview@localhost", ("preview@localhost",))
+    mail_dir = Path("var/mail")
+    eml_path = write_eml(message, mail_dir, date)
+    html_path = mail_dir / f"{date}.html"
+    html_path.write_text(html, encoding="utf-8")
+    print(f"主题：{subject}")
+    print(f"邮件预览：{eml_path}（邮件客户端打开）")
+    print(f"网页预览：{html_path}（浏览器打开看排版）")
+    return 0
+
+
+def _run_send_email(date: str | None, resend: bool, yes: bool) -> int:
+    import datetime
+
+    from news_digest.config import build_config_from_env, smtp_config_from_env
+    from news_digest.delivery.mailer import MailError, compose, send, validate_smtp, write_eml
+    from news_digest.storage import db
+
+    payload = _email_payload(date)
+    if payload is None:
+        return 1
+    fetch_config, date, _, subject, text, html = payload
+
+    issues_dir = build_config_from_env().output_root / "current" / "issues" / date
+    if not issues_dir.is_dir():
+        print(f"站点尚未包含 {date}（{issues_dir} 不存在）；先运行 build 再发送。")
+        return 1
+
+    smtp = smtp_config_from_env()
+    try:
+        validate_smtp(smtp)
+    except MailError as error:
+        print(str(error))
+        return 1
+
+    conn = db.connect(fetch_config.database)
+    try:
+        sent = db.sent_detail(conn, date)
+        if sent and not resend:
+            print(f"{date} 已发送过（{sent}）；确需重发请加 --resend。")
+            return 1
+        print(f"主题：{subject}")
+        print(f"服务器：{smtp.host}:{smtp.port}；收件人 {len(smtp.recipients)} 个")
+        if not yes:
+            print("当前为预览模式，未发送。确认无误后加 --yes 执行。")
+            return 0
+        message = compose(subject, text, html, smtp.sender, smtp.recipients)
+        try:
+            send(message, smtp)
+        except MailError as error:
+            print(str(error))
+            return 1
+        stamp = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+        db.mark_sent(conn, date, f"{stamp} -> {len(smtp.recipients)} 人")
+        write_eml(message, Path("var/mail"), date)
+        print(f"已发送，并归档 var/mail/{date}.eml；重复执行将被防重记录拦截。")
+        return 0
+    finally:
+        conn.close()
 
 
 def _fetch_config(window_hours: int | None):

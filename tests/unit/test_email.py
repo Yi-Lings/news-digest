@@ -1,0 +1,137 @@
+"""邮件渲染、组装、fake SMTP 投递与发送状态（全部离线）。"""
+
+import email
+import email.policy
+from pathlib import Path
+
+import pytest
+
+from news_digest.config import SmtpConfig
+from news_digest.delivery.mailer import MailError, compose, send, validate_smtp, write_eml
+from news_digest.models import Article, BriefItem, DailyEdition, Paragraph
+from news_digest.rendering.email import render_email
+from news_digest.storage import db
+
+SITE = "https://news.example.com"
+
+
+def _edition() -> DailyEdition:
+    article = Article(
+        slug="berlin-pride",
+        source="BBC News",
+        title_en="What we know so far about the Berlin Pride ramming attack",
+        title_zh="柏林骄傲游行冲撞事件：目前已知的情况",
+        summary_en="A police manhunt is underway.",
+        summary_zh="警方正在全城搜捕嫌疑人。",
+        author="Demo Writer",
+        published_at="2026-07-26T09:18:33+00:00",
+        url="https://www.bbc.co.uk/news/articles/cevmdxz4872o",
+        reading_minutes=4,
+        paragraphs=[Paragraph(en="One.", zh="一。")],
+        translated_by="m@p2",
+    )
+    brief = BriefItem(
+        title_en="Glacier monitoring network doubles its stations",
+        title_zh="冰川监测网络站点翻倍",
+        source="The New York Times",
+        url="https://www.nytimes.com/2026/07/26/world/glacier.html",
+    )
+    return DailyEdition(date="2026-07-26", articles=[article], briefs=[brief])
+
+
+def _smtp_config(**overrides) -> SmtpConfig:
+    values = {
+        "host": "smtp.example.com",
+        "port": 587,
+        "username": "user",
+        "password": "secret",
+        "sender": "news@example.com",
+        "recipients": ("me@example.com", "you@example.com"),
+        "use_tls": True,
+    }
+    values.update(overrides)
+    return SmtpConfig(**values)
+
+
+def test_render_email_bilingual_with_links():
+    subject, text, html = render_email(_edition(), SITE)
+    assert "2026 年 7 月 26 日" in subject and "1 篇" in subject
+    for body in (text, html):
+        assert "What we know so far" in body
+        assert "柏林骄傲游行冲撞事件" in body
+        assert f"{SITE}/issues/2026-07-26/berlin-pride.html" in body
+        assert "AI 生成" in body
+    assert "冰川监测网络站点翻倍" in html
+    assert f"{SITE}/" in text
+
+
+def test_compose_and_eml_roundtrip(tmp_path):
+    subject, text, html = render_email(_edition(), SITE)
+    message = compose(subject, text, html, "news@example.com", ("me@example.com",))
+    path = write_eml(message, tmp_path / "mail", "2026-07-26")
+    assert path.name == "2026-07-26.eml"
+
+    parsed = email.message_from_bytes(path.read_bytes(), policy=email.policy.default)
+    assert parsed["From"] == "news@example.com"
+    assert "双语简报" in parsed["Subject"]
+    plain = parsed.get_body(preferencelist=("plain",))
+    rich = parsed.get_body(preferencelist=("html",))
+    assert plain is not None and "柏林骄傲游行冲撞事件" in plain.get_content()
+    assert rich is not None and "在网站阅读全文" in rich.get_content()
+
+
+class FakeSMTP:
+    """记录调用的假 SMTP，兼容 with 协议。"""
+
+    instances: list["FakeSMTP"] = []
+
+    def __init__(self, host: str, port: int, timeout: float = 0) -> None:
+        self.host, self.port = host, port
+        self.calls: list[str] = []
+        FakeSMTP.instances.append(self)
+
+    def __enter__(self) -> "FakeSMTP":
+        return self
+
+    def __exit__(self, *args) -> None:
+        pass
+
+    def starttls(self) -> None:
+        self.calls.append("starttls")
+
+    def login(self, username: str, password: str) -> None:
+        self.calls.append(f"login:{username}")
+
+    def send_message(self, message) -> None:
+        self.calls.append(f"send:{message['To']}")
+
+
+def test_send_uses_starttls_and_login(tmp_path):
+    FakeSMTP.instances.clear()
+    subject, text, html = render_email(_edition(), SITE)
+    message = compose(subject, text, html, "news@example.com", ("me@example.com",))
+    send(message, _smtp_config(), smtp_factory=FakeSMTP)
+    smtp = FakeSMTP.instances[-1]
+    assert smtp.calls == ["starttls", "login:user", "send:me@example.com"]
+
+
+def test_send_port_465_skips_starttls():
+    FakeSMTP.instances.clear()
+    message = compose("s", "t", "<p>h</p>", "a@example.com", ("b@example.com",))
+    send(message, _smtp_config(port=465), smtp_factory=FakeSMTP)
+    assert "starttls" not in FakeSMTP.instances[-1].calls
+
+
+def test_validate_smtp_missing_fields():
+    with pytest.raises(MailError, match="SMTP_HOST"):
+        validate_smtp(_smtp_config(host=""))
+    with pytest.raises(MailError, match="SMTP_RECIPIENTS"):
+        validate_smtp(_smtp_config(recipients=()))
+
+
+def test_sent_state_roundtrip(tmp_path):
+    conn = db.connect(Path(tmp_path) / "news.db")
+    assert db.sent_detail(conn, "2026-07-26") is None
+    db.mark_sent(conn, "2026-07-26", "2026-07-26T10:00:00+00:00 -> 2 人")
+    assert "2 人" in db.sent_detail(conn, "2026-07-26")
+    conn.close()

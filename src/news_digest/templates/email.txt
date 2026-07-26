@@ -1,0 +1,23 @@
+Cheapcoding News · {{ edition.date | date_zh }}（{{ edition.date | weekday_zh }}）双语简报
+==================================================
+
+{% for article in edition.articles %}
+{{ loop.index }}. {{ article.title_en }}
+{% if article.title_zh %}   {{ article.title_zh }}
+{% endif %}   [{{ article.source }} · 约 {{ article.reading_minutes }} 分钟]
+   {{ article.summary_zh or article.summary_en }}
+   {{ site_url }}/issues/{{ edition.date }}/{{ article.slug }}.html
+
+{% endfor %}
+{% if edition.briefs %}
+简讯（{{ edition.briefs | length }} 条，节选）：
+{% for brief in edition.briefs[:5] %}
+- [{{ brief.source }}] {{ brief.title_zh or brief.title_en }}
+  {{ brief.url }}
+{% endfor %}
+{% endif %}
+
+在网站阅读全文与学习解析：{{ site_url }}/
+
+--
+内容取自各新闻来源公开 RSS 与页面，版权归原出版方；中文与学习内容由 AI 生成，仅供学习参考。
