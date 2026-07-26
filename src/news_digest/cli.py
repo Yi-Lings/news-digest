@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     admin = subparsers.add_parser(
-        "admin", help="生产模型切换面板（仅 127.0.0.1；密钥不经网页，需外层反代加认证）"
+        "admin", help="生产模型切换面板（仅 127.0.0.1；登录页认证，经外层反代 HTTPS 暴露）"
     )
     admin.add_argument("--port", type=int, default=8619)
     admin.add_argument(
@@ -443,14 +443,13 @@ def _run_admin(port: int, config_dir: Path) -> int:
     if not config_dir.is_dir():
         print(f"配置目录不存在：{config_dir}")
         return 1
-    print(f"生产模型切换面板：http://127.0.0.1:{port}/admin/（密钥不经网页传输）")
+    print(f"生产模型切换面板：http://127.0.0.1:{port}/admin/")
     server = create_server(
         config_dir,
         config_dir,
         port,
         env_file=".env",
         profiles_file="providers.json",
-        allow_key_input=False,
         serve_static=False,  # /config 含明文密钥，绝不提供静态文件回落
         htpasswd_file=config_dir / "htpasswd-admin",
     )

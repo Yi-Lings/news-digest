@@ -115,7 +115,7 @@ def prod_server(tmp_path):
     )
     server = create_server(
         tmp_path, tmp_path, 0,
-        env_file=".env", profiles_file="providers.json", allow_key_input=False,
+        env_file=".env", profiles_file="providers.json",
         serve_static=False, htpasswd_file=tmp_path / "htpasswd-admin",
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -200,16 +200,21 @@ def test_login_required_and_flow(prod_server):
     assert status == 200
 
 
-def test_production_mode_rejects_key_input(prod_server):
-    _, port = prod_server
+def test_production_mode_accepts_key_change(prod_server):
+    """用户决定（2026-07-27）：生产面板开放密钥新增/更换（登录 + HTTPS 会话保护）。"""
+    root, port = prod_server
     cookie = _login(port)
-    status, data = _request(
+    status, _ = _request(
         port, "POST", "/admin/api/providers",
-        {"name": "claude", **{**PROVIDER, "api_key": "sk-new-key-attempt"}},
+        {"name": "claude", **{**PROVIDER, "api_key": "sk-rotated-key"}},
         cookie=cookie,
     )
-    assert status == 400
-    assert "不接受密钥" in data["error"]
+    assert status == 200
+    stored = load_profiles(root, "providers.json")["providers"]["claude"]
+    assert stored["api_key"] == "sk-rotated-key"
+    # 响应与页面永远只见掩码
+    status, data = _request(port, "GET", "/admin/api/providers", cookie=cookie)
+    assert "sk-rotated-key" not in json.dumps(data)
 
 
 def test_production_mode_edit_and_activate(prod_server):
@@ -235,14 +240,14 @@ def test_production_mode_edit_and_activate(prod_server):
     assert "NEWS_SITE_URL=https://news.example.com" in env  # 无关行保留
 
 
-def test_production_admin_page_hides_key_field(prod_server):
+def test_production_admin_page_has_key_field(prod_server):
     _, port = prod_server
     cookie = _login(port)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     connection.request("GET", "/admin/", headers={"Cookie": cookie})
     html = connection.getresponse().read().decode("utf-8")
     connection.close()
-    assert "var allowKeyInput = false;" in html
+    assert 'id="f-key"' in html  # 密钥输入项可用（编辑留空=沿用）
 
 
 def test_admin_flow_save_activate_masked(admin_server):

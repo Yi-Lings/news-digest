@@ -281,13 +281,14 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
   重新登录）并自动删除 `admin-password.initial`。忘记口令：
   `sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret`
   后重跑 bootstrap 重新生成初始口令。
-- **能做什么**：在既有供应商档案间切换、修改档案的接口地址与模型名。
+- **能做什么**：新增/编辑供应商档案（接口地址、模型名、**密钥**——用户决定
+  2026-07-27 开放网页录入；编辑时留空表示沿用旧密钥）、在档案间切换启用。
   点「启用」即把三个 `TRANSLATION_*` 写入 `/srv/news-digest/config/.env`——
   **无需重启任何容器**：worker 是一次性任务，每次由 timer 经 `docker compose run`
   拉起时重读 `.env`，下一期即生效。
-- **密钥不经网页**（生产模式硬约束）：页面永远只显示掩码，新增供应商 = 登录服务器
-  编辑 `${APP_DIR}/config/providers.json`（root:600；默认
-  `/srv/news-digest/config/providers.json`），保存后刷新面板即可见，同样无需重启。格式：
+- **密钥展示保护**：页面与接口响应永远只显示掩码；密钥经 HTTPS + 登录会话提交，
+  只落 `${APP_DIR}/config/providers.json`（root:600）。也可登录服务器直接编辑该
+  文件，保存后刷新面板即可见，同样无需重启。格式：
 
 ```json
 {

@@ -164,16 +164,15 @@ def verify_htpasswd(htpasswd_file: Path, username: str, password: str) -> bool:
 class PreviewHandler(SimpleHTTPRequestHandler):
     """静态站点 + /admin 面板与 JSON 接口。
 
-    生产模式（allow_key_input=False）下密钥不经网页传输：
-    只能切换预置档案、修改接口地址与模型名，新增密钥走服务器文件。
+    生产模式经登录页认证（htpasswd_file 置位时），密钥经 HTTPS 会话传输后
+    只落服务器文件；接口响应中的密钥永远只有掩码。
     """
 
     project_root: Path
     env_file: str = ENV_FILE
     profiles_file: str = PROFILES_FILE
-    allow_key_input: bool = True
     serve_static: bool = True  # 生产 admin 模式必须为 False：/config 含明文密钥，绝不作 docroot
-    htpasswd_file: Path | None = None  # 面板口令文件；None 时不提供网页改密
+    htpasswd_file: Path | None = None  # 面板口令文件；None 时无登录页也无网页改密
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - 基类签名
         pass  # 本地预览不刷请求日志
@@ -213,13 +212,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             if not self._authed():
                 self._html(LOGIN_HTML)
                 return
-            flag = "true" if self.allow_key_input else "false"
-            body = ADMIN_HTML.replace("__ALLOW_KEY_INPUT__", flag).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._html(ADMIN_HTML)
         elif self.path == "/admin/api/providers":
             if not self._authed():
                 self._json(401, {"error": "未登录"})
@@ -349,12 +342,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(200, {"ok": True})
             return
         existing = data["providers"].get(name, {})
-        submitted_key = str(body.get("api_key", "")).strip()
-        if submitted_key and not self.allow_key_input:
-            message = "生产面板不接受密钥输入；新增/更换密钥请在服务器上编辑档案文件"
-            self._json(400, {"error": message})
-            return
-        api_key = submitted_key or existing.get("api_key", "")
+        api_key = str(body.get("api_key", "")).strip() or existing.get("api_key", "")
         provider = {
             "base_url": str(body.get("base_url", "")).strip().rstrip("/"),
             "api_key": api_key,
@@ -395,7 +383,6 @@ def create_server(
     *,
     env_file: str = ENV_FILE,
     profiles_file: str = PROFILES_FILE,
-    allow_key_input: bool = True,
     serve_static: bool = True,
     htpasswd_file: Path | None = None,
 ) -> ThreadingHTTPServer:
@@ -403,7 +390,6 @@ def create_server(
     PreviewHandler.project_root = root
     PreviewHandler.env_file = env_file
     PreviewHandler.profiles_file = profiles_file
-    PreviewHandler.allow_key_input = allow_key_input
     PreviewHandler.serve_static = serve_static
     PreviewHandler.htpasswd_file = htpasswd_file
     return ThreadingHTTPServer(("127.0.0.1", port), handler_class)
@@ -525,9 +511,6 @@ code { background:#f4f1e8; padding:.05rem .3rem; font-size:.85em; }
 
 <fieldset>
 <legend>新增 / 编辑档案（同名即覆盖）</legend>
-<p class="note" id="key-restricted-note" hidden>生产模式：此面板不接受密钥输入——
-切换档案、改接口地址与模型名均可；新增供应商或更换密钥请在服务器上编辑档案文件
-（见运维文档）。</p>
 <label for="f-name">名称（如 claude、openai）</label>
 <input id="f-name" autocomplete="off">
 <label for="f-url">Base URL（通常以 /v1 结尾）</label>
@@ -557,14 +540,8 @@ code { background:#f4f1e8; padding:.05rem .3rem; font-size:.85em; }
 </div>
 <script>
 "use strict";
-var allowKeyInput = __ALLOW_KEY_INPUT__;
 var listEl = document.getElementById("list");
 var statusEl = document.getElementById("status");
-
-if (!allowKeyInput) {
-  document.getElementById("f-key").closest("div").hidden = true;
-  document.getElementById("key-restricted-note").hidden = false;
-}
 
 function say(message, ok) {
   statusEl.textContent = message;

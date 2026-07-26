@@ -111,7 +111,7 @@ uv run pytest                       # 可选自检，应全绿
 
 ## 7. 生产环境（服务器）
 
-**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会使所有已登录端失效（轮换会话密钥）并自动删除该初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap 重新生成。面板只能在既有档案间切换、改接口地址与模型名——生产密钥不经网页传输，页面永远只见掩码。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/config/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。
+**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会使所有已登录端失效（轮换会话密钥）并自动删除该初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap 重新生成。面板支持完整管理：切换档案、改接口地址、改模型名、**新增/更换密钥**（用户决定 2026-07-27 开放；密钥经 HTTPS + 登录会话提交后只落服务器文件，页面与接口响应永远只显示掩码，编辑时留空表示沿用旧密钥）。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/config/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。也仍可 ssh 直接编辑 `config/providers.json`，两种方式等效。
 
 **换密钥的正确姿势。** ssh 登录服务器直接编辑文件（两个文件均 root:600，改完都不用重启）：
 
