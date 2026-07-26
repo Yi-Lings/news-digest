@@ -9,6 +9,7 @@ import pytest
 from news_digest.config import TranslationConfig
 from news_digest.models import Article, Paragraph
 from news_digest.translation.client import ApiTranslator, TranslationError
+from news_digest.translation.schema import PROMPT_VERSION
 
 
 def _config(**overrides) -> TranslationConfig:
@@ -69,7 +70,7 @@ def test_successful_stream_returns_joined_content():
 
     translator = _translator(handler)
     assert translator.translate(_article()) == '{"ok": true}'
-    assert translator.label == "demo-model@p1"
+    assert translator.label == f"demo-model@{PROMPT_VERSION}"
 
 
 def test_http_error_raises_without_leaking_key():
