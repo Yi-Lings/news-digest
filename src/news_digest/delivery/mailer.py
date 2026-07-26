@@ -60,4 +60,5 @@ def send(message: EmailMessage, config: SmtpConfig, smtp_factory=None) -> None:
                 smtp.login(config.username, config.password)
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as error:
-        raise MailError(f"SMTP 发送失败：{error.__class__.__name__}") from error
+        # SMTPResponseException 的 str 含服务器状态码与原话（不含凭据），是关键诊断信息
+        raise MailError(f"SMTP 发送失败：{error.__class__.__name__}: {error}") from error
