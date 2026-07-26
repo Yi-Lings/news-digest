@@ -63,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="包含真实翻译调用；缺省只做抓取+选题+构建"
     )
 
+    import_edition = subparsers.add_parser(
+        "import-edition", help="把一期版次 JSON 併入数据库（翻译成果原样保留，幂等）"
+    )
+    import_edition.add_argument(
+        "file", metavar="FILE", help="fetched 快照或裸版次 JSON 文件路径"
+    )
+
     preview = subparsers.add_parser(
         "preview", help="本地预览站点并提供模型供应商切换面板（仅 127.0.0.1）"
     )
@@ -119,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_preview_email(args.date)
     if args.command == "admin":
         return _run_admin(args.port, Path(args.config_dir))
+    if args.command == "import-edition":
+        return _run_import(Path(args.file))
     if args.command == "send-email":
         if args.smoke:
             return _run_send_smoke(args.yes)
@@ -435,6 +444,36 @@ def _run_daily(window_hours: int | None, yes: bool) -> int:
     print(f"构建完成：{release}")
     print("本地预览：双击 preview.bat")
     return exit_code
+
+
+def _run_import(file: Path) -> int:
+    import json
+
+    from news_digest.config import fetch_config_from_env, load_env_file
+    from news_digest.models import edition_from_dict
+    from news_digest.storage import db
+
+    load_env_file()
+    if not file.is_file():
+        print(f"文件不存在：{file}")
+        return 1
+    data = json.loads(file.read_text(encoding="utf-8"))
+    edition = edition_from_dict(data.get("edition", data))  # 兼容 fetched 快照与裸版次
+
+    config = fetch_config_from_env()
+    conn = db.connect(config.database)
+    try:
+        db.upsert_articles(conn, edition.date, edition.articles)
+        db.upsert_briefs(conn, edition.date, edition.briefs)
+    finally:
+        conn.close()
+    translated = sum(1 for article in edition.articles if article.translated_by)
+    print(
+        f"已导入 {edition.date}：文章 {len(edition.articles)} 篇"
+        f"（含译文 {translated}），简讯 {len(edition.briefs)} 条"
+    )
+    print("下一步：news-digest build 重新成刊，归档即包含该日期")
+    return 0
 
 
 def _run_admin(port: int, config_dir: Path) -> int:

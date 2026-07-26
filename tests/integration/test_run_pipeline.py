@@ -152,6 +152,38 @@ def test_translation_survives_refetch_and_not_repeated(tmp_path, no_dns):
     assert "中文标题：" in index
 
 
+def test_import_edition_cli(tmp_path, no_dns, monkeypatch):
+    """import-edition：外部版次 JSON 併入库，译文保留，幂等。"""
+    import json
+
+    from news_digest.cli import main
+    from news_digest.models import edition_to_dict
+    from news_digest.storage import db
+
+    config = _config(tmp_path)
+    _fetch(config)
+    mains = selected_mains_for_translation(config, "2026-07-26", now=NOW)
+    translated, _ = translate_edition(mains, FakeTranslator(), tmp_path / "cache")
+
+    payload = {"generated_at": "x", "edition": edition_to_dict(translated)}
+    source = tmp_path / "founding.json"
+    source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    target = tmp_path / "server-data"
+    monkeypatch.chdir(tmp_path)  # load_env_file 在空目录中安全无操作
+    monkeypatch.setenv("NEWS_DATA_DIR", str(target))
+    assert main(["import-edition", str(source)]) == 0
+    assert main(["import-edition", str(source)]) == 0  # 幂等重跑
+
+    conn = db.connect(target / "news.db")
+    try:
+        edition = db.get_edition(conn, "2026-07-26")
+    finally:
+        conn.close()
+    assert edition is not None
+    assert all(article.translated_by for article in edition.articles)
+
+
 def test_legacy_fetched_json_auto_import(tmp_path, no_dns):
     config = _config(tmp_path)
     edition, _ = _fetch(config)
