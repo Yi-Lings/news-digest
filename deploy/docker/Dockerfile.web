@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+# ---------------------------------------------------------------------------
+# news-digest web 镜像：仅伺服静态站点。
+# 阶段 7 源码侧模板：只在 GitHub Actions（release.yml）中构建，服务器不构建镜像。
+#
+# - 站点内容不打进镜像：由 news-site 命名卷挂到 /site（compose 中只读），
+#   这样"发新一期"只是 worker 写卷 + current 符号链接原子切换，web 镜像无需重发。
+# - 基础镜像固定 nginx:1.27-alpine（tag 级固定；不可变性由发布的应用镜像 digest 承担，
+#   与 Dockerfile.worker 采用同一策略）。
+# - 非 root：使用官方 alpine 镜像自带的 nginx 用户（uid 101）运行 master 进程，
+#   pid 与全部临时目录指向 /tmp（compose 挂 tmpfs），从而兼容只读根文件系统。
+# ---------------------------------------------------------------------------
+FROM nginx:1.27-alpine
+
+# OCI labels 由 CI 通过 build args 注入（见 release.yml）
+ARG SOURCE_URL=https://github.com/OWNER/news-digest
+ARG VCS_REF=UNKNOWN
+ARG VERSION=0.0.0
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.title="news-digest-web" \
+      org.opencontainers.image.description="Static site server for news-digest (content mounted from volume)"
+
+# 最小配置以 heredoc 内联（阶段 7 约定部署工件只允许固定的几个文件，不单独放 conf）。
+# 整份替换 /etc/nginx/nginx.conf 且不 include conf.d/，官方默认 server（80 端口）随之失效。
+COPY <<'CONF' /etc/nginx/nginx.conf
+# 容器内最小配置：只做 8080 静态伺服。
+# TLS、Basic Auth、限速、安全响应头全部在宿主机 Nginx（deploy/nginx/news.conf），
+# 容器不重复实现，避免两层配置漂移。
+worker_processes 1;
+pid /tmp/nginx.pid;            # 根文件系统只读，pid 放 tmpfs
+error_log /dev/stderr warn;    # 日志走 stdout/stderr，由 docker json-file 驱动轮转
+
+events {
+    worker_connections 256;    # 单人使用的小站，压低资源占用（内存上限 32 MB）
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log /dev/stdout;
+    server_tokens off;
+
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+
+    # 只读根文件系统：所有临时目录集中到 /tmp（compose 挂 tmpfs）
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;
+
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_vary on;
+    gzip_types text/css application/javascript application/json image/svg+xml text/plain;
+
+    server {
+        listen 8080;
+        server_name _;
+
+        # news-site 卷挂载点。current 是发布器维护的相对符号链接（releases/<名称>），
+        # 在同一卷内解析；os.replace 原子切换保证任一请求要么整套旧版要么整套新版
+        root /site/current;
+        index index.html;
+
+        # 供 compose healthcheck 使用；返回 200 实体而非 204，
+        # 因为 busybox wget 对无实体响应的处理不完全可靠
+        location = /healthz {
+            access_log off;
+            return 200 "ok";
+        }
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+}
+CONF
+
+# /site 预建为 uid 10001（worker 的运行账户）：若 web 先于 worker 启动而初始化了
+# news-site 命名卷，卷根属主仍是 10001，worker 依然可写；nginx 只需读权限（755/644）
+RUN mkdir -p /site && chown 10001:10001 /site
+
+EXPOSE 8080
+USER nginx
+
+# 直接启动 nginx，绕过官方 /docker-entrypoint.sh：
+# 该脚本假定可写 /etc/nginx/conf.d 且部分逻辑面向 root，在只读+非 root 下行为不确定
+ENTRYPOINT ["nginx", "-g", "daemon off;"]

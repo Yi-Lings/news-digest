@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1.7
+# ---------------------------------------------------------------------------
+# news-digest worker 镜像：每日流水线（抓取→选题→翻译→构建）的一次性任务容器。
+# 阶段 7 源码侧模板：只在 GitHub Actions（release.yml）中构建，服务器不构建镜像。
+#
+# 版本策略（为什么固定 tag 而不固定基础镜像 digest）：
+# - 基础镜像固定到 python:3.13-slim-bookworm 这一级，保证运行时大版本可复现；
+#   不再固定到 digest 是有意取舍——CI 每次发布构建时自动带上 Debian 安全补丁，
+#   而部署所需的"不可变"由我们自己发布的应用镜像 digest 承担（compose 固定 digest）。
+# - uv 固定为 0.11.28，与本地开发环境一致（见 PLAN.md 环境表），锁文件解析行为完全相同。
+# ---------------------------------------------------------------------------
+
+########## 构建层：只负责安装依赖，产物是 /app/.venv ##########
+FROM python:3.13-slim-bookworm AS builder
+
+# 从官方发布镜像拷贝 uv 可执行文件：比 pip install uv 更快，也不往层里引入 pip 依赖
+COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
+
+# 编译字节码：换取一次性任务更快的冷启动；禁止 uv 自行下载 Python，必须用镜像自带解释器
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# 先只拷贝依赖清单：依赖不变时此层命中缓存，改源码不会触发依赖重装
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
+
+# 再拷贝源码并安装项目本体。--no-editable：把包真实安装进 venv 的 site-packages，
+# 运行层只需带走 .venv，不需要保留 /app/src
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
+
+########## 运行层：非 root、适配只读根文件系统 ##########
+FROM python:3.13-slim-bookworm
+
+# OCI labels 由 CI 通过 build args 注入（见 release.yml），保证镜像可追溯到验收提交；
+# 默认值仅为兜底占位（OWNER 替换方法见 deploy/README.md），CI 构建必须显式传入
+ARG SOURCE_URL=https://github.com/OWNER/news-digest
+ARG VCS_REF=UNKNOWN
+ARG VERSION=0.0.0
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.title="news-digest-worker" \
+      org.opencontainers.image.description="Daily bilingual news digest generator (one-shot pipeline)"
+
+# 固定 uid/gid=10001（高位 id 避开系统账户）：web 镜像对 /site 使用同一属主约定，
+# 这样无论哪个镜像先初始化 news-site 命名卷，worker 都有写权限（见 Dockerfile.web）
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --no-create-home --home-dir /tmp \
+        --shell /usr/sbin/nologin app \
+    # /data、/site 是 compose 命名卷挂载点：在镜像内预建并交给 app 属主，
+    # 命名卷首次挂载时 docker 会按镜像内容初始化，非 root 进程才能写入
+    && mkdir -p /data/mail /site /app/var \
+    && chown -R app:app /data /site \
+    # 代码中个别相对路径（var/mail，邮件归档）以 WORKDIR 为基准；根文件系统只读，
+    # 用符号链接把它导向持久卷 /data/mail，而不是为此放宽 read_only
+    && ln -s /data/mail /app/var/mail
+
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+
+# HOME=/tmp：只读根文件系统下给任何想写 ~/.cache 的库一个 tmpfs 出口；
+# 数据路径固定为卷挂载点，服务器 .env 不得覆盖这三个 NEWS_* 路径变量（README 有说明）
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp \
+    NEWS_DATA_DIR=/data \
+    NEWS_DATABASE_PATH=/data/news.db \
+    NEWS_OUTPUT_PATH=/site
+
+WORKDIR /app
+USER 10001:10001
+
+# 每日入口：news-digest run --yes（含真实翻译调用）；
+# ENTRYPOINT/CMD 拆开，便于 `docker compose run --rm worker <子命令>` 执行其他任务
+ENTRYPOINT ["news-digest"]
+CMD ["run", "--yes"]

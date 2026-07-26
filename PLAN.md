@@ -413,7 +413,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 6：本地发布候选版
 
-状态：`未开始`
+状态：`进行中（与阶段 5 验收并行，用户指示并发推进）`
 
 工作范围：
 
@@ -553,3 +553,4 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 4 | 待验收 | 并行子代理完成存储层（SQLite 文章池，抓取刷新不覆盖翻译）与选题层（时效+全文+篇幅评分、来源配额≤2、相似标题互斥、确定性）；集成 `run` 一键流水线（抓取→选题→仅译 6 篇→构建），溢出候选转双语外链简讯，旧 JSON 自动导入；`daily.bat` 即完整流水线；89 项离线测试（`ed30579`） |
 | 2026-07-26 | 阶段 4 | 已验收 | 用户确认首页收敛（6 主文章 + 双语简讯）；合并 main，`phase-4-accepted` |
 | 2026-07-26 | 阶段 5 | 待验收 | 用户曾指示砍掉阶段 5（邮件），实现中途干净回退；随后决定恢复。完成：双语摘要邮件（HTML+纯文本多部件）、`preview-email` 输出 .eml/.html 到 var/mail、`send-email` 三重门（--yes + 站点已含当日 + meta 防重记录，--resend 可越过）、SMTP 465 隐式 SSL / 587 STARTTLS、fake SMTP 测试；本地预览地址统一为 8618（含 NEWS_SITE_URL 默认值）；95 项离线测试 |
+| 2026-07-26 | 阶段 6 | 进行中 | 用户指示并发推进。子代理C：docs/OPERATIONS.md 运维文档（日常/配置/踩坑/恢复/备份/重建，104 行）；子代理D：阶段 7 部署工件模板 8 件（Dockerfile×2、compose、systemd timer、nginx、GitHub Actions release、部署 README，全部固定版本+非 root+只读+内存上限，标注"服务器实测前不视为最终版"）；主线：`uv sync --locked` 通过、95→96 项测试、许可证核查（全为 BSD/MIT/Apache 宽松许可）、敏感信息扫描干净、fixture 构建 0.36s/峰值 50MB、实测单期站点 ~300KB 与 DB 400KB（年归档远低于 1GB 目标）、新增 releases 保留 5 版修剪、版本升至 `0.6.0rc1`；send-email 站点检查在特殊文件系统上的崩溃改为干净报错 |

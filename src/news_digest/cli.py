@@ -152,8 +152,12 @@ def _run_send_email(date: str | None, resend: bool, yes: bool) -> int:
     fetch_config, date, _, subject, text, html = payload
 
     issues_dir = build_config_from_env().output_root / "current" / "issues" / date
-    if not issues_dir.is_dir():
-        print(f"站点尚未包含 {date}（{issues_dir} 不存在）；先运行 build 再发送。")
+    try:
+        site_ready = issues_dir.is_dir()
+    except OSError:  # current 链接在某些文件系统上不可遍历
+        site_ready = False
+    if not site_ready:
+        print(f"站点尚未包含 {date}（{issues_dir} 不可达）；先运行 build 再发送。")
         return 1
 
     smtp = smtp_config_from_env()
