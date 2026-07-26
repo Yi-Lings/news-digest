@@ -111,11 +111,11 @@ uv run pytest                       # 可选自检，应全绿
 
 ## 7. 生产环境（服务器）
 
-**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，Basic Auth 用户名 `admin`，口令在 bootstrap 部署输出（第 8/10 步）中只显示一次；遗失即 `sudo rm /etc/nginx/htpasswd-news-admin` 后重跑 bootstrap 重新生成并打印。面板只能在既有档案间切换、改接口地址与模型名——生产密钥不经网页传输，页面永远只见掩码。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。
+**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会使所有已登录端失效（轮换会话密钥）并自动删除该初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap 重新生成。面板只能在既有档案间切换、改接口地址与模型名——生产密钥不经网页传输，页面永远只见掩码。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/config/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。
 
 **换密钥的正确姿势。** ssh 登录服务器直接编辑文件（两个文件均 root:600，改完都不用重启）：
 
-- 新增/更换供应商档案：编辑 `/srv/news-digest/providers.json`（`base_url` / `api_key` / `model` 三字段，格式见 `deploy/README.md` §13），保存后刷新面板即可见、可切换；
-- 只换当前生效的密钥：编辑 `/srv/news-digest/.env` 的 `TRANSLATION_API_KEY`；注意把 `providers.json` 里对应档案的 `api_key` 同步改掉，否则日后在面板点「启用」会把旧 key 写回去。
+- 新增/更换供应商档案：编辑 `/srv/news-digest/config/providers.json`（`base_url` / `api_key` / `model` 三字段，格式见 `deploy/README.md` §13），保存后刷新面板即可见、可切换；
+- 只换当前生效的密钥：编辑 `/srv/news-digest/config/.env` 的 `TRANSLATION_API_KEY`；注意把 `providers.json` 里对应档案的 `api_key` 同步改掉，否则日后在面板点「启用」会把旧 key 写回去。
 
 密钥永远不经网页、不进 Git、不进镜像；翻译缓存按模型隔离，切换供应商互不污染。面板故障不影响每日任务（admin 是独立常驻容器，worker 只依赖 `.env` 文件本身）。

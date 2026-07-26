@@ -13,14 +13,15 @@ set -euo pipefail
 # ---------------- 变量区（VAR="${ND_XXX:-默认值}"，执行前 export ND_XXX 即可覆盖）----------------
 OWNER="${ND_OWNER:-yi-lings}"             # GHCR 命名空间（必须全小写）
 TAG="${ND_VERSION:-v0.6.0rc2}"            # 部署候选 tag；转正式版后按 README §4 固定 digest
-APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、.env、providers.json、备份）
+APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、config/、备份）
+CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
 DOMAIN="${ND_DOMAIN:-news.cheapcoding.top}"
 WEB_PORT="${ND_WEB_PORT:-8618}"           # web 宿主回环端口（服务器 8080 已被既有服务占用）
 ADMIN_PORT="${ND_ADMIN_PORT:-8619}"       # 模型切换面板宿主回环端口
 CERTBOT_EMAIL="${ND_CERTBOT_EMAIL:-1481835649@qq.com}"
 CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 NGINX_CONF="/etc/nginx/conf.d/news.conf"
-HTPASSWD_FILE="/etc/nginx/htpasswd-news-admin"   # /admin/ 面板独立口令文件（news.conf 同路径）
+HTPASSWD_FILE="${CONFIG_DIR}/htpasswd-admin"     # 面板登录口令哈希（面板登录页校验；nginx 不读取）
 WEBROOT="/var/www/certbot"                # certbot webroot 验证目录（news.conf 同路径）
 WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker:${TAG}"
 WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web:${TAG}"
@@ -98,12 +99,28 @@ fi
 
 # ---------------------------------------------------------------
 section "3/10 生产密钥文件 .env"
-ENV_FILE="${APP_DIR}/.env"
+# 配置收窄（rc2 安全整改）：可被面板读写的配置全部集中到 config/ 子目录，admin
+# 容器只 bind 挂载该子目录——面板即使被攻破也触不到 compose.yaml 与运维脚本。
+mkdir -p "$CONFIG_DIR"
+chown root:root "$CONFIG_DIR"
+chmod 750 "$CONFIG_DIR"
+# 幂等迁移：旧位置存在且新位置尚无同名文件才 mv（mv 保留属主与权限）；重跑自动跳过
+migrate_cfg() {  # $1=旧路径 $2=新路径
+  if [ -e "$1" ] && [ ! -e "$2" ]; then
+    mv "$1" "$2"
+    echo "已迁移旧配置：$1 -> $2"
+  fi
+}
+migrate_cfg "${APP_DIR}/.env"               "${CONFIG_DIR}/.env"
+migrate_cfg "${APP_DIR}/providers.json"     "${CONFIG_DIR}/providers.json"
+migrate_cfg /etc/nginx/htpasswd-news-admin  "${CONFIG_DIR}/htpasswd-admin"
+
+ENV_FILE="${CONFIG_DIR}/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  # 只写模板与注释，不含任何真实密钥。定界符不加引号：要展开 ${APP_DIR}/${DOMAIN}
+  # 只写模板与注释，不含任何真实密钥。定界符不加引号：要展开 ${ENV_FILE}/${DOMAIN}
   # 两个部署参数；模板正文不含其他 $，无意外展开风险
   cat > "$ENV_FILE" <<ENVEOF
-# ${APP_DIR}/.env —— 生产密钥与配置（root:root，权限 600）
+# ${ENV_FILE} —— 生产密钥与配置（root:root，权限 600）
 # 红线：真实值只在本文件出现，绝不进 Git / CI / 镜像 / 脚本参数。
 # 注意：不要设置 NEWS_DATA_DIR / NEWS_OUTPUT_PATH / NEWS_DATABASE_PATH——
 #       三者已在镜像内固定为卷挂载点（/data、/site），覆盖会写只读路径导致任务失败。
@@ -154,7 +171,7 @@ echo ".env 已存在（权限已确认 600），继续"
 section "4/10 模型供应商档案 providers.json"
 # 模型切换面板（/admin/）在既有档案间切换；生产模式密钥不经网页传输，
 # 新增供应商 = 登录服务器直接编辑本文件（格式见 deploy/README.md §13）。
-PROVIDERS_FILE="${APP_DIR}/providers.json"
+PROVIDERS_FILE="${CONFIG_DIR}/providers.json"
 if [ -f "$PROVIDERS_FILE" ]; then
   # 幂等收紧权限；内容绝不覆盖——面板或手工编辑过的档案是运行时状态，不是部署工件
   chown root:root "$PROVIDERS_FILE"
@@ -236,37 +253,33 @@ echo "下次触发（NEXT 列）："
 systemctl list-timers news-digest.timer --no-pager || true
 
 # ---------------------------------------------------------------
-section "8/10 面板 Basic Auth 口令文件"
-# 必须先于 news.conf 就位：完整版配置引用本文件，缺失时 /admin/ 请求会 500。
-# 口令只在首次生成时打印一次，脚本不落盘明文——重跑不再显示（幂等且不泄露）。
+section "8/10 面板登录口令文件"
+# 认证已移入应用层：面板自带登录页 + 会话 Cookie（会话密钥 session-secret 由面板
+# 自建），nginx 不再读取口令文件。本步只负责首次生成口令哈希（apr1，面板登录页
+# 校验）。口令本身不打印到 stdout——部署输出可能被日志/CI 留存，明文只落 600 文件。
 if [ -f "$HTPASSWD_FILE" ]; then
-  echo "已存在，跳过：${HTPASSWD_FILE}（忘记口令时：rm ${HTPASSWD_FILE} 后重跑本脚本重新生成）"
+  # 幂等收紧：旧部署迁移来的文件可能还是 root:www-data 640（当年供 nginx 读取）
+  chown root:root "$HTPASSWD_FILE"
+  chmod 600 "$HTPASSWD_FILE"
+  echo "已存在，跳过：${HTPASSWD_FILE}"
+  echo "（忘记口令时重置：rm ${CONFIG_DIR}/htpasswd-admin ${CONFIG_DIR}/session-secret 后重跑本脚本）"
 elif ! command -v openssl >/dev/null 2>&1; then
   warnbox "openssl 不可用，无法生成面板口令文件——/admin/ 将无法登录。安装 openssl 后重跑本脚本"
 else
   ADMIN_PASSWORD="$(openssl rand -base64 12)"   # 12 字节 → 恰好 16 位 base64 字符
-  # apr1（htpasswd 的 MD5 变体）：nginx 原生支持，且不必额外安装 httpd-tools/htpasswd
-  printf 'admin:%s\n' "$(openssl passwd -apr1 "$ADMIN_PASSWORD")" > "$HTPASSWD_FILE"
-  # nginx worker 进程以非 root 用户逐请求读取本文件：640 要求属组是 nginx 运行组
-  # （Debian/Ubuntu 为 www-data，RHEL 系为 nginx；都没有则退回 root 并提醒）
-  if getent group www-data >/dev/null 2>&1; then NGINX_GROUP="www-data"
-  elif getent group nginx >/dev/null 2>&1; then NGINX_GROUP="nginx"
-  else
-    NGINX_GROUP="root"
-    warnbox "未找到 www-data/nginx 用户组——${HTPASSWD_FILE} 属组暂设 root，若 /admin/ 返回 403/500 请把属组改为 nginx 运行组"
-  fi
-  chown "root:${NGINX_GROUP}" "$HTPASSWD_FILE"
-  chmod 640 "$HTPASSWD_FILE"
-  cat <<PASSEOF
-
-==================================================================
-  模型切换面板登录口令（仅显示这一次，请立即保存）
-    地址　：https://${DOMAIN}/admin/
-    用户名：admin
-    口令　：${ADMIN_PASSWORD}
-  遗失后重置：rm ${HTPASSWD_FILE} && 重跑本脚本
-==================================================================
-PASSEOF
+  INITIAL_PASS_FILE="${CONFIG_DIR}/admin-password.initial"
+  # umask 子 shell：两个文件从创建瞬间即 600，不经历宽权限窗口
+  (
+    umask 077
+    # apr1（htpasswd 的 MD5 变体）：面板登录页原生校验此格式，无需安装 httpd-tools
+    printf 'admin:%s\n' "$(openssl passwd -apr1 "$ADMIN_PASSWORD")" > "$HTPASSWD_FILE"
+    printf '%s\n' "$ADMIN_PASSWORD" > "$INITIAL_PASS_FILE"
+  )
+  chown root:root "$HTPASSWD_FILE" "$INITIAL_PASS_FILE"
+  chmod 600 "$HTPASSWD_FILE" "$INITIAL_PASS_FILE"
+  echo "初始口令已写入 ${INITIAL_PASS_FILE}（登录用户名 admin）。"
+  echo "登录面板后请立即在网页上修改口令（修改成功会自动删除该文件），"
+  echo "或 cat ${INITIAL_PASS_FILE} 查看后手动删除。"
 fi
 
 # ---------------------------------------------------------------
@@ -321,8 +334,8 @@ server {
     }
 
     # 证书未就绪期间临时反代，保证站点先以 HTTP 可用。
-    # 故意不代理 /admin/：Basic Auth 口令绝不能走明文 HTTP，面板只在 HTTPS
-    # 就绪后开放（此期间 /admin/ 落入本 location 由 web 容器返回 404，无泄露面）
+    # 故意不代理 /admin/：登录口令与会话 Cookie 绝不能走明文 HTTP，面板只在
+    # HTTPS 就绪后开放（此期间 /admin/ 落入本 location 由 web 容器返回 404，无泄露面）
     location / {
         proxy_pass http://127.0.0.1:8618;
         proxy_http_version 1.1;
@@ -364,17 +377,20 @@ fi
 section "10/10 收尾自检"
 HEALTH_LINE="$(curl -sI --max-time 10 "http://127.0.0.1:${WEB_PORT}/healthz" | head -n1 || true)"
 echo "web /healthz         ：${HEALTH_LINE:-（无响应——检查 docker compose ps 与 web 容器日志）}"
-# 面板路由只实现了 GET（HEAD 会落到静态回退返回 404），故用 -w 取状态码而不用 -I
+# 未登录的 GET /admin/ 返回登录页（200）；生产模式无静态回落、HEAD 不保证实现，
+# 故用 -w 取状态码而不用 -I
 ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${ADMIN_PORT}/admin/" || true)"
-echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200；000 为无响应——检查 admin 容器日志）"
+echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页；000 为无响应——检查 admin 容器日志）"
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
 
 cat <<DONEEOF
 
 部署完成。
-模型切换面板：https://${DOMAIN}/admin/（Basic Auth 用户名 admin，口令见第 8/10 步
-  首次生成时的输出；遗失后重置：rm ${HTPASSWD_FILE} && 重跑本脚本）。
+模型切换面板：https://${DOMAIN}/admin/（网页登录，用户名 admin；初始口令查看：
+  cat ${CONFIG_DIR}/admin-password.initial，登录后请立即在面板网页修改口令——
+  修改成功会自动删除该文件；忘记口令重置：
+  rm ${CONFIG_DIR}/htpasswd-admin ${CONFIG_DIR}/session-secret 后重跑本脚本）。
 回滚方法（README §10）：
   1. 编辑 ${APP_DIR}/compose.yaml，把三处 image 改回上一版 digest
      （worker 与 admin 共用 worker 镜像引用，须一并改；形如

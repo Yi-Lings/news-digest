@@ -5,7 +5,8 @@
 > 任何与服务器实测冲突之处，以实测结果为准并回写本目录。
 
 服务器上不保存 Git 仓库与源码（PLAN 发布链路）：应用代码只存在于 GHCR 预构建镜像内，
-服务器只保留 Compose manifest、`.env`、systemd 单元、宿主机 Nginx 配置与持久化卷。
+服务器只保留 Compose manifest、`config/` 配置子目录（`.env`、`providers.json`、
+面板口令，admin 容器唯一可触及的宿主路径）、systemd 单元、宿主机 Nginx 配置与持久化卷。
 
 ## 一键部署（类 sub2api）
 
@@ -18,7 +19,7 @@ bash <(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
 ```
 
 自动完成：下载最新 Release 部署包 → 只读体检（preflight）→ 幂等部署（bootstrap：镜像、
-web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/srv/news-digest/.env`
+web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/srv/news-digest/config/.env`
 生成密钥模板并暂停，在服务器上填好真实值后重跑同一命令续接。部署包
 （`news-digest-deploy.tgz`）由 CI 在每次推送 `v*` 标签时自动附到 Release；
 已解包场景直接 `sudo bash deploy/install.sh`。
@@ -43,7 +44,7 @@ web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/sr
 |---|---|---|
 | `ND_OWNER` | `yi-lings` | GHCR 命名空间；渲染 compose 中三处 image 引用（worker/admin 共用一处值） |
 | `ND_VERSION` | `v0.6.0rc2` | 部署候选 tag；转正式版后仍按 §4 固定 digest |
-| `ND_APP_DIR` | `/srv/news-digest` | 部署目录（compose、`.env`、`providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
+| `ND_APP_DIR` | `/srv/news-digest` | 部署目录（compose、`config/` 子目录内的 `.env` 与 `providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
 | `ND_DOMAIN` | `news.cheapcoding.top` | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
 | `ND_WEB_PORT` | `8618` | web 容器宿主回环端口；渲染 compose 与 nginx |
 | `ND_ADMIN_PORT` | `8619` | 模型切换面板宿主回环端口；渲染 compose 与 nginx |
@@ -79,14 +80,15 @@ free -m && df -h /          # 内存、磁盘余量核对（worker 峰值目标 
 ## 3. 创建部署目录与配置
 
 ```bash
-sudo mkdir -p /srv/news-digest/backups
+sudo mkdir -p /srv/news-digest/backups /srv/news-digest/config
+sudo chmod 750 /srv/news-digest/config                 # 密钥配置子目录：admin 容器唯一可写宿主路径
 sudo cp compose.yaml /srv/news-digest/compose.yaml     # 从本目录 scp 上传后拷贝
-sudo touch /srv/news-digest/.env
-sudo chown root:root /srv/news-digest/.env
-sudo chmod 600 /srv/news-digest/.env                   # 密钥文件：600，root 所有
+sudo touch /srv/news-digest/config/.env
+sudo chown root:root /srv/news-digest/config/.env
+sudo chmod 600 /srv/news-digest/config/.env            # 密钥文件：600，root 所有
 ```
 
-编辑 `/srv/news-digest/.env`（生产值示例；密钥只在服务器上出现，绝不进 Git / CI / 镜像）：
+编辑 `/srv/news-digest/config/.env`（生产值示例；密钥只在服务器上出现，绝不进 Git / CI / 镜像）：
 
 ```dotenv
 NEWS_ENV=production
@@ -145,7 +147,7 @@ sudo docker compose run --rm worker            # 首次全量：抓取→选题�
 sudo docker compose up -d web admin            # admin 为模型切换面板常驻服务（§13）
 curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8618/ | head -5     # 期望看到站点 HTML
-curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到面板 HTML（回环直连不经认证）
+curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web 应为 healthy，admin 应为 running
 ```
 
@@ -174,10 +176,12 @@ journalctl -u news-digest.service -n 50        # 查看运行日志
 ## 8. 宿主机 Nginx 与 HTTPS
 
 1. 访问保护现状（用户决定 2026-07-26）：站点公开、不启用站级 Basic Auth；
-   `/admin/` 模型切换面板独立口令（安全底线：能改生产配置的入口必须有认证）。
-   口令文件 `/etc/nginx/htpasswd-news-admin` 由 bootstrap.sh 自动生成并只打印一次；
-   手工生成：`printf 'admin:%s\n' "$(openssl passwd -apr1 '口令')" | sudo tee /etc/nginx/htpasswd-news-admin`，
-   属组给 nginx 运行组（Debian 系 www-data）、权限 640。
+   `/admin/` 模型切换面板必须登录（安全底线：能改生产配置的入口必须有认证）。
+   认证由面板自身的网页登录页承担（会话 Cookie），nginx 层不配置 Basic Auth；
+   口令哈希 `/srv/news-digest/config/htpasswd-admin`（root:600，nginx 不读取）由
+   bootstrap.sh 首次生成，初始口令写入 `config/admin-password.initial`（见 §13）。
+   手工生成哈希：`printf 'admin:%s\n' "$(openssl passwd -apr1 '口令')" | sudo tee /srv/news-digest/config/htpasswd-admin`，
+   随后 `sudo chown root:root` 并 `sudo chmod 600` 该文件。
 2. 准备 certbot webroot 并临时上线仅 80 的配置（443 块引用的证书还不存在，直接放会导致 `nginx -t` 失败）：
 
 ```bash
@@ -206,8 +210,9 @@ curl -sI -u 用户名 https://news.cheapcoding.top/ | grep -iE 'x-robots|content
 
 ## 9. 备份
 
-- **配置**：`/srv/news-digest/.env`、`providers.json`（供应商档案，含密钥）、`compose.yaml`
-  （连同其中的 digest）、两个 systemd 单元、`news.conf`、`/etc/nginx/htpasswd-news-admin`（面板口令）。
+- **配置**：`/srv/news-digest/config/`（`.env`、`providers.json` 供应商档案含密钥、
+  `htpasswd-admin` 面板口令哈希；其中 `session-secret` 与 `admin-password.initial`
+  可再生，不必备份）、`compose.yaml`（连同其中的 digest）、两个 systemd 单元、`news.conf`。
 - **数据卷**（SQLite、翻译缓存、站点归档）：
 
 ```bash
@@ -258,7 +263,7 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
   `docker compose run --rm worker send-email --yes`（或并入每日任务），属部署阶段决策。
 - 生产模型切换面板已并入本批工件（compose `admin` 服务 + news.conf `/admin/` +
   bootstrap 第 4、8 两步；访问保护决策已定：站点公开、面板独立口令，见 §8）。
-  服务器实测项：host 网络下面板对宿主回环端口的监听、Basic Auth 登录、
+  服务器实测项：host 网络下面板对宿主回环端口的监听、登录页登录与网页改密、
   面板切换后下一次 timer 任务确实使用新配置。
 - 首次 `docker compose run` 的 GHCR 拉取、DNS、出网代理等网络实况。
 
@@ -268,16 +273,21 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
 `admin` 服务提供（复用 worker 镜像，`news-digest admin`，只监听宿主机
 `127.0.0.1:8619`），公网入口唯一经 nginx 的 `/admin/`。
 
-- **访问**：`https://news.cheapcoding.top/admin/`（Basic Auth 用户名 `admin`，
-  口令在 bootstrap 第 8/10 步首次生成时打印一次；遗失后重置：
-  `sudo rm /etc/nginx/htpasswd-news-admin` 再重跑 bootstrap）。
+- **访问**：`https://news.cheapcoding.top/admin/`，面板自带网页登录页
+  （用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。
+  首次口令由 bootstrap 写入服务器 `/srv/news-digest/config/admin-password.initial`
+  （`sudo cat` 查看；口令不出现在部署输出/日志里）。
+- **改口令**：登录后在面板网页修改。修改成功会轮换会话密钥（所有已登录端强制
+  重新登录）并自动删除 `admin-password.initial`。忘记口令：
+  `sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret`
+  后重跑 bootstrap 重新生成初始口令。
 - **能做什么**：在既有供应商档案间切换、修改档案的接口地址与模型名。
-  点「启用」即把三个 `TRANSLATION_*` 写入 `/srv/news-digest/.env`——
+  点「启用」即把三个 `TRANSLATION_*` 写入 `/srv/news-digest/config/.env`——
   **无需重启任何容器**：worker 是一次性任务，每次由 timer 经 `docker compose run`
   拉起时重读 `.env`，下一期即生效。
 - **密钥不经网页**（生产模式硬约束）：页面永远只显示掩码，新增供应商 = 登录服务器
-  编辑 `${APP_DIR}/providers.json`（root:600；默认 `/srv/news-digest/providers.json`），
-  保存后刷新面板即可见，同样无需重启。格式：
+  编辑 `${APP_DIR}/config/providers.json`（root:600；默认
+  `/srv/news-digest/config/providers.json`），保存后刷新面板即可见，同样无需重启。格式：
 
 ```json
 {

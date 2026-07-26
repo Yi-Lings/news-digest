@@ -451,6 +451,8 @@ def _run_admin(port: int, config_dir: Path) -> int:
         env_file=".env",
         profiles_file="providers.json",
         allow_key_input=False,
+        serve_static=False,  # /config 含明文密钥，绝不提供静态文件回落
+        htpasswd_file=config_dir / "htpasswd-admin",
     )
     try:
         server.serve_forever()

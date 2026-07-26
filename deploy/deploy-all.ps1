@@ -103,7 +103,7 @@ gh run watch $runId --exit-status
 Stop-OnError $LASTEXITCODE "CI build (gh run watch)"
 
 # ---- [3/6] provision the server .env from local .env.local ----
-Write-Host "[3/6] Provisioning $AppDir/.env from local .env.local..."
+Write-Host "[3/6] Provisioning $AppDir/config/.env from local .env.local..."
 $envLocal = Join-Path $RepoDir ".env.local"
 if (-not (Test-Path $envLocal)) {
     Write-Host "[FAIL] .env.local not found." -ForegroundColor Red
@@ -133,13 +133,15 @@ $lines += "NEWS_SITE_URL=https://news.cheapcoding.top"
 foreach ($k in $keys) { $lines += "$k=$($pairs[$k])" }
 $tmp = [IO.Path]::GetTempFileName()
 [IO.File]::WriteAllText($tmp, (($lines -join "`n") + "`n"))
-ssh -i $KeyPath $Server "mkdir -p $AppDir"
-Stop-OnError $LASTEXITCODE "ssh mkdir appdir"
-scp -i $KeyPath $tmp "${Server}:$AppDir/.env"
+# config/ subdir is the only host path bind-mounted into the admin container;
+# bootstrap re-tightens ownership/permissions idempotently later in step [5/6].
+ssh -i $KeyPath $Server "mkdir -p $AppDir/config && chmod 750 $AppDir/config"
+Stop-OnError $LASTEXITCODE "ssh mkdir config dir"
+scp -i $KeyPath $tmp "${Server}:$AppDir/config/.env"
 $scpCode = $LASTEXITCODE
 Remove-Item $tmp -Force
 Stop-OnError $scpCode "scp .env"
-ssh -i $KeyPath $Server "chmod 600 $AppDir/.env"
+ssh -i $KeyPath $Server "chmod 600 $AppDir/config/.env"
 Stop-OnError $LASTEXITCODE "chmod .env"
 
 # ---- [4/6] server GHCR login: token flows Windows -> server directly ----

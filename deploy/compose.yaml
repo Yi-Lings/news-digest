@@ -30,9 +30,11 @@ services:
     init: true
     env_file:
       # 生产密钥唯一注入点；文件必须 root 所有、权限 600（README 有创建步骤）。
+      # 位于 config/ 子目录：与 providers.json、面板口令等一起构成 admin 容器
+      # 唯一可触及的宿主路径（见 admin 服务的 volumes 注释）。
       # 注意：.env 中不得设置 NEWS_DATA_DIR / NEWS_OUTPUT_PATH / NEWS_DATABASE_PATH，
       # 这三项已在镜像内固定为卷挂载点，覆盖会写到只读路径导致任务失败
-      - /srv/news-digest/.env
+      - /srv/news-digest/config/.env
     # 只读根文件系统：可写面收敛到 /tmp（tmpfs）与两个数据卷
     read_only: true
     tmpfs:
@@ -96,7 +98,8 @@ services:
     # 面板服务端在代码里硬绑 127.0.0.1（安全设计：密钥面板绝不监听非回环地址）。
     # bridge 网络下 ports 映射的流量到达的是容器 eth0，会被这一回环绑定拒绝，
     # 因此用 host 网络——效果恰好就是需求本身：只监听宿主机 127.0.0.1:8619，
-    # 公网入口唯一经宿主机 Nginx 的 /admin/（独立 Basic Auth，见 nginx/news.conf）
+    # 公网入口唯一经宿主机 Nginx 的 /admin/（认证由面板自身的登录页 + 会话
+    # Cookie 承担，nginx 只反代不做 Basic Auth，见 nginx/news.conf）
     network_mode: host
     # 镜像默认以 uid 10001 运行，但 /config 下 .env 与 providers.json 依红线保持
     # root:600；面板要原地读写它们，必须以容器 root 运行。风险由 cap_drop ALL、
@@ -120,11 +123,16 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
+      # 只挂 config/ 子目录而非整个部署目录：admin 容器可写面收窄到自身的配置
+      # 文件（.env、providers.json、htpasswd-admin、session-secret、
+      # admin-password.initial），不再能改写 compose.yaml 与运维脚本——即使面板
+      # 被攻破也不存在借部署工件提权的路径。bootstrap 渲染时把 /srv/news-digest
+      # 全局替换为 APP_DIR 的机制保持不变，本行同样被渲染。
       # 必须 bind 挂「目录」而不是单个文件：配置保存一旦走「写临时文件 → 原子替换」
       # 路径，文件 inode 就会变化，而单文件 bind 钉住的是旧 inode，此后宿主与容器
       # 将各自持有不同文件、互相看不见改动；且 providers.json 首次启动时可能尚不
       # 存在（单文件 bind 会被 Docker 误建成目录）。挂目录后目录项更新对两侧即时可见。
-      - /srv/news-digest:/config
+      - /srv/news-digest/config:/config
     # 面板改写 /config/.env 后不需要重启任何服务：worker 是一次性容器，每次由
     # systemd timer 经 `docker compose run` 拉起时都重新读取 env_file，下一期即
     # 生效；web 不读 .env；面板自身对配置文件按请求即读即写，也没有缓存。
