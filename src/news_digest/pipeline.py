@@ -29,9 +29,11 @@ from news_digest.rendering.pages import (
     render_home,
 )
 from news_digest.selection.dedupe import dedupe
+from news_digest.selection.score import select_daily
 from news_digest.sources.feeds import parse_feed
 from news_digest.sources.http import FetchError, build_client, proxy_active, safe_get
 from news_digest.sources.registry import SOURCES, SourceConfig
+from news_digest.storage import db
 from news_digest.textutil import slugify
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -194,7 +196,107 @@ def fetch_daily(
     (fetched_dir / f"{local_date}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
     )
+
+    conn = db.connect(config.database)
+    try:
+        db.upsert_articles(conn, local_date, articles)
+        db.upsert_briefs(conn, local_date, briefs)
+    finally:
+        conn.close()
     return edition, report
+
+
+# ── 数据库版次组装与完整流水线 ────────────────────────────────────────────
+
+
+def import_legacy_fetched(config: FetchConfig) -> int:
+    """DB 为空时把 var/data/fetched/*.json 一次性导入；返回导入日期数。"""
+    conn = db.connect(config.database)
+    try:
+        if db.list_dates(conn):
+            return 0
+        paths = sorted((config.data_dir / "fetched").glob("*.json"))
+        for path in paths:
+            edition = edition_from_dict(
+                json.loads(path.read_text(encoding="utf-8"))["edition"]
+            )
+            db.upsert_articles(conn, edition.date, edition.articles)
+            db.upsert_briefs(conn, edition.date, edition.briefs)
+        return len(paths)
+    finally:
+        conn.close()
+
+
+def _article_to_brief(article: Article) -> BriefItem:
+    return BriefItem(
+        title_en=article.title_en,
+        title_zh=article.title_zh,
+        source=article.source,
+        url=article.url,
+    )
+
+
+def selected_edition(
+    conn, date: str, now: datetime.datetime, main_count: int = 6
+) -> DailyEdition | None:
+    """从文章池选出主文章，未入选者与既有简讯合并为当日简讯。"""
+    pool = db.get_edition(conn, date)
+    if pool is None:
+        return None
+    selection = select_daily(pool.articles, reference_time=now, main_count=main_count)
+    briefs = pool.briefs + [_article_to_brief(article) for article in selection.overflow]
+    return DailyEdition(date=date, articles=selection.mains, briefs=briefs)
+
+
+def load_db_editions(
+    config: FetchConfig, now: datetime.datetime | None = None
+) -> list[DailyEdition]:
+    """全部日期的选题后版次（新在前）；DB 为空时尝试导入历史 JSON。"""
+    import_legacy_fetched(config)
+    now = now or datetime.datetime.now(datetime.UTC)
+    conn = db.connect(config.database)
+    try:
+        editions = []
+        for date in db.list_dates(conn):
+            edition = selected_edition(conn, date, now)
+            if edition is not None:
+                editions.append(edition)
+        if not editions:
+            raise FileNotFoundError("数据库无内容；请先运行 news-digest fetch 或 run")
+        return editions
+    finally:
+        conn.close()
+
+
+def selected_mains_for_translation(
+    config: FetchConfig, date: str, now: datetime.datetime | None = None
+) -> DailyEdition | None:
+    """translate 阶段的输入：当日选题后的主文章版次。"""
+    import_legacy_fetched(config)
+    now = now or datetime.datetime.now(datetime.UTC)
+    conn = db.connect(config.database)
+    try:
+        return selected_edition(conn, date, now)
+    finally:
+        conn.close()
+
+
+def store_translated(config: FetchConfig, date: str, articles: list[Article]) -> None:
+    conn = db.connect(config.database)
+    try:
+        db.upsert_articles(conn, date, articles)
+    finally:
+        conn.close()
+
+
+def latest_db_date(config: FetchConfig) -> str | None:
+    import_legacy_fetched(config)
+    conn = db.connect(config.database)
+    try:
+        dates = db.list_dates(conn)
+        return dates[0] if dates else None
+    finally:
+        conn.close()
 
 
 # ── 站点构建 ──────────────────────────────────────────────────────────────

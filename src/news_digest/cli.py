@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     fetch = subparsers.add_parser(
-        "fetch", help="抓取真实新闻源并保存当日候选（写入 var/data/fetched）"
+        "fetch", help="抓取真实新闻源并入库（同时写 var/data/fetched 快照）"
     )
     fetch.add_argument(
         "--window-hours",
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     build = subparsers.add_parser(
-        "build", help="生成静态站点：默认使用已抓取数据，--fixtures 使用演示数据"
+        "build", help="生成静态站点：默认使用数据库版次，--fixtures 使用演示数据"
     )
     build.add_argument(
         "--fixtures",
@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     translate = subparsers.add_parser(
-        "translate", help="翻译已抓取内容（默认只显示调用计划，--yes 才真实调用）"
+        "translate", help="翻译当日选题主文章（默认只显示计划，--yes 才真实调用）"
     )
     translate.add_argument(
         "--date", default=None, metavar="YYYY-MM-DD", help="要翻译的日期，默认最新一期"
@@ -49,10 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="SLUG",
-        help="强制重翻指定文章（可多次使用），不受 --limit 约束",
+        help="强制重翻指定主文章（可多次使用），不受 --limit 约束",
     )
     translate.add_argument(
         "--yes", action="store_true", help="确认执行真实 API 调用（会产生费用）"
+    )
+
+    run = subparsers.add_parser(
+        "run", help="完整每日流水线：抓取→选题→翻译（需 --yes）→构建"
+    )
+    run.add_argument("--window-hours", type=int, default=None, metavar="N")
+    run.add_argument(
+        "--yes", action="store_true", help="包含真实翻译调用；缺省只做抓取+选题+构建"
     )
 
     preview = subparsers.add_parser(
@@ -71,75 +79,111 @@ def main(argv: list[str] | None = None) -> int:
         return _run_build(args.fixtures)
     if args.command == "translate":
         return _run_translate(args.date, args.limit, args.yes, frozenset(args.redo))
+    if args.command == "run":
+        return _run_daily(args.window_hours, args.yes)
     if args.command == "preview":
         return _run_preview(args.port)
     parser.print_help()
     return 0
 
 
-def _run_preview(port: int) -> int:
-    from news_digest.config import build_config_from_env
-    from news_digest.preview_server import create_server
+def _fetch_config(window_hours: int | None):
+    import dataclasses
 
-    root = Path.cwd()
-    site_dir = build_config_from_env().output_root / "current"
-    if not (site_dir / "index.html").is_file():
-        print(f"提示：{site_dir} 尚无站点，先运行 build（或双击 daily.bat）")
-    print(f"站点预览：http://127.0.0.1:{port}/")
-    print(f"模型设置：http://127.0.0.1:{port}/admin/")
-    print("按 Ctrl+C 停止。")
-    server = create_server(root, site_dir, port)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    from news_digest.config import fetch_config_from_env, load_env_file
+
+    load_env_file()
+    config = fetch_config_from_env()
+    if window_hours is not None:
+        config = dataclasses.replace(config, window_hours=window_hours)
+    return config
+
+
+def _print_fetch(config, report) -> None:
+    from news_digest.sources.http import proxy_active
+
+    proxy_note = (
+        "代理已生效，本地 DNS 公网校验交由代理处理"
+        if proxy_active(config.proxy)
+        else "未检测到代理，本地 DNS 公网校验生效"
+    )
+    print(f"抓取窗口：最近 {config.window_hours} 小时；时区：{config.timezone}；{proxy_note}")
+    for source, status in report.per_source.items():
+        print(f"  {source}: {status}")
+
+
+def _run_fetch(window_hours: int | None) -> int:
+    from news_digest.pipeline import fetch_daily
+
+    config = _fetch_config(window_hours)
+    edition, report = fetch_daily(config)
+    _print_fetch(config, report)
+    if edition is None:
+        print("全部来源失败或窗口内无内容，未生成当日数据。")
+        return 1
+    print(
+        f"完成：入库主文章 {report.articles} 篇（摘要降级 {report.degraded} 篇），"
+        f"简讯 {report.briefs} 条；日期 {edition.date}"
+    )
+    print("下一步：uv run news-digest run --yes（或分步 translate + build）")
     return 0
+
+
+def _run_build(fixtures: str | None) -> int:
+    from news_digest.config import build_config_from_env, load_env_file
+    from news_digest.pipeline import build_editions, build_site, load_db_editions
+
+    load_env_file()
+    config = build_config_from_env()
+    if fixtures is not None:
+        release = build_site(Path(fixtures), config)
+    else:
+        from news_digest.config import fetch_config_from_env
+
+        release = build_editions(load_db_editions(fetch_config_from_env()), config)
+    print(f"构建完成：{release}")
+    print("本地预览：双击 preview.bat")
+    return 0
+
+
+def _translate_edition_for(date: str | None, config) -> tuple[str, object] | None:
+    from news_digest.pipeline import latest_db_date, selected_mains_for_translation
+
+    date = date or latest_db_date(config)
+    if date is None:
+        print("数据库无内容；先运行 news-digest fetch")
+        return None
+    edition = selected_mains_for_translation(config, date)
+    if edition is None or not edition.articles:
+        print(f"{date} 没有可翻译的主文章")
+        return None
+    return date, edition
 
 
 def _run_translate(
     date: str | None, limit: int | None, yes: bool, redo: frozenset[str]
 ) -> int:
-    import json
-
-    from news_digest.config import (
-        fetch_config_from_env,
-        load_env_file,
-        translation_config_from_env,
-    )
+    from news_digest.config import translation_config_from_env
+    from news_digest.pipeline import store_translated
     from news_digest.translation.client import ApiTranslator, TranslationError
     from news_digest.translation.service import translate_edition
 
-    load_env_file()
-    data_dir = fetch_config_from_env().data_dir
-    fetched_dir = data_dir / "fetched"
-    if date is None:
-        paths = sorted(fetched_dir.glob("*.json"))
-        if not paths:
-            print(f"未在 {fetched_dir} 找到抓取数据；先运行 news-digest fetch")
-            return 1
-        path = paths[-1]
-    else:
-        path = fetched_dir / f"{date}.json"
-        if not path.is_file():
-            print(f"未找到 {path}")
-            return 1
+    fetch_config = _fetch_config(None)
+    located = _translate_edition_for(date, fetch_config)
+    if located is None:
+        return 1
+    date, edition = located
 
-    from news_digest.models import edition_from_dict, edition_to_dict
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    edition = edition_from_dict(payload["edition"])
-    known_slugs = {a.slug for a in edition.articles}
-    unknown = sorted(redo - known_slugs)
+    slugs = {a.slug for a in edition.articles}
+    unknown = sorted(redo - slugs)
     if unknown:
-        print(f"--redo 中不存在的 slug：{', '.join(unknown)}")
+        print(f"--redo 中不在当日主文章之列：{', '.join(unknown)}")
         return 1
     pending = [a for a in edition.articles if not a.translated_by and a.slug not in redo]
     planned = (len(pending) if limit is None else min(limit, len(pending))) + len(redo)
     config = translation_config_from_env()
 
-    print(f"日期：{edition.date}；文章 {len(edition.articles)} 篇，其中未翻译 {len(pending)} 篇")
+    print(f"日期：{date}；主文章 {len(edition.articles)} 篇，其中未翻译 {len(pending)} 篇")
     if redo:
         print(f"强制重翻：{', '.join(sorted(redo))}")
     print(f"接口：{config.base_url or '（未配置）'}；模型：{config.model or '（未配置）'}")
@@ -163,8 +207,7 @@ def _run_translate(
     finally:
         translator.close()
 
-    payload["edition"] = edition_to_dict(updated)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    store_translated(fetch_config, date, updated.articles)
     print(
         f"完成：成功 {report.succeeded} 篇（缓存命中 {report.cache_hits}），"
         f"API 请求 {report.api_calls} 次，失败 {report.failed} 篇，"
@@ -176,50 +219,83 @@ def _run_translate(
     return 0 if report.failed == 0 else 1
 
 
-def _run_fetch(window_hours: int | None) -> int:
-    import dataclasses
-
-    from news_digest.config import fetch_config_from_env, load_env_file
-    from news_digest.pipeline import fetch_daily
-
-    load_env_file()
-    config = fetch_config_from_env()
-    if window_hours is not None:
-        config = dataclasses.replace(config, window_hours=window_hours)
-
-    from news_digest.sources.http import proxy_active
-
-    proxy_note = (
-        "代理已生效，本地 DNS 公网校验交由代理处理"
-        if proxy_active(config.proxy)
-        else "未检测到代理，本地 DNS 公网校验生效"
+def _run_daily(window_hours: int | None, yes: bool) -> int:
+    from news_digest.config import build_config_from_env, translation_config_from_env
+    from news_digest.pipeline import (
+        build_editions,
+        fetch_daily,
+        load_db_editions,
+        store_translated,
     )
-    print(f"抓取窗口：最近 {config.window_hours} 小时；时区：{config.timezone}；{proxy_note}")
-    edition, report = fetch_daily(config)
-    for source, status in report.per_source.items():
-        print(f"  {source}: {status}")
+    from news_digest.translation.client import ApiTranslator, TranslationError
+    from news_digest.translation.service import translate_edition
+
+    fetch_config = _fetch_config(window_hours)
+
+    print("[1/3] 抓取")
+    edition, report = fetch_daily(fetch_config)
+    _print_fetch(fetch_config, report)
     if edition is None:
-        print("全部来源失败或窗口内无内容，未生成当日数据。")
-        return 1
-    print(
-        f"完成：主文章 {report.articles} 篇（其中摘要降级 {report.degraded} 篇），"
-        f"简讯 {report.briefs} 条 -> var/data/fetched/{edition.date}.json"
-    )
-    print("下一步：uv run news-digest build")
-    return 0
+        print("抓取无结果；继续用数据库既有内容构建。")
 
-
-def _run_build(fixtures: str | None) -> int:
-    from news_digest.config import build_config_from_env, fetch_config_from_env
-    from news_digest.pipeline import build_editions, build_site, load_fetched_editions
-
-    config = build_config_from_env()
-    if fixtures is not None:
-        release = build_site(Path(fixtures), config)
+    print("[2/3] 翻译")
+    exit_code = 0
+    if not yes:
+        print("未加 --yes：跳过翻译，主文章将以英文原文成刊。")
     else:
-        editions = load_fetched_editions(fetch_config_from_env().data_dir)
-        release = build_editions(editions, config)
+        located = _translate_edition_for(None, fetch_config)
+        if located is None:
+            return 1
+        date, mains = located
+        try:
+            translator = ApiTranslator(translation_config_from_env())
+        except TranslationError as error:
+            print(f"{error}；跳过翻译。")
+        else:
+            try:
+                updated, t_report = translate_edition(
+                    mains,
+                    translator,
+                    translation_config_from_env().cache_dir,
+                    on_progress=print,
+                )
+            except KeyboardInterrupt:
+                print("\n翻译被中断，改以当前状态成刊。")
+                updated, t_report = mains, None
+            finally:
+                translator.close()
+            store_translated(fetch_config, date, updated.articles)
+            if t_report is not None:
+                print(
+                    f"翻译：成功 {t_report.succeeded}（缓存 {t_report.cache_hits}），"
+                    f"失败 {t_report.failed}，此前已译 {t_report.already_done}"
+                )
+                if t_report.failed:
+                    exit_code = 1
+
+    print("[3/3] 构建")
+    release = build_editions(load_db_editions(fetch_config), build_config_from_env())
     print(f"构建完成：{release}")
-    print(f"当前版本：{config.output_root / 'current'}")
     print("本地预览：双击 preview.bat")
+    return exit_code
+
+
+def _run_preview(port: int) -> int:
+    from news_digest.config import build_config_from_env
+    from news_digest.preview_server import create_server
+
+    root = Path.cwd()
+    site_dir = build_config_from_env().output_root / "current"
+    if not (site_dir / "index.html").is_file():
+        print(f"提示：{site_dir} 尚无站点，先运行 build（或双击 daily.bat）")
+    print(f"站点预览：http://127.0.0.1:{port}/")
+    print(f"模型设置：http://127.0.0.1:{port}/admin/")
+    print("按 Ctrl+C 停止。")
+    server = create_server(root, site_dir, port)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
