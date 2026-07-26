@@ -15,15 +15,15 @@ ENV_FILE = ".env.local"
 _ENV_KEYS = ("TRANSLATION_API_BASE_URL", "TRANSLATION_API_KEY", "TRANSLATION_MODEL")
 
 
-def load_profiles(root: Path) -> dict:
-    path = root / PROFILES_FILE
+def load_profiles(root: Path, filename: str = PROFILES_FILE) -> dict:
+    path = root / filename
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
     return {"active": "", "providers": {}}
 
 
-def save_profiles(root: Path, data: dict) -> None:
-    (root / PROFILES_FILE).write_text(
+def save_profiles(root: Path, data: dict, filename: str = PROFILES_FILE) -> None:
+    (root / filename).write_text(
         json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
     )
 
@@ -36,14 +36,14 @@ def mask_key(key: str) -> str:
     return f"{key[:6]}…{key[-4:]}"
 
 
-def write_env_local(root: Path, provider: dict) -> None:
-    """把供应商三项写入 .env.local，保留文件中其余行不动。"""
+def write_env_local(root: Path, provider: dict, filename: str = ENV_FILE) -> None:
+    """把供应商三项写入环境文件（默认 .env.local），保留文件中其余行不动。"""
     values = {
         "TRANSLATION_API_BASE_URL": provider["base_url"],
         "TRANSLATION_API_KEY": provider["api_key"],
         "TRANSLATION_MODEL": provider["model"],
     }
-    path = root / ENV_FILE
+    path = root / filename
     lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
     out, seen = [], set()
     for line in lines:
@@ -61,23 +61,31 @@ def write_env_local(root: Path, provider: dict) -> None:
 
 
 class PreviewHandler(SimpleHTTPRequestHandler):
-    """静态站点 + /admin 面板与 JSON 接口。"""
+    """静态站点 + /admin 面板与 JSON 接口。
+
+    生产模式（allow_key_input=False）下密钥不经网页传输：
+    只能切换预置档案、修改接口地址与模型名，新增密钥走服务器文件。
+    """
 
     project_root: Path
+    env_file: str = ENV_FILE
+    profiles_file: str = PROFILES_FILE
+    allow_key_input: bool = True
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - 基类签名
         pass  # 本地预览不刷请求日志
 
     def do_GET(self) -> None:  # noqa: N802 - 基类命名
         if self.path in ("/admin", "/admin/"):
-            body = ADMIN_HTML.encode("utf-8")
+            flag = "true" if self.allow_key_input else "false"
+            body = ADMIN_HTML.replace("__ALLOW_KEY_INPUT__", flag).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         elif self.path == "/admin/api/providers":
-            data = load_profiles(self.project_root)
+            data = load_profiles(self.project_root, self.profiles_file)
             masked = {
                 "active": data["active"],
                 "providers": {
@@ -100,7 +108,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(400, {"error": "非法 JSON"})
             return
 
-        data = load_profiles(self.project_root)
+        data = load_profiles(self.project_root, self.profiles_file)
         if self.path == "/admin/api/providers":
             self._handle_save(body, data)
         elif self.path == "/admin/api/activate":
@@ -117,11 +125,16 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             data["providers"].pop(name, None)
             if data["active"] == name:
                 data["active"] = ""
-            save_profiles(self.project_root, data)
+            save_profiles(self.project_root, data, self.profiles_file)
             self._json(200, {"ok": True})
             return
         existing = data["providers"].get(name, {})
-        api_key = str(body.get("api_key", "")).strip() or existing.get("api_key", "")
+        submitted_key = str(body.get("api_key", "")).strip()
+        if submitted_key and not self.allow_key_input:
+            message = "生产面板不接受密钥输入；新增/更换密钥请在服务器上编辑档案文件"
+            self._json(400, {"error": message})
+            return
+        api_key = submitted_key or existing.get("api_key", "")
         provider = {
             "base_url": str(body.get("base_url", "")).strip().rstrip("/"),
             "api_key": api_key,
@@ -132,7 +145,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(400, {"error": message})
             return
         data["providers"][name] = provider
-        save_profiles(self.project_root, data)
+        save_profiles(self.project_root, data, self.profiles_file)
         self._json(200, {"ok": True})
 
     def _handle_activate(self, body: dict, data: dict) -> None:
@@ -141,9 +154,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if provider is None:
             self._json(404, {"error": f"档案不存在：{name}"})
             return
-        write_env_local(self.project_root, provider)
+        write_env_local(self.project_root, provider, self.env_file)
         data["active"] = name
-        save_profiles(self.project_root, data)
+        save_profiles(self.project_root, data, self.profiles_file)
         self._json(200, {"ok": True, "active": name})
 
     def _json(self, status: int, payload: dict) -> None:
@@ -155,9 +168,20 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def create_server(root: Path, site_dir: Path, port: int) -> ThreadingHTTPServer:
+def create_server(
+    root: Path,
+    site_dir: Path,
+    port: int,
+    *,
+    env_file: str = ENV_FILE,
+    profiles_file: str = PROFILES_FILE,
+    allow_key_input: bool = True,
+) -> ThreadingHTTPServer:
     handler_class = partial(PreviewHandler, directory=str(site_dir))
     PreviewHandler.project_root = root
+    PreviewHandler.env_file = env_file
+    PreviewHandler.profiles_file = profiles_file
+    PreviewHandler.allow_key_input = allow_key_input
     return ThreadingHTTPServer(("127.0.0.1", port), handler_class)
 
 
@@ -215,6 +239,9 @@ code { background:#f4f1e8; padding:.05rem .3rem; font-size:.85em; }
 
 <fieldset>
 <legend>新增 / 编辑档案（同名即覆盖）</legend>
+<p class="note" id="key-restricted-note" hidden>生产模式：此面板不接受密钥输入——
+切换档案、改接口地址与模型名均可；新增供应商或更换密钥请在服务器上编辑档案文件
+（见运维文档）。</p>
 <label for="f-name">名称（如 claude、openai）</label>
 <input id="f-name" autocomplete="off">
 <label for="f-url">Base URL（通常以 /v1 结尾）</label>
@@ -233,8 +260,14 @@ code { background:#f4f1e8; padding:.05rem .3rem; font-size:.85em; }
 </div>
 <script>
 "use strict";
+var allowKeyInput = __ALLOW_KEY_INPUT__;
 var listEl = document.getElementById("list");
 var statusEl = document.getElementById("status");
+
+if (!allowKeyInput) {
+  document.getElementById("f-key").closest("div").hidden = true;
+  document.getElementById("key-restricted-note").hidden = false;
+}
 
 function say(message, ok) {
   statusEl.textContent = message;

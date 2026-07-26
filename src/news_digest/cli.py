@@ -88,6 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只发一封无链接的最小测试信，验证 SMTP 通道（不检查站点、不写防重记录）",
     )
+
+    admin = subparsers.add_parser(
+        "admin", help="生产模型切换面板（仅 127.0.0.1；密钥不经网页，需外层反代加认证）"
+    )
+    admin.add_argument("--port", type=int, default=8619)
+    admin.add_argument(
+        "--config-dir",
+        default="/config",
+        metavar="DIR",
+        help="含 .env 与 providers.json 的目录（容器内通常为 /config）",
+    )
     return parser
 
 
@@ -106,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_preview(args.port)
     if args.command == "preview-email":
         return _run_preview_email(args.date)
+    if args.command == "admin":
+        return _run_admin(args.port, Path(args.config_dir))
     if args.command == "send-email":
         if args.smoke:
             return _run_send_smoke(args.yes)
@@ -422,6 +435,30 @@ def _run_daily(window_hours: int | None, yes: bool) -> int:
     print(f"构建完成：{release}")
     print("本地预览：双击 preview.bat")
     return exit_code
+
+
+def _run_admin(port: int, config_dir: Path) -> int:
+    from news_digest.preview_server import create_server
+
+    if not config_dir.is_dir():
+        print(f"配置目录不存在：{config_dir}")
+        return 1
+    print(f"生产模型切换面板：http://127.0.0.1:{port}/admin/（密钥不经网页传输）")
+    server = create_server(
+        config_dir,
+        config_dir,
+        port,
+        env_file=".env",
+        profiles_file="providers.json",
+        allow_key_input=False,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def _run_preview(port: int) -> int:

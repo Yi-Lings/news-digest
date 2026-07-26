@@ -74,6 +74,67 @@ def _request(port: int, method: str, path: str, body: dict | None = None) -> tup
     return response.status, data
 
 
+@pytest.fixture
+def prod_server(tmp_path):
+    """生产模式：.env / providers.json 文件名，禁止密钥经网页。"""
+    (tmp_path / ".env").write_text(
+        "NEWS_SITE_URL=https://news.example.com\nTRANSLATION_MODEL=old-model\n",
+        encoding="utf-8",
+    )
+    save_profiles(
+        tmp_path, {"active": "", "providers": {"claude": dict(PROVIDER)}}, "providers.json"
+    )
+    server = create_server(
+        tmp_path, tmp_path, 0,
+        env_file=".env", profiles_file="providers.json", allow_key_input=False,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield tmp_path, server.server_address[1]
+    server.shutdown()
+    server.server_close()
+
+
+def test_production_mode_rejects_key_input(prod_server):
+    _, port = prod_server
+    status, data = _request(
+        port, "POST", "/admin/api/providers",
+        {"name": "claude", **{**PROVIDER, "api_key": "sk-new-key-attempt"}},
+    )
+    assert status == 400
+    assert "不接受密钥" in data["error"]
+
+
+def test_production_mode_edit_and_activate(prod_server):
+    root, port = prod_server
+    # 改接口地址与模型（key 留空沿用）——允许
+    status, _ = _request(
+        port, "POST", "/admin/api/providers",
+        {"name": "claude", "base_url": "https://new.example.com/v1",
+         "model": "new-model", "api_key": ""},
+    )
+    assert status == 200
+    stored = load_profiles(root, "providers.json")["providers"]["claude"]
+    assert stored["api_key"] == PROVIDER["api_key"]  # 原密钥保留
+    assert stored["base_url"] == "https://new.example.com/v1"
+
+    status, _ = _request(port, "POST", "/admin/api/activate", {"name": "claude"})
+    assert status == 200
+    env = (root / ".env").read_text(encoding="utf-8")
+    assert "TRANSLATION_API_BASE_URL=https://new.example.com/v1" in env
+    assert "TRANSLATION_MODEL=new-model" in env
+    assert "NEWS_SITE_URL=https://news.example.com" in env  # 无关行保留
+
+
+def test_production_admin_page_hides_key_field(prod_server):
+    _, port = prod_server
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    connection.request("GET", "/admin/")
+    html = connection.getresponse().read().decode("utf-8")
+    connection.close()
+    assert "var allowKeyInput = false;" in html
+
+
 def test_admin_flow_save_activate_masked(admin_server):
     root, port = admin_server
 
