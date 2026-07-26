@@ -6,6 +6,7 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -61,8 +62,10 @@ def translate_edition(
     *,
     limit: int | None = None,
     max_attempts: int = 2,
+    on_progress: Callable[[str], None] | None = None,
 ) -> tuple[DailyEdition, TranslateReport]:
     """翻译一期内容；单篇失败不阻塞其余，已翻译文章直接跳过（断点续跑）。"""
+    progress = on_progress or (lambda message: None)
     cache_dir.mkdir(parents=True, exist_ok=True)
     report = TranslateReport(total=len(edition.articles))
     articles: list[Article] = []
@@ -85,13 +88,18 @@ def translate_edition(
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 result = _result_from_dict(cached, len(article.paragraphs))
                 report.cache_hits += 1
+                progress(f"✓ {article.slug}（缓存命中）")
             except (InvalidTranslation, json.JSONDecodeError):
                 result = None  # 缓存损坏：当作未命中，重新请求后覆盖
 
         if result is None:
             error_reason = ""
-            for _ in range(max_attempts):
+            for attempt in range(1, max_attempts + 1):
                 try:
+                    suffix = f"，第 {attempt} 次重试" if attempt > 1 else ""
+                    progress(
+                        f"→ {article.slug}（{len(article.paragraphs)} 段）翻译中{suffix}…"
+                    )
                     report.api_calls += 1
                     raw = translator.translate(article)
                     result = parse_translation(raw, len(article.paragraphs))
@@ -99,6 +107,7 @@ def translate_edition(
                         json.dumps(result_to_dict(result), ensure_ascii=False, indent=1),
                         encoding="utf-8",
                     )
+                    progress(f"✓ {article.slug}")
                     break
                 except Exception as error:  # 接口错误与非法响应同等处理：重试后失败
                     error_reason = f"{error.__class__.__name__}: {error}"
@@ -106,6 +115,7 @@ def translate_edition(
             if result is None:
                 report.failed += 1
                 report.failures.append((article.slug, error_reason))
+                progress(f"✗ {article.slug}: {error_reason[:100]}")
                 articles.append(article)
                 continue
 

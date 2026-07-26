@@ -110,10 +110,15 @@ def test_apply_translation_fills_fields():
 def test_cache_hit_avoids_second_api_call(tmp_path):
     edition = DailyEdition(date="2026-07-26", articles=[_article()])
     translator = FakeTranslator(_valid_raw())
+    events: list[str] = []
 
-    updated, report = translate_edition(edition, translator, tmp_path)
+    updated, report = translate_edition(
+        edition, translator, tmp_path, on_progress=events.append
+    )
     assert report.succeeded == 1 and report.api_calls == 1 and translator.calls == 1
     assert updated.articles[0].translated_by == "fake-model@p1"
+    assert any(event.startswith("→") for event in events)
+    assert any(event.startswith("✓") for event in events)
 
     # 同一内容再翻一遍（模拟重新抓取后 translated_by 为空）：应命中缓存，不再调用 API
     fresh = DailyEdition(date="2026-07-26", articles=[_article()])

@@ -139,8 +139,11 @@ def _run_translate(date: str | None, limit: int | None, yes: bool) -> int:
         return 1
     try:
         updated, report = translate_edition(
-            edition, translator, config.cache_dir, limit=limit
+            edition, translator, config.cache_dir, limit=limit, on_progress=print
         )
+    except KeyboardInterrupt:
+        print("\n已中断。已成功的篇目在缓存中，重跑同一命令会瞬时续接。")
+        return 130
     finally:
         translator.close()
 
