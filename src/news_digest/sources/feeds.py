@@ -14,6 +14,15 @@ from news_digest.textutil import collapse_ws, html_to_text
 _TRACKING_PARAMS = {"maca", "cmp", "ns_campaign", "ns_mchannel", "ns_source", "ocid", "cmpid"}
 _TRACKING_PREFIXES = ("utm_", "at_")
 
+# 非文章类页面（直播贴、视频、音频），对文字学习无用且提取结果污染严重。
+# 实测：BBC /news/videos/、DW /live-、France 24 视频页。
+_EXCLUDED_PATH_PARTS = ("/live/", "/live-", "/videos/", "/video/", "/av/", "/audio/", "/podcast")
+
+
+def is_article_url(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return not any(part in path for part in _EXCLUDED_PATH_PARTS)
+
 
 def canonicalize_url(url: str) -> str:
     parsed = urlparse(url.strip())
@@ -84,6 +93,8 @@ def parse_feed(data: bytes, source: SourceConfig) -> list[Candidate]:
         link = entry.get("link", "")
         published = _published_utc(entry)
         if not title or not link or not published:
+            continue
+        if source.kind == "full" and not is_article_url(link):
             continue
         candidates.append(
             Candidate(

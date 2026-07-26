@@ -6,6 +6,7 @@
 提取输出为纯文本段落，再经 nh3 双保险清洗；失败返回 None，由流水线降级为摘要。
 """
 
+import re
 from dataclasses import dataclass, field
 
 import trafilatura
@@ -15,6 +16,15 @@ from news_digest.textutil import collapse_ws, html_to_text
 _MIN_PARAGRAPH_CHARS = 30
 _MIN_PARAGRAPH_COUNT = 2
 _WORDS_PER_MINUTE = 200
+
+# 常见站点样板句（页脚、分享、订阅、播放器占位）；仅对短段落生效，避免误伤正文。
+_BOILERPLATE = re.compile(
+    r"terms\s*&\s*conditions|privacy policy|sign up (for|to)|subscribe to"
+    r"|follow us|share this|related topics|browser extensions?"
+    r"|video player|stay with us for more|read more:|also read:",
+    re.IGNORECASE,
+)
+_BOILERPLATE_MAX_CHARS = 140
 
 
 @dataclass(frozen=True)
@@ -42,7 +52,15 @@ def extract_body(page_html: str, url: str) -> ExtractedBody | None:
         if collapse_ws(line)
     ]
     paragraphs = [p for p in paragraphs if len(p) >= _MIN_PARAGRAPH_CHARS]
+    paragraphs = [
+        p
+        for p in paragraphs
+        if not (len(p) <= _BOILERPLATE_MAX_CHARS and _BOILERPLATE.search(p))
+    ]
     if len(paragraphs) < _MIN_PARAGRAPH_COUNT:
+        return None
+    if len(set(paragraphs)) == 1:
+        # 全部段落相同：典型的播放器占位或反爬占位页
         return None
 
     author = ""

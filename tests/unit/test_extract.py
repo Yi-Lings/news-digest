@@ -16,6 +16,19 @@ def test_bbc_page_extracts_paragraphs_and_metadata():
     assert "police manhunt" in joined
     assert "SHOULD_NEVER_APPEAR_IN_OUTPUT" not in joined
     assert "Related" not in joined
+    # 站点样板句必须被过滤
+    assert "terms & conditions" not in joined.lower()
+    assert "sign up for our morning newsletter" not in joined.lower()
+
+
+def test_video_placeholder_page_returns_none():
+    placeholder = (
+        "One of your browser extensions seems to be blocking the video player from loading."
+    )
+    html = "<html><body><article><h1>Clip</h1>" + f"<p>{placeholder}</p>" * 3 + (
+        "</article></body></html>"
+    )
+    assert extract_body(html, "https://www.france24.com/en/demo") is None
 
 
 def test_guardian_page_extracts():

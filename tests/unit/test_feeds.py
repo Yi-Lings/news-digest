@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from news_digest.sources.feeds import canonicalize_url, parse_feed
+from news_digest.sources.feeds import canonicalize_url, is_article_url, parse_feed
 from news_digest.sources.registry import SOURCES
 
 FEEDS = Path(__file__).parent.parent / "fixtures" / "feeds"
@@ -29,9 +29,19 @@ def test_canonicalize_strips_tracking_params():
     )
 
 
+def test_non_article_urls_excluded():
+    assert not is_article_url("https://www.bbc.co.uk/news/videos/c74gzknyyz2o")
+    assert not is_article_url("https://www.dw.com/en/middle-east-live/live-78117732")
+    assert not is_article_url("https://www.theguardian.com/world/live/2026/jul/26/blog")
+    assert is_article_url("https://www.bbc.co.uk/news/articles/cevmdxz4872o")
+    assert is_article_url("https://www.dw.com/en/olive-harvest-in-spain/a-78101422")
+
+
 def test_bbc_real_sample():
     candidates = _parse("bbc", "bbc.xml")
+    # fixture 含 4 条，其中 1 条 /news/videos/ 被排除
     assert len(candidates) == 3
+    assert all("/videos/" not in candidate.url for candidate in candidates)
     first = candidates[0]
     assert first.source_name == "BBC News"
     assert first.title.startswith("What we know so far")
