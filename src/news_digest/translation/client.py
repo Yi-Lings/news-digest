@@ -46,9 +46,9 @@ class ApiTranslator:
 
     def translate(self, article: Article) -> str:
         """返回模型原始文本输出；解析与校验由 schema 层负责。"""
+        # 不发 temperature：推理系模型（如 o 系列）会拒绝该参数，各模型默认值即可
         payload = {
             "model": self._config.model,
-            "temperature": 0.3,
             "max_tokens": self._config.max_tokens,  # Anthropic 兼容后端必填
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},

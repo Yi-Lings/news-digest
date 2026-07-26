@@ -53,6 +53,7 @@ def test_successful_call_returns_content():
         assert request.headers["authorization"] == "Bearer test-key"
         payload = json.loads(request.content)
         assert payload["max_tokens"] == 8192  # Anthropic 兼容后端必填
+        assert "temperature" not in payload  # 推理系模型会拒绝该参数
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},
