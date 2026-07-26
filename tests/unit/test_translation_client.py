@@ -47,17 +47,25 @@ def test_missing_config_raises():
         ApiTranslator(_config(api_key=""))
 
 
-def test_successful_call_returns_content():
+def _sse(*chunks: str) -> bytes:
+    lines = [
+        "data: " + json.dumps({"choices": [{"delta": {"content": chunk}}]})
+        for chunk in chunks
+    ]
+    lines.append('data: {"choices": [], "usage": {"total_tokens": 1}}')  # 非内容块应被跳过
+    lines.append("data: [DONE]")
+    return ("\n\n".join(lines) + "\n\n").encode("utf-8")
+
+
+def test_successful_stream_returns_joined_content():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/chat/completions")
         assert request.headers["authorization"] == "Bearer test-key"
         payload = json.loads(request.content)
         assert payload["max_tokens"] == 8192  # Anthropic 兼容后端必填
+        assert payload["stream"] is True  # 流式：避免反代读超时 504
         assert "temperature" not in payload  # 推理系模型会拒绝该参数
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},
-        )
+        return httpx.Response(200, content=_sse('{"ok"', ": true}"))
 
     translator = _translator(handler)
     assert translator.translate(_article()) == '{"ok": true}'
@@ -72,7 +80,7 @@ def test_http_error_raises_without_leaking_key():
     assert "test-key" not in str(excinfo.value)
 
 
-def test_malformed_body_raises():
+def test_non_stream_body_yields_empty_and_raises():
     translator = _translator(lambda request: httpx.Response(200, json={"unexpected": 1}))
-    with pytest.raises(TranslationError, match="结构异常"):
+    with pytest.raises(TranslationError, match="无内容"):
         translator.translate(_article())

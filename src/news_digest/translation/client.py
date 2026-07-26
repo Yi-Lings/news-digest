@@ -1,4 +1,10 @@
-"""OpenAI 兼容翻译客户端；不绑定具体部署位置，一切来自配置。"""
+"""OpenAI 兼容翻译客户端；不绑定具体部署位置，一切来自配置。
+
+使用流式响应（SSE）：长文生成可达数分钟，非流式会被反向代理的
+读超时（如 Nginx 默认 60s）切断为 504；流式下数据持续到达，不触发网关超时。
+"""
+
+import json
 
 import httpx
 
@@ -50,26 +56,40 @@ class ApiTranslator:
         payload = {
             "model": self._config.model,
             "max_tokens": self._config.max_tokens,  # Anthropic 兼容后端必填
+            "stream": True,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": build_user_prompt(article)},
             ],
         }
+        parts: list[str] = []
         try:
-            response = self._client.post("/chat/completions", json=payload)
+            with self._client.stream("POST", "/chat/completions", json=payload) as response:
+                if response.status_code != 200:
+                    detail = response.read()[:160].decode("utf-8", "replace").replace("\n", " ")
+                    raise TranslationError(
+                        f"HTTP {response.status_code}（{article.slug}）{detail}"
+                    )
+                for line in response.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        choices = json.loads(data).get("choices") or []
+                        delta = choices[0].get("delta", {}).get("content") if choices else None
+                    except (ValueError, AttributeError, IndexError):
+                        continue  # 跳过 usage/keep-alive 等非内容块
+                    if delta:
+                        parts.append(delta)
         except httpx.HTTPError as error:
             raise TranslationError(
                 f"请求失败：{error.__class__.__name__}（{article.slug}）"
             ) from error
-        if response.status_code != 200:
-            detail = response.text[:160].replace("\n", " ")
-            raise TranslationError(f"HTTP {response.status_code}（{article.slug}）{detail}")
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, ValueError) as error:
-            raise TranslationError(f"响应结构异常（{article.slug}）") from error
-        if not isinstance(content, str) or not content.strip():
-            raise TranslationError(f"响应内容为空（{article.slug}）")
+        content = "".join(parts)
+        if not content.strip():
+            raise TranslationError(f"流式响应无内容（{article.slug}）")
         return content
 
     def close(self) -> None:
