@@ -115,6 +115,7 @@ https://news.cheapcoding.top
 ```text
 news-digest fetch          获取并规范化候选新闻
 news-digest translate      翻译已抓取内容并生成学习注解（阶段 3 增补；真实调用需显式确认）
+news-digest preview        本地预览 + 模型供应商切换面板（阶段 3 增补；仅绑定 127.0.0.1）
 news-digest build          生成指定日期的静态站点
 news-digest run            执行完整的每日流水线
 news-digest preview-email  生成本地邮件预览
@@ -340,7 +341,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 3：翻译与英语学习内容
 
-状态：`进行中（fixture 先行部分）`
+状态：`已验收（2026-07-26）——全量 43/44 篇真实翻译完成（1 篇模型输出瑕疵经 --redo 修复），p2 官方文风获认可`
 
 工作范围：
 
@@ -363,7 +364,9 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 4：每日选题、SQLite 归档与完整流水线
 
-状态：`未开始`
+状态：`进行中`
+
+阶段 4 设计决定（2026-07-26）：流水线顺序为「抓取 → 入库 → 选题 6 篇 → 仅翻译选中篇目 → 构建」，将每日翻译成本从全量（40+ 篇）压到 6 篇；未选中的全文候选降为简讯（外链原文，不翻译不建页）。SQLite 保存文章池与版次（翻译结果随文章入库）；请求级翻译缓存维持既有文件实现，不迁库（记录为对计划文字的偏离，理由：已验证、键设计完备，迁移无收益）。时区采用代码现默认 `Asia/Shanghai`（与 Asia/Hong_Kong 同为 UTC+8，无实际差异，待确认项就此关闭）。2026-07-26 已翻译的 44 篇按原样整期导入存档，选题规则自新运行起生效。
 
 工作范围：
 
@@ -456,6 +459,7 @@ uv run python -m http.server 8000 --directory var/site/current
 - web 仅绑定宿主机 `127.0.0.1`，公网统一经过宿主机 Nginx。
 - 配置 Nginx、HTTPS、登录保护、`noindex`、CSP、安全响应头和限速。
 - 配置 systemd timer 调用 `docker compose run --rm news-worker`。
+- 部署生产模型切换面板（已确认形态：仅切换预置档案，密钥不经网页传输；复用本地 `/admin/` 面板裁剪版，置于登录保护与 HTTPS 之后，仅绑定宿主 `127.0.0.1` 由 Nginx 代理）。
 - 使用非 root 用户、只读根文件系统、移除 capabilities 并启用 `no-new-privileges`。
 - 设置 worker 256 MB、web 32 MB 的初始内存上限，并根据实测调整。
 - 配置日志轮转、健康检查、持久化目录、备份和版本回滚。
@@ -518,6 +522,7 @@ uv run python -m http.server 8000 --directory var/site/current
 - SUB2API base URL、模型、单次测试文章数和费用边界：阶段 3 真实调用前确认。
 - SMTP 收件地址、发送时间和真实测试授权：阶段 5 前确认。
 - 生产站点是否需要登录保护及初始用户名：阶段 7 前确认。
+- 生产端模型切换面板：已确认（2026-07-26）采用「仅切换预置档案」方案——密钥经部署通道预置于服务器，网页面板只做供应商切换与模型名变更，不传输密钥；置于 HTTPS + 登录保护之后，阶段 7 实现。
 - 服务器端 Docker Engine 和 Compose 版本、CPU 架构、权限及剩余资源：阶段 7 开始前核验。
 - GHCR 镜像命名空间和服务器只读 token 的配置方式：阶段 7 前确认。
 
@@ -541,3 +546,6 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-26 | 阶段 2 | 修复 | 第三次抓取数据复查：补排除 AJE `/news/liveblog/`、补剥 `traffic_source` 跟踪参数；样张印章与演示页脚改为仅 `--fixtures` 构建渲染，真实构建页脚为正式来源声明（`cb11b35`） |
 | 2026-07-26 | 阶段 2 | 已验收 | 用户经 `daily.bat` 一键流程确认真实新闻页面（头条为柏林事件报道、无演示标识）；新增 `daily.bat`/`preview.bat` 一键脚本（用户多次漏跑 build 的流程教训固化为工具）；打 `phase-2-accepted` 标签，创建 `phase/3-translation` 分支 |
 | 2026-07-26 | 阶段 3 | 进行中 | 开始 fixture 先行部分：模型输出 schema、严格校验、内容哈希+模型+prompt 版本缓存、`translate` 子命令（真实调用需 `--yes` 且先展示接口/模型/文章数/预计请求数）；SUB2API 接口、模型与费用边界待用户确认后才做受控真实调用 |
+| 2026-07-26 | 阶段 3 | 修复×2 | 受控真实调用两轮排障：Claude 系后端必填 `max_tokens`（400 根因，`2daadb4`）；推理系模型拒绝 `temperature`，参数移除（`f6c5b32`）。错误信息带响应体片段便于诊断 |
+| 2026-07-26 | 阶段 3 | 增补 | 本地模型供应商切换面板（用户要求，类 ccswitch）：`news-digest preview` 伺服站点 + `/admin/` 档案管理，启用即改写 `.env.local`；密钥仅本机、页面掩码；70 项测试（`bf5a54a`）。生产端面板列入阶段 7 待确认项 |
+| 2026-07-26 | 阶段 3 | 真实调用跑通 | 排障链：网关 504（Nginx 读超时截断长文生成）→ 改流式 SSE 根治（`97f2353`）；逐篇进度输出 + 180s 超时 + Ctrl+C 续接（`8511417`）。用户验收译文质量通过，意见「文风更官方」→ prompt 升 p2（规范新闻书面语）+ `--redo` 单篇重翻（`cf64a35`）；71 项测试 |

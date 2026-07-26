@@ -127,6 +127,9 @@
 
   <footer class="story-foot">
     <p>原始来源：<a href="{{ article.url }}" rel="noopener">{{ article.source }}{% if "example.com" in article.url %}（演示占位链接）{% endif %}</a></p>
+    {% if article.translated_by %}
+    <p>中文标题、译文与学习内容由 AI 生成（{{ article.translated_by }}），仅供学习参考；英文原文以来源页面为准。</p>
+    {% endif %}
   </footer>
 </article>
 {% endblock %}
