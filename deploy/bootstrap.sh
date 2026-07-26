@@ -12,7 +12,7 @@ set -euo pipefail
 
 # ---------------- 变量区（VAR="${ND_XXX:-默认值}"，执行前 export ND_XXX 即可覆盖）----------------
 OWNER="${ND_OWNER:-yi-lings}"             # GHCR 命名空间（必须全小写）
-TAG="${ND_VERSION:-v0.6.0rc2}"            # 部署候选 tag；转正式版后按 README §4 固定 digest
+TAG="${ND_VERSION:-v0.6.0rc3}"            # 部署候选 tag；转正式版后按 README §4 固定 digest
 APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、config/、备份）
 CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
 DOMAIN="${ND_DOMAIN:-news.cheapcoding.top}"

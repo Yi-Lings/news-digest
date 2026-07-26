@@ -43,7 +43,7 @@ web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/sr
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `ND_OWNER` | `yi-lings` | GHCR 命名空间；渲染 compose 中三处 image 引用（worker/admin 共用一处值） |
-| `ND_VERSION` | `v0.6.0rc2` | 部署候选 tag；转正式版后仍按 §4 固定 digest |
+| `ND_VERSION` | `v0.6.0rc3` | 部署候选 tag；转正式版后仍按 §4 固定 digest |
 | `ND_APP_DIR` | `/srv/news-digest` | 部署目录（compose、`config/` 子目录内的 `.env` 与 `providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
 | `ND_DOMAIN` | `news.cheapcoding.top` | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
 | `ND_WEB_PORT` | `8618` | web 容器宿主回环端口；渲染 compose 与 nginx |

@@ -12,7 +12,7 @@ $KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
 $Server  = "root@cheapcoding.top"
 $Owner   = "yi-lings"
 $AppDir  = "/srv/news-digest"
-$Version = "v0.6.0rc2"
+$Version = "v0.6.0rc3"
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 

@@ -145,12 +145,21 @@ def test_password_change_endpoint_and_session_rotation(prod_server):
     root, port = prod_server
     cookie = _login(port)
     status, data = _request(
-        port, "POST", "/admin/api/password", {"password": "short"}, cookie=cookie
+        port, "POST", "/admin/api/password",
+        {"current_password": PANEL_PASSWORD, "password": "short"}, cookie=cookie,
     )
     assert status == 400
 
+    # 会话有效但当前口令错误：拒绝（防会话劫持者夺权）
     status, data = _request(
-        port, "POST", "/admin/api/password", {"password": "new-password-1"}, cookie=cookie
+        port, "POST", "/admin/api/password",
+        {"current_password": "wrong", "password": "new-password-1"}, cookie=cookie,
+    )
+    assert status == 401
+
+    status, data = _request(
+        port, "POST", "/admin/api/password",
+        {"current_password": PANEL_PASSWORD, "password": "new-password-1"}, cookie=cookie,
     )
     assert status == 200
     content = (root / "htpasswd-admin").read_text(encoding="utf-8")

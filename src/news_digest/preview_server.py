@@ -293,7 +293,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self._set_session_cookie(token, _SESSION_TTL_SECONDS)
 
     def _handle_password(self, body: dict) -> None:
-        """改面板口令：Basic Auth 已由外层 Nginx 逐请求校验，等价于旧口令验证。"""
+        """改面板口令：除有效会话外必须验证当前口令（防会话劫持者夺权）。"""
         if self.htpasswd_file is None:
             self._json(404, {"error": "本模式不提供网页改密"})
             return
@@ -306,6 +306,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             first_line = self.htpasswd_file.read_text(encoding="utf-8").splitlines()
             if first_line and ":" in first_line[0]:
                 username = first_line[0].split(":", 1)[0] or "admin"
+            current = str(body.get("current_password", ""))
+            if not verify_htpasswd(self.htpasswd_file, username, current):
+                time.sleep(0.5)
+                self._json(401, {"error": "当前口令不正确"})
+                return
             # 原地截断写入：保住 inode 与属主/权限（nginx 读取组权限、可能的单文件 bind）
             with self.htpasswd_file.open("r+", encoding="utf-8") as handle:
                 handle.seek(0)
@@ -315,7 +320,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self.htpasswd_file.write_text(
                 f"{username}:{apr1_hash(password)}\n", encoding="utf-8"
             )
-            self.htpasswd_file.chmod(0o640)
+            self.htpasswd_file.chmod(0o600)  # nginx 不读取本文件，无需组权限
         initial = self.htpasswd_file.parent / "admin-password.initial"
         if initial.is_file():
             initial.unlink()  # 初始口令文件在用户自设口令后即失效，顺手清除
@@ -531,7 +536,9 @@ code { background:#f4f1e8; padding:.05rem .3rem; font-size:.85em; }
 </fieldset>
 <fieldset id="password-box" hidden style="margin-top:1.2rem;">
 <legend>面板口令</legend>
-<label for="f-pwd">新口令（至少 8 位；当前口令即浏览器登录所用）</label>
+<label for="f-pwd0">当前口令</label>
+<input id="f-pwd0" type="password" autocomplete="current-password">
+<label for="f-pwd">新口令（至少 8 位）</label>
 <input id="f-pwd" type="password" autocomplete="new-password">
 <label for="f-pwd2">重复新口令</label>
 <input id="f-pwd2" type="password" autocomplete="new-password">
@@ -634,10 +641,11 @@ document.getElementById("logout").onclick = function (event) {
 };
 
 document.getElementById("save-pwd").onclick = function () {
+  var current = document.getElementById("f-pwd0").value;
   var first = document.getElementById("f-pwd").value;
   var second = document.getElementById("f-pwd2").value;
   if (first !== second) { say("两次输入不一致", false); return; }
-  api("/admin/api/password", { password: first }).then(function () {
+  api("/admin/api/password", { current_password: current, password: first }).then(function () {
     say("口令已修改；浏览器随后会重新要求登录，用新口令即可。", true);
     document.getElementById("f-pwd").value = "";
     document.getElementById("f-pwd2").value = "";
