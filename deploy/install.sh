@@ -17,6 +17,19 @@
 # 本脚本只做编排：体检（preflight.sh）→ 部署（bootstrap.sh）；
 # 密钥仍遵循既有约束——首跑会生成 /srv/news-digest/.env 模板并暂停，
 # 在服务器上填好真实值后重跑即可续接。
+#
+# 参数化部署：以下 ND_* 环境变量在执行前 export 即可覆盖默认值（bootstrap.sh 读取，
+# 经 exec 链自动透传），换域名/换端口/换目录部署不用改任何脚本：
+#   ND_OWNER          GHCR 命名空间（全小写）        默认 yi-lings
+#   ND_VERSION        镜像 tag                      默认 v0.6.0rc2
+#   ND_APP_DIR        服务器部署目录                 默认 /srv/news-digest
+#   ND_DOMAIN         站点域名（nginx/certbot/站点URL） 默认 news.cheapcoding.top
+#   ND_WEB_PORT       web 宿主回环端口               默认 8618
+#   ND_ADMIN_PORT     模型切换面板宿主回环端口        默认 8619
+#   ND_CERTBOT_EMAIL  证书到期通知邮箱               默认 1481835649@qq.com
+# 例：export ND_DOMAIN=news.example.com ND_WEB_PORT=9000 后再执行本脚本。
+# 注意：preflight.sh 为只读体检，目前仍按默认值核对（域名/8618 端口等）——
+# 覆盖 ND_* 后个别体检项可能误报，属提示性质，可人工确认后继续。
 set -u
 
 OWNER_REPO="Yi-Lings/news-digest"

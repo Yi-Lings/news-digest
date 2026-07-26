@@ -1,6 +1,7 @@
-# 运维手册（Windows 本地）
+# 运维手册
 
-日常操作与故障恢复。所有命令在项目根目录 `E:\new\news-digest` 执行。
+日常操作与故障恢复。§1–§6 面向 Windows 本地（命令在项目根目录 `E:\new\news-digest`
+执行）；§7 面向生产服务器（部署与回滚详见 `deploy/README.md`）。
 
 ## 1. 日常使用
 
@@ -107,3 +108,14 @@ uv run pytest                       # 可选自检，应全绿
 ```
 
 然后双击 `daily.bat` 完成首次完整流水线。无备份时数据库自动新建，当天即产出完整站点，历史日期从零积累。`TRANSLATION_*` 也可不手填：先双击 `preview.bat`，在 `/admin/` 面板录入档案并启用。
+
+## 7. 生产环境（服务器）
+
+**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，Basic Auth 用户名 `admin`，口令在 bootstrap 部署输出（第 8/10 步）中只显示一次；遗失即 `sudo rm /etc/nginx/htpasswd-news-admin` 后重跑 bootstrap 重新生成并打印。面板只能在既有档案间切换、改接口地址与模型名——生产密钥不经网页传输，页面永远只见掩码。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。
+
+**换密钥的正确姿势。** ssh 登录服务器直接编辑文件（两个文件均 root:600，改完都不用重启）：
+
+- 新增/更换供应商档案：编辑 `/srv/news-digest/providers.json`（`base_url` / `api_key` / `model` 三字段，格式见 `deploy/README.md` §13），保存后刷新面板即可见、可切换；
+- 只换当前生效的密钥：编辑 `/srv/news-digest/.env` 的 `TRANSLATION_API_KEY`；注意把 `providers.json` 里对应档案的 `api_key` 同步改掉，否则日后在面板点「启用」会把旧 key 写回去。
+
+密钥永远不经网页、不进 Git、不进镜像；翻译缓存按模型隔离，切换供应商互不污染。面板故障不影响每日任务（admin 是独立常驻容器，worker 只依赖 `.env` 文件本身）。
