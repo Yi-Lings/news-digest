@@ -1,75 +1,34 @@
-# preview.ps1 - start local preview, open browser, collect diagnostics.
-# Launched by preview.bat (double-click). Writes var\diag-report.txt for Claude.
+# preview.ps1 - build latest fetched news (if any) and serve the site on 127.0.0.1:8618.
+# Launched by preview.bat (double-click).
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot
 Set-Location $root
-New-Item -ItemType Directory -Force -Path (Join-Path $root "var") | Out-Null
-$report = Join-Path $root "var\diag-report.txt"
-$lines = @()
-$lines += "generated: $(Get-Date -Format s)"
 
-# choose directory to serve
+$fetched = Get-ChildItem "var\data\fetched\*.json" -ErrorAction SilentlyContinue
+if ($fetched) {
+    "[build] publishing latest fetched news..."
+    uv run news-digest build
+} elseif (-not (Test-Path "var\site\current\index.html")) {
+    "[build] no fetched data yet, building demo fixtures..."
+    uv run news-digest build --fixtures tests/fixtures/demo
+}
+
 $serveDir = Join-Path $root "var\site\current"
 if (-not (Test-Path (Join-Path $serveDir "index.html"))) {
-    $serveDir = Join-Path $root "var\preview"
-}
-$lines += "serving: $serveDir"
-
-# listeners before start
-$lines += "### listeners (before) ###"
-$net = netstat -ano | Select-String "LISTENING"
-foreach ($port in 8000, 8080, 8618) {
-    $rows = $net | Where-Object { $_ -match ":$port\s" }
-    if ($rows) {
-        foreach ($row in $rows) {
-            $procId = ("$row" -split "\s+")[-1]
-            $name = "unknown"
-            try { $name = (Get-Process -Id $procId -ErrorAction Stop).ProcessName } catch { }
-            $lines += "port ${port} : pid=$procId name=$name"
-        }
-    } else {
-        $lines += "port ${port} : free"
-    }
+    "ERROR: nothing to serve. Run daily.bat (fetch + build) first."
+    exit 1
 }
 
-# system proxy
-$lines += "### proxy ###"
-$proxy = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-$lines += "ProxyEnable=$($proxy.ProxyEnable) ProxyServer=$($proxy.ProxyServer)"
-$lines += "ProxyOverride=$($proxy.ProxyOverride)"
-
-# start server in its own window (stays running after this script ends)
-$lines += "### server ###"
-$python = "py"
-if (Get-Command python -ErrorAction SilentlyContinue) { $python = "python" }
-try {
+$existing = Get-NetTCPConnection -LocalPort 8618 -State Listen -ErrorAction SilentlyContinue
+if ($existing) {
+    "[serve] port 8618 already serving, reusing it."
+} else {
+    $python = "py"
+    if (Get-Command python -ErrorAction SilentlyContinue) { $python = "python" }
     Start-Process -FilePath $python `
         -ArgumentList @("-m", "http.server", "8618", "--bind", "127.0.0.1", "--directory", "`"$serveDir`"") `
-        -WorkingDirectory $root -WindowStyle Normal
-    $lines += "started: $python -m http.server 8618 --bind 127.0.0.1"
-} catch {
-    $lines += "start FAILED: $($_.Exception.Message)"
+        -WorkingDirectory $root -WindowStyle Minimized
+    Start-Sleep -Seconds 2
 }
-Start-Sleep -Seconds 3
-
-# open browser right away
 Start-Process "http://127.0.0.1:8618/"
-
-# self-test with curl.exe, bypassing any proxy
-$lines += "### curl self-test ###"
-$code = & curl.exe -s -o NUL -w "%{http_code}" --noproxy "*" http://127.0.0.1:8618/ 2>&1
-$lines += "http_code: $code"
-$body = & curl.exe -s --noproxy "*" http://127.0.0.1:8618/ 2>&1
-$lines += "bytes: $("$body".Length)"
-if ("$body" -match "Cheapcoding") { $lines += "content: Cheapcoding News confirmed" }
-
-# acceptance tests (includes the Windows junction switch test)
-$lines += "### pytest ###"
-$pytestOut = uv run pytest 2>&1 | Select-Object -Last 3
-foreach ($line in $pytestOut) { $lines += "$line" }
-$lines += "pytest exit: $LASTEXITCODE"
-
-$lines | Set-Content -Path $report -Encoding UTF8
-""
-"Done. Report written to var\diag-report.txt"
-"If the browser did not open, visit http://127.0.0.1:8618/ manually."
+"Preview: http://127.0.0.1:8618/  (server window is minimized; closing it stops the preview)"
