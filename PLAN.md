@@ -436,7 +436,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 7：CI 镜像构建与服务器部署
 
-状态：`rc6 已上线且全面复核通过：发布器修复实证（序号 -08 递增、current 自动接管）；创刊号进归档（三页外网验证，12 条缓存复水译文在线）；面板三连验收完成（用户）+ 外网安全复核 7 项全绿。进入观察期：07-28/29 两个 08:00 自动周期 + 回滚演练 + send-email 复测 → merge main + 1.0.0`
+状态：`v1.0.0 已定稿并本地打标（不推送，deploy-all 流程负责推送与部署）：终审 8 项 P0 的 7 项代码修复经复审逐项通过（docs/v1.0.0-rereview.md），111 项测试全绿；2026-07-27 08:00 自动周期实证正常后用户拍板转正。部署后必做：send-email --smoke 复测（SMTP TLS 转强校验是唯一行为性回归点）+ 核对 backups/DEPLOYED.log 首条记录 + P0-8 凭据轮换完成确认 + 面板重新启用供应商`
 
 前置条件：
 
@@ -566,3 +566,4 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-27 | 阶段 7 | rc4 分叉→rc5 上线 | 用户实测定位标签分叉：本地 rc4 重打过标签（a72ff52，含 import-edition），远端仍是旧 rc4（70609b3），服务器镜像无 import-edition；我的外网探测误判（302 判别式只能证明 CSP 批次）。处置：标签一经推送永不移动（教训第二次，固化为纪律），干净发 `v0.6.0rc5`（`269e630`）。用户完成部署与导入：创刊号 44 篇（18 译）+ 简讯 10 条入库 |
 | 2026-07-27 | 阶段 7 | 生产缺陷：发布器自删 | 用户发现 build 报成功但 releases/ 无新目录、current 悬空 404（手动 ln 到 -06 临时恢复）。根因组合缺陷：`_release_name` 复用被修剪的 -01 低序号 + 修剪器按名称排序删"最旧"恰为刚发布版本——每次构建发布后立即被自己删除。修复 `v0.6.0rc6`（`921de16`）：序号改当日最大值+1 永不复用；修剪器绝不删刚发布版本（双保险）；2 条事故回归测试，106 项全绿。待用户 deploy.bat 升级后重跑 build |
 | 2026-07-27 | 阶段 7 | rc6 上线 + 全面复核 | 复审会话放行后用户部署 rc6：build 产出 -08（序号递增修复实证）、current 自动接管、创刊号归档上线（外网验证 /issues/2026-07-26/ 完整渲染：6 双语主文 + 33 简讯其中 12 条双语——缓存复水译文全部在线）。面板三连验收用户完成（登录页/初始口令/录密钥+改口令）。外网安全复核 7 项全绿：/admin/ 独立 CSP 与安全头在位；未登录 providers、改口令均 401；错误口令 401+恒定延迟（实测 1.26s）；7 条配置路径探测（.env/providers/htpasswd/session-secret + 3 种路径穿越）全 404 零泄漏标记。新 backlog（低危）：两处 CSP 增加 frame-ancestors 'none'（server 层与 /admin/ location 同加，同 HSTS 双处陷阱；SameSite=Strict 已使带会话点击劫持失效） |
+| 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |
