@@ -1,10 +1,16 @@
 """邮件组装、.eml 落盘与 SMTP 投递。发送只由显式 send-email 命令触发。"""
 
 import smtplib
+import ssl
 from email.message import EmailMessage
 from pathlib import Path
 
 from news_digest.config import SmtpConfig
+
+# 校验证书的 TLS 上下文：默认上下文启用 CERT_REQUIRED + check_hostname，
+# 杜绝 smtplib 默认 unverified 上下文——否则加密但不认证，login() 凭据可被
+# 路径中间人截获。SSL(465) 传给构造器、STARTTLS 传给 starttls()，两处都用它。
+_TLS_CONTEXT = ssl.create_default_context()
 
 
 class MailError(RuntimeError):
@@ -45,17 +51,21 @@ def validate_smtp(config: SmtpConfig) -> None:
 
 
 def send(message: EmailMessage, config: SmtpConfig, smtp_factory=None) -> None:
-    """发送邮件。465 端口用隐式 SSL，其余端口在 use_tls 时 STARTTLS。
+    """发送邮件。465 端口用隐式 SSL，其余端口在 use_tls 时 STARTTLS；两种 TLS
+    都传入校验证书的默认上下文（_TLS_CONTEXT）。
 
     smtp_factory 仅供测试注入；生产走 smtplib。
     """
     validate_smtp(config)
+    use_ssl = config.port == 465
     if smtp_factory is None:
-        smtp_factory = smtplib.SMTP_SSL if config.port == 465 else smtplib.SMTP
+        smtp_factory = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    # SSL 上下文只对隐式 SSL(465) 的构造器有意义；明文 SMTP 构造器不接受 context
+    connect_kwargs = {"context": _TLS_CONTEXT} if use_ssl else {}
     try:
-        with smtp_factory(config.host, config.port, timeout=30) as smtp:
-            if config.use_tls and config.port != 465:
-                smtp.starttls()
+        with smtp_factory(config.host, config.port, timeout=30, **connect_kwargs) as smtp:
+            if config.use_tls and not use_ssl:
+                smtp.starttls(context=_TLS_CONTEXT)
             if config.username:
                 smtp.login(config.username, config.password)
             smtp.send_message(message)

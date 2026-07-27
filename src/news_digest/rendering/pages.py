@@ -2,6 +2,7 @@
 
 import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
@@ -9,6 +10,18 @@ from news_digest.config import SITE_NAME, SITE_TAGLINE
 from news_digest.models import Article, DailyEdition
 
 WEEKDAY_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+# 与 sources.feeds.is_web_url 同策略，作为渲染层独立的第二道防线：入库白名单是
+# 第一层，此处兜底历史入库数据与任何非 feed 来源的 URL。autoescape 只转义引号/
+# 尖括号，挡不住 href="javascript:…" 这类 scheme 注入，必须在此过滤 scheme。
+_SAFE_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def safe_url(url: str | None) -> str:
+    """href/src 兜底：只放行 http/https，其余（javascript:/data:/vbscript: 等）→ 空串。"""
+    if not url:
+        return ""
+    return url if urlparse(url).scheme.lower() in _SAFE_URL_SCHEMES else ""
 
 
 def format_date_zh(date: str) -> str:
@@ -33,6 +46,7 @@ def create_environment(*, demo: bool = False) -> Environment:
     env.globals.update(site_name=SITE_NAME, site_tagline=SITE_TAGLINE, is_demo=demo)
     env.filters["date_zh"] = format_date_zh
     env.filters["weekday_zh"] = weekday_zh
+    env.filters["safe_url"] = safe_url
     return env
 
 

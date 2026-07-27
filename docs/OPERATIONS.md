@@ -118,4 +118,8 @@ uv run pytest                       # 可选自检，应全绿
 - 新增/更换供应商档案：编辑 `/srv/news-digest/config/providers.json`（`base_url` / `api_key` / `model` 三字段，格式见 `deploy/README.md` §13），保存后刷新面板即可见、可切换；
 - 只换当前生效的密钥：编辑 `/srv/news-digest/config/.env` 的 `TRANSLATION_API_KEY`；注意把 `providers.json` 里对应档案的 `api_key` 同步改掉，否则日后在面板点「启用」会把旧 key 写回去。
 
+**部署会重置面板热切换。** 每次跑 deploy-all 部署，Windows 本地 `.env.local` 的受管键（含三个
+`TRANSLATION_*`）会定点合并进服务器 `config/.env`——若此前在面板热切换过供应商，生效供应商会被
+还原为部署值，需要部署后回面板重新点「启用」（供应商档案与密钥都存 `providers.json`，不会丢失）。
+
 密钥永远不经网页、不进 Git、不进镜像；翻译缓存按模型隔离，切换供应商互不污染。面板故障不影响每日任务（admin 是独立常驻容器，worker 只依赖 `.env` 文件本身）。

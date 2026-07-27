@@ -12,7 +12,7 @@ set -euo pipefail
 
 # ---------------- 变量区（VAR="${ND_XXX:-默认值}"，执行前 export ND_XXX 即可覆盖）----------------
 OWNER="${ND_OWNER:-yi-lings}"             # GHCR 命名空间（必须全小写）
-TAG="${ND_VERSION:-v0.6.0rc6}"            # 部署候选 tag；转正式版后按 README §4 固定 digest
+TAG="${ND_VERSION:-v1.0.0}"               # 发布 tag 兜底值；编排链路会以 ND_VERSION 覆盖（版本单源 __init__.py）
 APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、config/、备份）
 CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
 DOMAIN="${ND_DOMAIN:-news.cheapcoding.top}"
@@ -23,8 +23,29 @@ CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 NGINX_CONF="/etc/nginx/conf.d/news.conf"
 HTPASSWD_FILE="${CONFIG_DIR}/htpasswd-admin"     # 面板登录口令哈希（面板登录页校验；nginx 不读取）
 WEBROOT="/var/www/certbot"                # certbot webroot 验证目录（news.conf 同路径）
-WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker:${TAG}"
-WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web:${TAG}"
+# 镜像引用：默认按 tag；给定 ND_WORKER_DIGEST/ND_WEB_DIGEST（形如 sha256: 加 64 位十六进制）
+# 时改按 digest 固定——tag 可被重推指向不同内容，生产宜钉死不可变 digest。当前语义：每次
+# 部署把实际解析到的 digest 追加写入 backups/DEPLOYED.log 台账；要固定/回滚时按 README §4
+# 从台账取 digest 经 ND_*_DIGEST 传入（deploy-all 暂不自动解析）。校验内联（die 尚未定义）。
+WORKER_DIGEST="${ND_WORKER_DIGEST:-}"
+WEB_DIGEST="${ND_WEB_DIGEST:-}"
+_validate_digest() {  # $1=值 $2=变量名；空值放行（表示本次不按 digest 固定）
+  [ -z "$1" ] && return 0
+  [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    { printf '\n错误：%s 必须形如 sha256: 加 64 位十六进制，实得：%s\n' "$2" "$1" >&2; exit 1; }
+}
+_validate_digest "$WORKER_DIGEST" ND_WORKER_DIGEST
+_validate_digest "$WEB_DIGEST" ND_WEB_DIGEST
+if [ -n "$WORKER_DIGEST" ]; then
+  WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker@${WORKER_DIGEST}"
+else
+  WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker:${TAG}"
+fi
+if [ -n "$WEB_DIGEST" ]; then
+  WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web@${WEB_DIGEST}"
+else
+  WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web:${TAG}"
+fi
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # 上传工件所在目录（incoming）
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -71,6 +92,17 @@ install -d -m 755 "$APP_DIR" "$APP_DIR/mail" "$APP_DIR/backups"
 # 引用，sed 逐行匹配自动同时替换）、部署目录（env_file 与 admin 的 /config bind
 # 挂载）、web 宿主端口、admin 监听端口（admin 用 host 网络，command 的 --port
 # 即宿主端口）。若现有文件手工固定过 digest，会先备份再覆盖。
+# digest 纪律：线上 compose 已按 @sha256 固定、而本次任一 digest 未给（将退回可变 tag）时，
+# 属安全降级——可变 tag 可被重推指向不同镜像，生产不应从 digest 悄悄退回 tag。默认拒绝；
+# 确需回到某 tag 排查时显式 ND_ALLOW_TAG_DOWNGRADE=1 放行。
+if { [ -z "$WORKER_DIGEST" ] || [ -z "$WEB_DIGEST" ]; } &&
+   [ -f "${APP_DIR}/compose.yaml" ] && grep -q '@sha256:' "${APP_DIR}/compose.yaml"; then
+  if [ "${ND_ALLOW_TAG_DOWNGRADE:-0}" = "1" ]; then
+    warnbox "已放行：正把生产从 digest 固定退回可变 tag ${TAG}（ND_ALLOW_TAG_DOWNGRADE=1）"
+  else
+    die "线上 compose.yaml 已按 digest 固定，本次未给全 ND_WORKER_DIGEST/ND_WEB_DIGEST（将退回可变 tag ${TAG}）——拒绝把生产从 digest 降级回 tag。确需如此请设 ND_ALLOW_TAG_DOWNGRADE=1 重跑。"
+  fi
+fi
 sed -e "s|ghcr.io/OWNER/news-digest-worker:VERSION|${WORKER_IMAGE}|" \
     -e "s|ghcr.io/OWNER/news-digest-web:VERSION|${WEB_IMAGE}|" \
     -e "s|/srv/news-digest|${APP_DIR}|g" \
@@ -116,6 +148,7 @@ migrate_cfg "${APP_DIR}/providers.json"     "${CONFIG_DIR}/providers.json"
 migrate_cfg /etc/nginx/htpasswd-news-admin  "${CONFIG_DIR}/htpasswd-admin"
 
 ENV_FILE="${CONFIG_DIR}/.env"
+INCOMING_ENV="${CONFIG_DIR}/.env.incoming"   # deploy-all 经 scp 送来的受管键值（非命令行参数）
 if [ ! -f "$ENV_FILE" ]; then
   # 只写模板与注释，不含任何真实密钥。定界符不加引号：要展开 ${ENV_FILE}/${DOMAIN}
   # 两个部署参数；模板正文不含其他 $，无意外展开风险
@@ -149,7 +182,8 @@ NEWS_HTTP_PROXY=
 ENVEOF
   chown root:root "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  cat <<STOPEOF
+  if [ ! -f "$INCOMING_ENV" ]; then
+    cat <<STOPEOF
 
 >>> 需要人工操作：填写生产密钥 <<<
 已生成模板 ${ENV_FILE}（root:600）。请在服务器上：
@@ -157,15 +191,42 @@ ENVEOF
   2. 保存后重新执行本脚本：bash ${SRC_DIR}/bootstrap.sh
 本脚本不经参数或标准输入接收密钥，只能人工落盘后重跑。
 STOPEOF
-  exit 2
+    exit 2
+  fi
+  echo "已生成 .env 脚手架；检测到 .env.incoming，合并受管密钥后继续（无需人工停下）"
 fi
+
+# P0-4 定点合并：把 .env.incoming 的受管键 upsert 进 .env——只更新/追加这些键，逐行保留
+# 其余键与注释，绝不整文件覆盖（防止抹掉运维手工加的键）。secrets 只经 600 文件、不进命令行
+# 参数。awk 以首个 = 切分，值中含 = 也安全。合并后删除 incoming。
+if [ -f "$INCOMING_ENV" ]; then
+  merged="$(mktemp)"
+  awk -F= '
+    FNR==NR {
+      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { k=$1; v=substr($0,index($0,"=")+1); m[k]=v; ord[++n]=k }
+      next
+    }
+    {
+      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/ && ($1 in m)) {
+        if (!done[$1]) { print $1"="m[$1]; done[$1]=1 }
+        next
+      }
+      print
+    }
+    END { for (i=1;i<=n;i++) if (!done[ord[i]]) print ord[i]"="m[ord[i]] }
+  ' "$INCOMING_ENV" "$ENV_FILE" > "$merged"
+  cat "$merged" > "$ENV_FILE"       # 覆写内容而非 mv，保留 root:600 属主与 inode
+  rm -f "$merged" "$INCOMING_ENV"
+  echo "已合并 .env.incoming 受管键到 ${ENV_FILE}（其余行/注释保留），并删除 incoming"
+fi
+
 # 幂等收紧：无论谁动过，权限始终回到 root:600
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 if ! grep -qE '^TRANSLATION_API_KEY=.+' "$ENV_FILE"; then
   warnbox ".env 中 TRANSLATION_API_KEY 仍为空——worker 首刊会失败，请尽快填写"
 fi
-echo ".env 已存在（权限已确认 600），继续"
+echo ".env 就绪（权限已确认 600），继续"
 
 # ---------------------------------------------------------------
 section "4/10 模型供应商档案 providers.json"
@@ -233,6 +294,21 @@ fi
 section "6/10 拉取镜像、启动 web 与 admin、worker 首刊"
 COMPOSE=(docker compose -f "${APP_DIR}/compose.yaml")
 "${COMPOSE[@]}" pull
+# 记录本次实际部署的镜像 digest，供回滚溯源（回滚指引见收尾段与 README §10）。pull 后本地
+# 镜像已带 RepoDigests；即便本次按 tag 部署，也把 tag 解析成的不可变 digest 落盘台账。
+record_deployed() {
+  local logdir="${APP_DIR}/backups" wd bd
+  install -d -m 755 "$logdir"
+  wd="$(docker image inspect "$WORKER_IMAGE" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
+  bd="$(docker image inspect "$WEB_IMAGE" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
+  printf '%s\ttag=%s\tworker=%s\tweb=%s\n' \
+    "$(date --iso-8601=seconds)" "$TAG" "${wd:-未解析}" "${bd:-未解析}" \
+    >> "${logdir}/DEPLOYED.log"
+  echo "已记录部署 digest 台账：${logdir}/DEPLOYED.log"
+  echo "  worker=${wd:-未解析}"
+  echo "  web=${bd:-未解析}"
+}
+record_deployed
 # 先常驻 web 再首刊是安全的：/healthz 不依赖站点内容，current 出现前仅健康检查可用。
 # admin（模型切换面板）一并常驻：与 worker 同镜像已随 pull 就绪；up -d 幂等，重跑安全
 "${COMPOSE[@]}" up -d web admin
@@ -352,6 +428,27 @@ HTTPEOF
 # 完整版按部署参数渲染一次，两个分支（证书已在 / 刚签发）共用
 render_nginx_conf "${SRC_DIR}/news.conf" "${TMP_DIR}/news.conf"
 
+# 证书续期后重载 nginx。certbot 由 systemd timer 自动续期，但默认不会通知 nginx
+# 加载新证书——约 60 天后续签、旧证书 90 天到期，若不 reload 则 HTTPS 静默失效。
+# 用 renewal-hooks/deploy/ 目录钩子（对本机所有证书、每次成功续期都执行），而非签发时
+# 的 --deploy-hook：如此已经签发过证书、走下面「证书已存在」分支的存量服务器也能被
+# 覆盖修复（--deploy-hook 只会写进新签发证书的续期配置，够不到存量证书）。每次 bootstrap
+# 无条件重装，幂等。
+install_renewal_reload_hook() {
+  command -v certbot >/dev/null 2>&1 || return 0
+  hook_dir=/etc/letsencrypt/renewal-hooks/deploy
+  install -d -m 755 "$hook_dir"
+  cat > "${hook_dir}/10-reload-nginx.sh" <<'HOOKEOF'
+#!/bin/sh
+# certbot 在证书成功续期后自动调用；先 nginx -t 校验，配置无误才 reload，
+# 避免坏配置导致 reload 失败中断在线服务。
+nginx -t && systemctl reload nginx
+HOOKEOF
+  chmod +x "${hook_dir}/10-reload-nginx.sh"
+  echo "已安装证书续期重载钩子：${hook_dir}/10-reload-nginx.sh"
+}
+install_renewal_reload_hook
+
 if [ -s "${CERT_DIR}/fullchain.pem" ]; then
   echo "证书已存在（${CERT_DIR}），直接安装完整版配置"
   install_nginx_conf "${TMP_DIR}/news.conf"
@@ -383,6 +480,17 @@ ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0
 echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页；000 为无响应——检查 admin 容器日志）"
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
+# 版本自检：核对实际拉到的 worker 镜像 OCI version label 是否等于本次部署 TAG（CI 用
+# github.ref_name=完整 tag 注入该 label，故二者应完全相等）。仅在 tag 模式校验——按 digest
+# 固定时 TAG 可能只是默认占位、与 digest 指向的版本无关，比对无意义。不一致仅告警不中止。
+if [ -z "$WORKER_DIGEST" ]; then
+  IMG_VER="$(docker image inspect "$WORKER_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  if [ -n "$IMG_VER" ] && [ "$IMG_VER" != "$TAG" ]; then
+    warnbox "worker 镜像 version label（${IMG_VER}）与部署 TAG（${TAG}）不一致——请确认 GHCR 上该 tag 是否指向预期构建"
+  else
+    echo "版本自检         ：worker 镜像 label=${IMG_VER:-未标注} 与 TAG=${TAG} 一致"
+  fi
+fi
 
 cat <<DONEEOF
 

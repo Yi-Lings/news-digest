@@ -37,6 +37,16 @@ _EXCLUDED_PATH_PARTS = (
 )
 
 
+# 只有 http/https 才是合法的对外链接。RSS 的 link 可含 javascript:/data:/vbscript:，
+# 若原样落库并渲进 href 即为存储型 XSS——在入库前的这道白名单是第一层防线，
+# 模板侧 safe_url 过滤器是第二层。
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def is_web_url(url: str) -> bool:
+    return urlparse(url.strip()).scheme.lower() in _ALLOWED_URL_SCHEMES
+
+
 def is_article_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return not any(part in path for part in _EXCLUDED_PATH_PARTS)
@@ -111,6 +121,8 @@ def parse_feed(data: bytes, source: SourceConfig) -> list[Candidate]:
         link = entry.get("link", "")
         published = _published_utc(entry)
         if not title or not link or not published:
+            continue
+        if not is_web_url(link):  # 丢弃 javascript:/data: 等非 http(s) 链接
             continue
         if source.kind == "full" and not is_article_url(link):
             continue

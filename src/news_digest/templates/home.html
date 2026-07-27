@@ -39,7 +39,7 @@
   <article class="lead" data-source="{{ lead.source }}">
     {% if lead.image %}
     <a class="lead-figure" href="/issues/{{ edition.date }}/{{ lead.slug }}.html" tabindex="-1" aria-hidden="true">
-      <img src="{{ lead.image.src }}" alt="{{ lead.image.alt_en }}" width="800" height="450" loading="lazy">
+      <img src="{{ lead.image.src | safe_url }}" alt="{{ lead.image.alt_en }}" width="800" height="450" loading="lazy">
     </a>
     {% endif %}
     <p class="card-meta">
@@ -94,7 +94,7 @@
     <li data-source="{{ brief.source }}">
       <span class="source-tag">{{ brief.source }}</span>
       <span class="brief-title">
-        {% if brief.url %}<a href="{{ brief.url }}" rel="noopener">{{ bilingual(brief.title_en, brief.title_zh) }}</a>
+        {% if brief.url %}<a href="{{ brief.url | safe_url }}" rel="noopener">{{ bilingual(brief.title_en, brief.title_zh) }}</a>
         {% else %}{{ bilingual(brief.title_en, brief.title_zh) }}{% endif %}
       </span>
     </li>

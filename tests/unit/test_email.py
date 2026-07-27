@@ -85,8 +85,10 @@ class FakeSMTP:
 
     instances: list["FakeSMTP"] = []
 
-    def __init__(self, host: str, port: int, timeout: float = 0) -> None:
+    def __init__(self, host: str, port: int, timeout: float = 0, context=None) -> None:
         self.host, self.port = host, port
+        self.ssl_context = context  # 465 隐式 SSL 时构造器收到的校验上下文
+        self.starttls_context = None
         self.calls: list[str] = []
         FakeSMTP.instances.append(self)
 
@@ -96,7 +98,8 @@ class FakeSMTP:
     def __exit__(self, *args) -> None:
         pass
 
-    def starttls(self) -> None:
+    def starttls(self, context=None) -> None:
+        self.starttls_context = context
         self.calls.append("starttls")
 
     def login(self, username: str, password: str) -> None:
@@ -113,13 +116,18 @@ def test_send_uses_starttls_and_login(tmp_path):
     send(message, _smtp_config(), smtp_factory=FakeSMTP)
     smtp = FakeSMTP.instances[-1]
     assert smtp.calls == ["starttls", "login:user", "send:me@example.com"]
+    # STARTTLS 必须传入校验证书的上下文（否则加密不认证，凭据可被中间人截获）
+    assert smtp.starttls_context is not None
 
 
 def test_send_port_465_skips_starttls():
     FakeSMTP.instances.clear()
     message = compose("s", "t", "<p>h</p>", "a@example.com", ("b@example.com",))
     send(message, _smtp_config(port=465), smtp_factory=FakeSMTP)
-    assert "starttls" not in FakeSMTP.instances[-1].calls
+    smtp = FakeSMTP.instances[-1]
+    assert "starttls" not in smtp.calls
+    # 465 隐式 SSL 必须把校验上下文传给构造器
+    assert smtp.ssl_context is not None
 
 
 def test_validate_smtp_missing_fields():

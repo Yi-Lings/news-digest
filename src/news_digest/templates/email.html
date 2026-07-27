@@ -33,7 +33,7 @@
     {% for brief in edition.briefs[:5] %}
     <div style="font-size:13px;line-height:1.7;margin-top:8px;">
       <span style="color:#ae2f24;font-size:11px;font-family:sans-serif;">{{ brief.source }}</span><br>
-      <a href="{{ brief.url }}" style="color:#1c1b17;">{{ brief.title_zh or brief.title_en }}</a>
+      <a href="{{ brief.url | safe_url }}" style="color:#1c1b17;">{{ brief.title_zh or brief.title_en }}</a>
     </div>
     {% endfor %}
   </div>

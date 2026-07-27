@@ -1,10 +1,11 @@
 # deploy-all.ps1 -- one-click stage 7 deployment orchestrator (run via deploy.bat).
 # PowerShell 5.1 compatible; ASCII-only source.
-# Flow: ssh-agent (passphrase once) -> git push (triggers CI on tag) ->
-#       wait for GitHub Actions build -> provision server .env from local
-#       .env.local (secrets go Windows -> server directly, never through chat
-#       or the repo) -> server GHCR login via `gh auth token` pipe ->
-#       server-push.ps1 -AutoYes (upload + preflight + bootstrap) -> smoke check.
+# Flow: ssh-agent (passphrase once) -> tag preflight (never move a published tag) ->
+#       git push (triggers CI on tag) -> wait for GitHub Actions build -> stage
+#       managed .env keys as config/.env.incoming (bootstrap merges, never overwrites;
+#       secrets go Windows -> server directly, never through chat or the repo) ->
+#       server GHCR login with a READ-ONLY read:packages PAT ->
+#       server-push.ps1 -AutoYes -Version (upload + preflight + bootstrap) -> smoke check.
 
 param([switch]$Elevated)  # 内部使用：提权重启后置位，用于收尾时暂停窗口
 
@@ -12,12 +13,25 @@ $KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
 $Server  = "root@cheapcoding.top"
 $Owner   = "yi-lings"
 $AppDir  = "/srv/news-digest"
-$Version = "v0.6.0rc6"
+# $Version is single-sourced from the package below (not hardcoded), so a release
+# version only ever changes in src/news_digest/__init__.py.
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $RepoDir = Split-Path $PSScriptRoot -Parent
 Set-Location $RepoDir
+
+# ---- version single-sourced from the package: tag = 'v' + __version__ ----
+# Deploy, CI (release.yml's tag==__version__ gate) and the server bootstrap all key off
+# this same value; bumping __init__.py is the only place a release version changes.
+$initPy = Join-Path $RepoDir "src\news_digest\__init__.py"
+$verMatch = @(Select-String -Path $initPy -Pattern '__version__\s*=\s*"([^"]+)"')
+if ($verMatch.Count -eq 0) {
+    Write-Host "[FAIL] cannot parse __version__ from $initPy" -ForegroundColor Red
+    exit 1
+}
+$Version = "v" + $verMatch[0].Matches[0].Groups[1].Value
+Write-Host "[i] release version (from __init__.py): $Version"
 
 function Stop-OnError {
     param([int]$Code, [string]$Step)
@@ -92,6 +106,34 @@ if ($agentReady) {
     }
 }
 
+# ---- tag preflight: release the current commit; never move a published tag ----
+$headSha = "$(git rev-parse HEAD 2>$null)".Trim()
+$localTagSha = "$(git rev-list -n 1 $Version 2>$null)".Trim()
+if (-not $localTagSha) {
+    Write-Host "[FAIL] local tag $Version does not exist. Tag the release commit first:" -ForegroundColor Red
+    Write-Host "         git tag -a $Version -m $Version" -ForegroundColor Red
+    exit 1
+}
+if ($localTagSha -ne $headSha) {
+    Write-Host "[WARN] tag $Version is at $($localTagSha.Substring(0,12)), not HEAD $($headSha.Substring(0,12))." -ForegroundColor Yellow
+    Write-Host "         You will deploy the tagged commit, not your current checkout." -ForegroundColor Yellow
+}
+# A published tag is immutable: if the remote already carries $Version at a different
+# commit, refuse rather than force-move it (moving a released tag breaks provenance).
+$remoteCommit = $null
+$peeled = git ls-remote origin ("refs/tags/" + $Version + "^{}") 2>$null
+if ($peeled) { $remoteCommit = (("$peeled" -split "\s+")[0]).Trim() }
+else {
+    $plain = git ls-remote origin ("refs/tags/" + $Version) 2>$null
+    if ($plain) { $remoteCommit = (("$plain" -split "\s+")[0]).Trim() }
+}
+if ($remoteCommit -and $remoteCommit -ne $localTagSha) {
+    Write-Host "[FAIL] remote tag $Version already points at $($remoteCommit.Substring(0,12)) (local $($localTagSha.Substring(0,12)))." -ForegroundColor Red
+    Write-Host "         A published tag must never be moved. Bump __version__ to a new rc and retag." -ForegroundColor Red
+    exit 1
+}
+if ($remoteCommit) { Write-Host "[i] remote tag $Version already present at the same commit; tag push is a no-op." }
+
 # ---- [1/6] push branches, then the release tag ALONE ----
 # GitHub suppresses push events when more than 3 tags arrive in one push,
 # so the version tag must be pushed by itself to trigger the CI build.
@@ -120,8 +162,8 @@ if (-not $runId) {
 gh run watch $runId --exit-status
 Stop-OnError $LASTEXITCODE "CI build (gh run watch)"
 
-# ---- [3/6] provision the server .env from local .env.local ----
-Write-Host "[3/6] Provisioning $AppDir/config/.env from local .env.local..."
+# ---- [3/6] stage managed .env keys from local .env.local (bootstrap merges them) ----
+Write-Host "[3/6] Staging managed keys to $AppDir/config/.env.incoming from local .env.local..."
 $envLocal = Join-Path $RepoDir ".env.local"
 if (-not (Test-Path $envLocal)) {
     Write-Host "[FAIL] .env.local not found." -ForegroundColor Red
@@ -146,30 +188,53 @@ if ($missing.Count -gt 0) {
     Write-Host "[FAIL] .env.local is missing: $($missing -join ', ')" -ForegroundColor Red
     exit 1
 }
-$lines = @("# generated by deploy-all.ps1 from local .env.local")
+$lines = @("# managed keys staged by deploy-all.ps1 from .env.local; bootstrap upserts these")
+$lines += "# into config/.env, preserving any other keys/comments already on the server."
 $lines += "NEWS_SITE_URL=https://news.cheapcoding.top"
 foreach ($k in $keys) { $lines += "$k=$($pairs[$k])" }
 $tmp = [IO.Path]::GetTempFileName()
 [IO.File]::WriteAllText($tmp, (($lines -join "`n") + "`n"))
-# config/ subdir is the only host path bind-mounted into the admin container;
+# Ship managed keys as .env.incoming and let bootstrap merge+delete it. Never overwrite
+# .env wholesale -- that would drop operator-added keys. Secrets ride the scp'd file
+# only, never a command line. config/ is the admin container's only bind mount;
 # bootstrap re-tightens ownership/permissions idempotently later in step [5/6].
 ssh -i $KeyPath $Server "mkdir -p $AppDir/config && chmod 750 $AppDir/config"
 Stop-OnError $LASTEXITCODE "ssh mkdir config dir"
-scp -i $KeyPath $tmp "${Server}:$AppDir/config/.env"
+scp -i $KeyPath $tmp "${Server}:$AppDir/config/.env.incoming"
 $scpCode = $LASTEXITCODE
 Remove-Item $tmp -Force
-Stop-OnError $scpCode "scp .env"
-ssh -i $KeyPath $Server "chmod 600 $AppDir/config/.env"
-Stop-OnError $LASTEXITCODE "chmod .env"
+Stop-OnError $scpCode "scp .env.incoming"
+ssh -i $KeyPath $Server "chmod 600 $AppDir/config/.env.incoming"
+Stop-OnError $LASTEXITCODE "chmod .env.incoming"
+Write-Host "[i] Staged managed keys to config/.env.incoming; bootstrap will merge into .env."
 
-# ---- [4/6] server GHCR login: token flows Windows -> server directly ----
-Write-Host "[4/6] Logging the server into GHCR (gh auth token pipe)..."
-gh auth token | ssh -i $KeyPath $Server "docker login ghcr.io -u $Owner --password-stdin && chmod 600 /root/.docker/config.json"
-Stop-OnError $LASTEXITCODE "server GHCR login"
+# ---- [4/6] server GHCR login: a READ-ONLY PAT flows Windows -> server directly ----
+# Never `gh auth token` here: that is the full-scope user token (repo write, workflow,
+# delete:packages). The server only ever pulls images, so it must receive a PAT scoped
+# to read:packages only. Prefer $env:ND_GHCR_TOKEN (non-interactive); else prompt hidden.
+Write-Host "[4/6] Logging the server into GHCR (read-only PAT)..."
+$ghcrToken = $env:ND_GHCR_TOKEN
+if (-not $ghcrToken) {
+    $sec = Read-Host "Paste a GHCR read:packages PAT for the server (input hidden)" -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { $ghcrToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+}
+if (-not $ghcrToken) {
+    Write-Host "[FAIL] No GHCR token provided (set ND_GHCR_TOKEN or paste at the prompt)." -ForegroundColor Red
+    exit 1
+}
+# Token rides stdin into docker login (never on argv or in logs); tighten config.json after.
+$ghcrToken | ssh -i $KeyPath $Server "docker login ghcr.io -u $Owner --password-stdin && chmod 600 /root/.docker/config.json"
+$loginCode = $LASTEXITCODE
+$ghcrToken = $null
+Stop-OnError $loginCode "server GHCR login"
 
 # ---- [5/6] upload artifacts, preflight, bootstrap ----
+# Pass the single-sourced $Version through so bootstrap deploys the exact tag we just
+# built/pushed, instead of server-push falling back to its own hardcoded default.
 Write-Host "[5/6] Running server-push (upload + preflight + bootstrap)..."
-& (Join-Path $PSScriptRoot "server-push.ps1") -AutoYes
+& (Join-Path $PSScriptRoot "server-push.ps1") -AutoYes -Version $Version
 Stop-OnError $LASTEXITCODE "server-push"
 
 # ---- [6/6] smoke check ----

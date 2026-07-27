@@ -43,7 +43,7 @@ web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/sr
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `ND_OWNER` | `yi-lings` | GHCR 命名空间；渲染 compose 中三处 image 引用（worker/admin 共用一处值） |
-| `ND_VERSION` | `v0.6.0rc6` | 部署候选 tag；转正式版后仍按 §4 固定 digest |
+| `ND_VERSION` | `v1.0.0` | 发布 tag 兜底值；deploy-all/server-push 会从 `__init__.py` 派生并覆盖 |
 | `ND_APP_DIR` | `/srv/news-digest` | 部署目录（compose、`config/` 子目录内的 `.env` 与 `providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
 | `ND_DOMAIN` | `news.cheapcoding.top` | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
 | `ND_WEB_PORT` | `8618` | web 容器宿主回环端口；渲染 compose 与 nginx |
@@ -206,7 +206,26 @@ curl -sI http://news.cheapcoding.top/ | head -3          # 301 → https
 curl -sI -u 用户名 https://news.cheapcoding.top/ | grep -iE 'x-robots|content-security|x-content-type|referrer'
 ```
 
-5. 确认 certbot 自动续期已挂上（`systemctl list-timers | grep certbot`），webroot 方式续期无需停站。
+5. 安装「续期后重载 nginx」钩子。certbot 的 timer 会自动续期，但默认**不会**让 nginx 加载新证书——
+   不装这个钩子，约 90 天后旧证书到期即 HTTPS 静默失效。一键部署脚本会自动安装；手工部署需自己装一次：
+
+```bash
+sudo install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+printf '#!/bin/sh\nnginx -t && systemctl reload nginx\n' | \
+  sudo tee /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh
+```
+
+6. 验证自动续期与重载都就位（不改动真实证书）：
+
+```bash
+systemctl list-timers | grep certbot          # 续期 timer 已挂上
+sudo certbot renew --dry-run                   # 演练一次完整续期，应无报错
+sudo /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh   # 直接执行钩子本体，验证 reload 生效
+```
+
+   注意：`--dry-run` **不会**执行 deploy 钩子（certbot 明确在演练时跳过），所以钩子要单独跑一次验证；
+   若 certbot 版本支持，也可用 `sudo certbot renew --dry-run --run-deploy-hooks` 合并演练。webroot 方式续期无需停站。
 
 ## 9. 备份
 
