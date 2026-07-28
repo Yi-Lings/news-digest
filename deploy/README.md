@@ -62,7 +62,7 @@ Release；其余未设置项使用本项目生产默认值。
 1. 本地验收通过后，确认工作树完全 clean、`HEAD` 已合入且等于本地 `main`，并确认
    `src/news_digest/__init__.py` 的 `__version__` 与将要打的**新 tag**一致；发布脚本要求
    tag 严格指向 HEAD，禁止复用或移动旧 tag。
-2. 创建 annotated tag 并推送：`git tag -a v1.1.0 -m "v1.1.0" && git push origin v1.1.0`。
+2. 创建 annotated tag 并推送：`git tag -a v1.1.1 -m "v1.1.1" && git push origin v1.1.1`。
 3. 等待 Actions `release` 工作流通过（先复跑离线测试，再构建推送两个镜像）。
 4. 从该 run 的 Summary 复制两条 digest 引用（形如
    `ghcr.io/OWNER/news-digest-worker@sha256:…`），记入发布记录。

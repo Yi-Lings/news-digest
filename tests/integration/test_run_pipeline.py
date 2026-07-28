@@ -76,12 +76,43 @@ class FakeTranslator:
         self.calls += 1
         return json.dumps(
             {
-                "title_zh": f"中文标题：{article.slug}",
+                "title_zh": "中文标题：测试",
                 "summary_zh": "中文摘要。",
                 "paragraphs_zh": ["中文段落。"] * len(article.paragraphs),
-                "vocabulary": [],
-                "collocations": [],
-                "sentence_notes": [],
+                "vocabulary": [
+                    {
+                        "word": "report",
+                        "phonetic": "/rɪˈpɔːrt/",
+                        "meaning_zh": "报道",
+                        "example_en": "The report describes the latest development.",
+                    },
+                    {
+                        "word": "official",
+                        "phonetic": "/əˈfɪʃəl/",
+                        "meaning_zh": "官员",
+                        "example_en": "An official commented on the event.",
+                    },
+                    {
+                        "word": "public",
+                        "phonetic": "/ˈpʌblɪk/",
+                        "meaning_zh": "公众",
+                        "example_en": "The public received an update.",
+                    },
+                ],
+                "collocations": [
+                    {
+                        "phrase": "according to",
+                        "meaning_zh": "根据",
+                        "example_en": "According to the report, the situation changed.",
+                    }
+                ],
+                "sentence_notes": [
+                    {
+                        "sentence_en": "The report describes the latest development.",
+                        "translation_zh": "报道描述了最新进展。",
+                        "analysis_zh": "主谓宾结构。",
+                    }
+                ],
             },
             ensure_ascii=False,
         )
