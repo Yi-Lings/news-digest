@@ -438,9 +438,30 @@ record_deployed
 # 先常驻 web 再首刊是安全的：/healthz 不依赖站点内容，current 出现前仅健康检查可用。
 # admin（配置与投递管理面板）一并常驻：与 worker 同镜像已随 pull 就绪；up -d 幂等
 "${COMPOSE[@]}" up -d web admin
-# 首刊用 run --yes：抓取、翻译、构建、投递四阶段；邮件默认关闭时明确跳过。
+# 已有当天正式刊物时，部署只更新应用，不重复抓取、翻译、构建或投递。
+# 使用应用自身的 release resolver，确保 current 位于 releases/ 内且 manifest/hash 完整。
+current_release_is_today() {
+  "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python worker - <<'PY'
+import datetime as dt
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from news_digest.delivery.publisher import resolve_published_release
+
+try:
+    release = resolve_published_release(Path("/site"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+today = dt.datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+raise SystemExit(0 if release.release_date == today else 1)
+PY
+}
+
+# 当天尚无正式刊物时用 run --yes：抓取、翻译、构建、投递四阶段。
 # 失败不中止安装：timer 明日会再跑；投递失败不回滚已发布站点。
-if "${COMPOSE[@]}" run --rm worker run --yes; then
+if current_release_is_today; then
+  echo "检测到 Asia/Shanghai 当天的安全正式刊物，跳过 worker 首刊流水线"
+elif "${COMPOSE[@]}" run --rm worker run --yes; then
   echo "worker 首刊完成"
 else
   warnbox "worker 首刊流水线失败——请按阶段输出排查；若仅投递失败，已发布站点仍保留。修复后手动重试：docker compose -f ${APP_DIR}/compose.yaml run --rm worker run --yes"

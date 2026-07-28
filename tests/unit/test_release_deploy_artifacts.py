@@ -7,8 +7,8 @@ from news_digest import __version__
 ROOT = Path(__file__).parents[2]
 
 
-def test_phase_8_release_version_is_v1_2_1():
-    assert __version__ == "1.2.1"
+def test_phase_8_release_version_is_v1_2_2():
+    assert __version__ == "1.2.2"
 
 
 def _read(path: str) -> str:
@@ -165,6 +165,25 @@ def test_bootstrap_backs_up_sqlite_before_starting_database_consumers():
     assert '拒绝覆盖' in function_body
     assert 'Admin 与 worker 未启动' in function_body
     assert 'news_digest' not in function_body
+
+
+def test_bootstrap_skips_first_run_when_current_release_is_today():
+    bootstrap = _read("deploy/bootstrap.sh")
+
+    guard = bootstrap.index("current_release_is_today()")
+    worker = bootstrap.index('"${COMPOSE[@]}" run --rm worker run --yes')
+    assert guard < worker
+    assert (
+        '"${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python worker -'
+        in bootstrap[guard:worker]
+    )
+    assert (
+        "from news_digest.delivery.publisher import resolve_published_release"
+        in bootstrap[guard:worker]
+    )
+    assert 'resolve_published_release(Path("/site"))' in bootstrap[guard:worker]
+    assert 'ZoneInfo("Asia/Shanghai")' in bootstrap[guard:worker]
+    assert "if current_release_is_today; then" in bootstrap[guard:worker]
 
 
 def test_bootstrap_inline_python_creates_a_consistent_wal_snapshot(tmp_path):

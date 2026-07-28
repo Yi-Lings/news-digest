@@ -199,6 +199,10 @@ sudo docker compose pull
 
 启动 web/Admin 后跑一次 worker；`/healthz` 不依赖 `current`，首刊生成期间可正常探活：
 
+重复部署时，bootstrap 会先通过应用自身的 release resolver 校验 `/site/current`。若安全 manifest
+的刊期等于 `Asia/Shanghai` 当天，则跳过整条 worker 流水线，不再重复抓取、翻译、构建或投递；
+当天尚无正式刊物时才运行首刊。
+
 已有 `news-digest_news-data` 卷时，bootstrap 会在启动 Admin/worker 前使用已拉取的 worker
 镜像执行 SQLite online backup：源库按只读 URI 打开，备份通过 `PRAGMA integrity_check`
 后以唯一文件名和 0600 权限落到 `/srv/news-digest/backups/`，并生成 SHA-256 校验文件。
@@ -208,7 +212,7 @@ sudo docker compose pull
 ```bash
 cd /srv/news-digest
 sudo docker compose up -d web admin            # admin 为配置与投递面板常驻服务（§13）
-sudo docker compose run --rm worker            # 抓取→翻译→构建→投递；邮件关闭时明确跳过
+sudo docker compose run --rm worker            # 仅当天尚无正式刊物时手工执行
 curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8618/ | head -5     # 期望看到站点 HTML
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
