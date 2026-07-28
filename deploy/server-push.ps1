@@ -8,7 +8,10 @@
 
 param(
     [switch]$AutoYes,        # -AutoYes: skip the pause between preflight and bootstrap
-    [string]$Version         # release tag to deploy; passed through to bootstrap as ND_VERSION
+    [switch]$NoPrompt,       # automation: native SSH/SCP must fail, never prompt
+    [string]$Version,        # release tag to deploy; passed through to bootstrap as ND_VERSION
+    [string]$WorkerDigest,   # immutable worker digest from this tag's Release asset
+    [string]$WebDigest       # immutable web digest from this tag's Release asset
 )
 
 # ---- variables ----
@@ -28,6 +31,20 @@ if (-not $Version) {
         exit 1
     }
     $Version = "v" + $verMatch[0].Matches[0].Groups[1].Value
+}
+if ($Version -notmatch '^v[A-Za-z0-9_][A-Za-z0-9_.-]{0,126}$') {
+    Write-Host "[FAIL] Invalid release version: $Version" -ForegroundColor Red
+    exit 1
+}
+if (-not $WorkerDigest -or -not $WebDigest) {
+    Write-Host "[FAIL] WorkerDigest and WebDigest are both required; production tag fallback is forbidden." -ForegroundColor Red
+    exit 1
+}
+foreach ($digest in @($WorkerDigest, $WebDigest)) {
+    if ($digest -and $digest -notmatch '^sha256:[0-9a-f]{64}$') {
+        Write-Host "[FAIL] Invalid image digest: $digest" -ForegroundColor Red
+        exit 1
+    }
 }
 Write-Host "[i] deploying release version: $Version"
 
@@ -76,6 +93,19 @@ foreach ($tool in @("ssh", "scp")) {
         exit 1
     }
 }
+$SshArgs = @("-i", $KeyPath)
+$ScpArgs = @("-i", $KeyPath)
+if ($NoPrompt) {
+    $transportArgs = @(
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "ConnectTimeout=20",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=2"
+    )
+    $SshArgs = $transportArgs + @("-i", $KeyPath)
+    $ScpArgs = $transportArgs + @("-i", $KeyPath)
+}
 if (-not (Test-Path $KeyPath)) {
     Write-Host "[FAIL] SSH key not found: $KeyPath" -ForegroundColor Red
     exit 1
@@ -92,22 +122,22 @@ $Dest = "${Server}:$Incoming/"
 
 # ---- step 1: create the incoming directory on the server ----
 Write-Host "[1/4] Creating $Incoming on the server..."
-ssh -i $KeyPath $Server "mkdir -p $Incoming"
+& ssh @SshArgs $Server "mkdir -p $Incoming"
 Stop-OnError $LASTEXITCODE "ssh mkdir incoming"
 
 # ---- step 2: upload artifacts, then normalize them ----
 Write-Host "[2/4] Uploading deploy artifacts..."
-scp -i $KeyPath $Files $Dest
+& scp @ScpArgs $Files $Dest
 Stop-OnError $LASTEXITCODE "scp upload"
 
 # Strip CR from every uploaded text file: a Windows checkout may carry CRLF,
 # and a trailing CR breaks bash scripts, systemd units and nginx conf files.
-ssh -i $KeyPath $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
+& ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
 Stop-OnError $LASTEXITCODE "normalize line endings"
 
 # ---- step 3: read-only preflight, shown verbatim ----
 Write-Host "[3/4] Running preflight.sh (read-only health check)..."
-ssh -i $KeyPath $Server "bash $Incoming/preflight.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
+& ssh @SshArgs $Server "bash $Incoming/preflight.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
 Stop-OnError $LASTEXITCODE "preflight"
 
 Write-Host ""
@@ -120,8 +150,9 @@ if (-not $AutoYes) {
 # ---- step 4: idempotent bootstrap ----
 # Pin the deploy to the resolved tag via ND_VERSION so bootstrap pulls the exact image
 # we just built, rather than its own in-script default. Single word, no secret, safe on argv.
-Write-Host "[4/4] Running bootstrap.sh (idempotent deploy, ND_VERSION=$Version)..."
-ssh -i $KeyPath $Server "ND_VERSION='$Version' bash $Incoming/bootstrap.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
+$bootstrapEnv = "ND_VERSION='$Version' ND_WORKER_DIGEST='$WorkerDigest' ND_WEB_DIGEST='$WebDigest'"
+Write-Host "[4/4] Running bootstrap.sh (idempotent immutable deploy, ND_VERSION=$Version)..."
+& ssh @SshArgs $Server "$bootstrapEnv bash $Incoming/bootstrap.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
 $BootstrapExit = $LASTEXITCODE
 
 # Bootstrap stops itself on purpose when manual input is required
@@ -133,7 +164,7 @@ Write-Host "  1. exit 2 - fill secrets:  ssh -i $KeyPath $Server"
 Write-Host "     then edit $AppDir/config/.env with an editor (secrets never pass through this script)"
 Write-Host "  2. exit 3 - GHCR login:    docker login ghcr.io -u yi-lings"
 Write-Host "     paste a read:packages token at the prompt, then: chmod 600 /root/.docker/config.json"
-Write-Host "  3. Re-run this script (or on the server: bash $Incoming/bootstrap.sh)"
+Write-Host "  3. Re-run this script so the same release version and digests are passed again."
 Write-Host "     and repeat until bootstrap reports completion."
 
 if ($BootstrapExit -ne 0) {

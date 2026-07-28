@@ -56,12 +56,22 @@ def render_home(
     *,
     is_today: bool,
     all_dates: list[str],
+    public_subscription_enabled: bool = False,
+    is_root: bool = True,
 ) -> str:
     return env.get_template("home.html").render(
         edition=edition,
         is_today=is_today,
         all_dates=all_dates,
+        public_subscription_enabled=public_subscription_enabled,
+        is_root=is_root,
         page_title=f"{SITE_NAME} · {format_date_zh(edition.date)}",
+    )
+
+
+def render_privacy(env: Environment) -> str:
+    return env.get_template("privacy.html").render(
+        page_title=f"隐私说明 · {SITE_NAME}",
     )
 
 

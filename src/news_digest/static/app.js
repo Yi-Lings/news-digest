@@ -1,4 +1,4 @@
-/* Cheapcoding News 前端交互：阅读模式、来源筛选、朗读、进度与渐显。无任何网络请求。 */
+/* Cheapcoding News 前端交互：阅读模式、来源筛选、订阅、朗读、进度与渐显。 */
 (function () {
   "use strict";
 
@@ -66,6 +66,54 @@
         items.forEach(function (item) {
           item.hidden = value !== "*" && item.getAttribute("data-source") !== value;
         });
+      });
+    });
+  }
+
+  /* ── 首页订阅（仅同源端点） ── */
+  var subscribeForm = document.querySelector("[data-subscribe-form]");
+  if (subscribeForm && window.fetch) {
+    var subscribeStatus = subscribeForm.querySelector("[data-subscribe-status]");
+    var submitButton = subscribeForm.querySelector("button[type='submit']");
+    subscribeForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      subscribeStatus.textContent = "正在提交…";
+      submitButton.disabled = true;
+      fetch("/subscribe/api/csrf", {
+        method: "GET",
+        credentials: "same-origin",
+        headers: {"Accept": "application/json"}
+      }).then(function (response) {
+        if (!response.ok) {
+          throw new Error("暂时无法提交，请稍后重试。");
+        }
+        return response.json();
+      }).then(function (csrf) {
+        return fetch("/subscribe/api/", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            email: subscribeForm.elements.email.value,
+            website: subscribeForm.elements.website.value,
+            csrf_token: csrf.csrf_token
+          })
+        });
+      }).then(function (response) {
+        return response.json().then(function (data) {
+          if (!response.ok) {
+            throw new Error(data.message || "暂时无法提交，请稍后重试。");
+          }
+          subscribeStatus.textContent = data.message;
+          subscribeForm.elements.email.value = "";
+        });
+      }).catch(function (error) {
+        subscribeStatus.textContent = error.message;
+      }).then(function () {
+        submitButton.disabled = false;
       });
     });
   }

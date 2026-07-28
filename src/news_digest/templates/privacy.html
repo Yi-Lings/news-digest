@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set nav_active = "" %}
+{% block dateline %}<p class="dateline">订阅隐私说明</p>{% endblock %}
+{% block content %}
+<article class="article-page">
+  <header class="article-header">
+    <p class="section-label">邮件订阅</p>
+    <h1>隐私说明</h1>
+  </header>
+  <div class="article-body">
+    <p>本站仅使用邮箱地址完成确认订阅、每日简报投递与退订。邮箱地址不会出现在公开页面、公开日志或其他收件人的邮件中。</p>
+    <p>订阅采用 double opt-in：提交地址后，只有点击限时确认链接才会开始投递。确认与退订 token 仅以不可逆摘要保存。</p>
+    <p>每封正式简报均提供退订链接和 one-click 退订头。退订后，该地址立即停止参与自动投递、失败重试和人工重发；再次订阅必须重新确认。</p>
+    <p>投递状态仅保存刊期、脱敏收件人标识、尝试次数与错误分类，用于防重复和故障排查。</p>
+  </div>
+</article>
+{% endblock %}

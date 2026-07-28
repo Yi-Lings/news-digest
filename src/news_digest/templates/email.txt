@@ -1,23 +1,16 @@
-Cheapcoding News · {{ edition.date | date_zh }}（{{ edition.date | weekday_zh }}）双语简报
-==================================================
+Cheapcoding News 已更新｜{{ content.date }}
+========================================
 
-{% for article in edition.articles %}
-{{ loop.index }}. {{ article.title_en }}
-{% if article.title_zh %}   {{ article.title_zh }}
-{% endif %}   [{{ article.source }} · 约 {{ article.reading_minutes }} 分钟]
-   {{ article.summary_zh or article.summary_en }}
-   {{ site_url }}/issues/{{ edition.date }}/{{ article.slug }}.html
-
-{% endfor %}
-{% if edition.briefs %}
-简讯（{{ edition.briefs | length }} 条，节选）：
-{% for brief in edition.briefs[:5] %}
-- [{{ brief.source }}] {{ brief.title_zh or brief.title_en }}
-  {{ brief.url }}
-{% endfor %}
+今日内容已经发布。
+{% if content.degraded %}[部分标题译文暂缺，已保留英文标题。]
 {% endif %}
+今日头条
+{% if content.mains %}{% for article in content.mains[:3] %}{{ loop.index }}. {% if content.language == 'en' %}{{ article.title_en }}{% elif content.language == 'zh' %}{{ article.title_zh or article.title_en }}{% else %}{{ article.title_zh or article.title_en }}{% if article.title_zh %}
+   {{ article.title_en }}{% else %} [译文暂缺]{% endif %}{% endif %}
+{% endfor %}{% else %}{% for brief in content.briefs[:3] %}{{ loop.index }}. {% if content.language == 'en' %}{{ brief.title_en }}{% elif content.language == 'zh' %}{{ brief.title_zh or brief.title_en }}{% else %}{{ brief.title_zh or brief.title_en }}{% if brief.title_zh %}
+   {{ brief.title_en }}{% else %} [译文暂缺]{% endif %}{% endif %}
+{% endfor %}{% endif %}
+完整内容请访问 Cheapcoding News 官网。
 
-在网站阅读全文与学习解析：{{ site_url }}/
-
---
-内容取自各新闻来源公开 RSS 与页面，版权归原出版方；中文与学习内容由 AI 生成，仅供学习参考。
+内容取自各新闻来源公开 RSS 与页面；中文内容由 AI 生成，仅供学习参考。
+{# List-Unsubscribe and recipient-specific links are added by subscription integration. #}

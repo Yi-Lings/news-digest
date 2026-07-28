@@ -22,6 +22,7 @@ services:
   worker:
     # 部署时替换为 @sha256:DIGEST（见文件头注释；OWNER/VERSION 为占位符）
     image: ghcr.io/OWNER/news-digest-worker:VERSION
+    user: "10001:10001"
     # 一次性任务：由 systemd timer 经 `docker compose run --rm worker` 触发。
     # 不常驻、失败不自动重启——避免翻译 API 重复计费；停机漏跑由 timer 的
     # Persistent=true 补跑，而不是靠容器重启策略
@@ -35,6 +36,10 @@ services:
       # 注意：.env 中不得设置 NEWS_DATA_DIR / NEWS_OUTPUT_PATH / NEWS_DATABASE_PATH，
       # 这三项已在镜像内固定为卷挂载点，覆盖会写到只读路径导致任务失败
       - /srv/news-digest/config/.env
+    environment:
+      # 生产翻译以 providers.json 的唯一默认档案为权威源；.env 中 TRANSLATION_*
+      # 仅作迁移兼容，不得在无默认档案时静默回退。
+      TRANSLATION_PROVIDERS_FILE: /config/providers.json
     # 只读根文件系统：可写面收敛到 /tmp（tmpfs）与两个数据卷
     read_only: true
     tmpfs:
@@ -53,6 +58,7 @@ services:
         max-size: "10m"
         max-file: "3"
     volumes:
+      - /srv/news-digest/config:/config:ro
       - news-data:/data   # SQLite、抓取快照、翻译缓存、邮件归档
       - news-site:/site   # releases/ + current 符号链接（发布器原子切换）
 
@@ -94,17 +100,21 @@ services:
     # 生产模型切换面板（news-digest admin）：复用 worker 镜像——面板与流水线是
     # 同一份代码、同一个 digest，部署时与 worker 的 image 一并替换（见文件头注释）
     image: ghcr.io/OWNER/news-digest-worker:VERSION
-    command: ["admin", "--port", "8619", "--config-dir", "/config"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["umask 0002; exec news-digest admin --port 8619 --config-dir /config"]
     # 面板服务端在代码里硬绑 127.0.0.1（安全设计：密钥面板绝不监听非回环地址）。
     # bridge 网络下 ports 映射的流量到达的是容器 eth0，会被这一回环绑定拒绝，
     # 因此用 host 网络——效果恰好就是需求本身：只监听宿主机 127.0.0.1:8619，
     # 公网入口唯一经宿主机 Nginx 的 /admin/（认证由面板自身的登录页 + 会话
     # Cookie 承担，nginx 只反代不做 Basic Auth，见 nginx/news.conf）
     network_mode: host
-    # 镜像默认以 uid 10001 运行，但 /config 下 .env 与 providers.json 依红线保持
-    # root:600；面板要原地读写它们，必须以容器 root 运行。风险由 cap_drop ALL、
-    # no-new-privileges、只读根文件系统与仅回环监听共同收敛
-    user: "0:0"
+    # 镜像默认以 uid 10001 运行；/config 下 .env 保持 root:root/600，而
+    # providers.json 为 worker 可读的 root:10001/640。面板要原地读写它们，必须
+    # 以容器 root UID 运行。共享 GID 固定为
+    # worker 的 10001，并以 umask 0002 启动，确保面板首次创建的 SQLite/journal
+    # 仍可由非 root worker 写入。风险由 cap_drop ALL、no-new-privileges、只读根
+    # 文件系统与仅回环监听共同收敛。
+    user: "0:10001"
     # 常驻服务，意外退出自动拉起：面板与 worker 的一次性语义不同，重启无重复计费问题
     restart: unless-stopped
     init: true
@@ -133,6 +143,12 @@ services:
       # 将各自持有不同文件、互相看不见改动；且 providers.json 首次启动时可能尚不
       # 存在（单文件 bind 会被 Docker 误建成目录）。挂目录后目录项更新对两侧即时可见。
       - /srv/news-digest/config:/config
+      # 公开订阅与确认/退订共用 worker 的 SQLite 数据；只增加既有 named volume，
+      # 不扩大可写宿主 bind 面。
+      - news-data:/data
+      # 邮件预览、投递状态与指定刊期人工发送只读取不可变 release manifest；
+      # Admin 不得改写已发布站点。
+      - news-site:/site:ro
     # 面板改写 /config/.env 后不需要重启任何服务：worker 是一次性容器，每次由
     # systemd timer 经 `docker compose run` 拉起时都重新读取 env_file，下一期即
     # 生效；web 不读 .env；面板自身对配置文件按请求即读即写，也没有缓存。

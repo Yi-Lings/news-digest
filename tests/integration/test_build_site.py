@@ -9,6 +9,7 @@ from news_digest.config import BuildConfig
 from news_digest.pipeline import build_site
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "demo"
+RUNTIME_ROUTES = frozenset({"/admin/"})
 
 
 @pytest.fixture(scope="module")
@@ -48,8 +49,10 @@ def test_release_layout(site):
     for required in [
         current / "index.html",
         current / "archive" / "index.html",
+        current / "privacy" / "index.html",
         current / "assets" / "style.css",
         current / "assets" / "app.js",
+        current / "assets" / "alipay-support-qr.jpg",
     ]:
         assert required.is_file(), required
 
@@ -62,6 +65,44 @@ def test_home_shows_lead_and_demo_stamp(site):
     assert "预览数据" in html
     assert "Cheapcoding News" in html
     assert "简讯" in html
+    assert "data-subscribe-form" not in html
+    assert html.count('href="/admin/"') == 1
+    assert 'class="admin-entry"' in html
+    assert "本站完全用爱发电" in html
+    assert "data-support-panel" in html
+    assert 'src="/assets/alipay-support-qr.jpg"' in html
+    assert 'href="#support"' in html
+
+
+def test_subscription_form_is_limited_to_the_current_root_homepage(tmp_path):
+    output_root = tmp_path / "site"
+    build_site(
+        FIXTURES,
+        BuildConfig(
+            output_root=output_root,
+            site_url="https://news.example.com",
+            public_subscription_enabled=True,
+        ),
+    )
+    current = output_root / "current"
+    root_html = (current / "index.html").read_text(encoding="utf-8")
+    assert "data-subscribe-form" in root_html
+    assert 'href="#subscribe"' in root_html
+    dated_pages = sorted((current / "issues").glob("*/index.html"))
+    assert dated_pages
+    for page in dated_pages:
+        assert "data-subscribe-form" not in page.read_text(encoding="utf-8"), page
+        assert "data-support-panel" not in page.read_text(encoding="utf-8"), page
+
+
+def test_privacy_page_documents_double_opt_in_and_one_click(site):
+    output_root, _ = site
+    html = (output_root / "current" / "privacy" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "double opt-in" in html
+    assert "one-click" in html
+    assert "不可逆摘要" in html
 
 
 def test_article_page_contains_learning_sections(site):
@@ -73,6 +114,7 @@ def test_article_page_contains_learning_sections(site):
     assert "长难句解析" in html
     assert "permeable" in html
     assert "朗读全文" in html
+    assert '<option value="0.9" selected>正常</option>' in html
 
 
 def test_every_article_has_a_page(site):
@@ -97,6 +139,7 @@ def test_archive_lists_all_dates(site):
     html = (output_root / "current" / "archive" / "index.html").read_text(encoding="utf-8")
     assert "2026-07-26" in html
     assert "2026-07-25" in html
+    assert 'href="/admin/"' not in html
 
 
 def test_internal_links_resolve_and_resources_are_local(site):
@@ -109,6 +152,8 @@ def test_internal_links_resolve_and_resources_are_local(site):
             assert (current / resource.lstrip("/")).is_file(), f"{page}: 资源缺失 {resource}"
         for href in collector.links:
             if href.startswith("#"):
+                continue
+            if href in RUNTIME_ROUTES:
                 continue
             if href.startswith("/"):
                 target = current / href.lstrip("/")

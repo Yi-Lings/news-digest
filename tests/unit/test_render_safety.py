@@ -111,3 +111,19 @@ def test_rendered_pages_escape_script_in_title():
     # autoescape 应把标题里的 <script> 转成实体，绝不能出现裸标签
     assert "<script>" not in article
     assert "&lt;script&gt;" in article
+
+
+def test_public_subscription_form_is_explicitly_gated_and_links_privacy():
+    env = create_environment()
+    edition = _edition_with_evil_urls()
+    disabled = render_home(env, edition, is_today=True, all_dates=[edition.date])
+    enabled = render_home(
+        env,
+        edition,
+        is_today=True,
+        all_dates=[edition.date],
+        public_subscription_enabled=True,
+    )
+    assert "data-subscribe-form" not in disabled
+    assert "data-subscribe-form" in enabled
+    assert 'href="/privacy/"' in enabled

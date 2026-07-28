@@ -3,6 +3,16 @@
 版本纪律:tag = `v` + `__version__`(CI 强校验二者一致);**已推送的 tag 永不移动**,重打即升号。
 部署脚本运行时从 `src/news_digest/__init__.py` 派生版本,该文件是唯一真源。
 
+## [1.1.0] - 2026-07-28
+
+- 新增 OpenAI Chat 与 Anthropic Messages 双协议供应商档案、固定 `Hi` 连接测试和唯一默认档案。
+- 接通每日四阶段流水线与 Admin 邮件工作台，提供 SMTP 分阶段诊断、逐账号投递状态、
+  `unknown` 防重闩锁、纯文本刊物邮件和统一订阅名单。
+- 新增公开 double opt-in 订阅、一键退订、隐私页、首页订阅与管理入口，并收口本地 loopback
+  验收边界、DNS rebinding 防护和移动端排版。
+- 部署链增加不可变 release manifest、迁移前 SQLite online backup、镜像 digest 绑定、
+  worker 配置权限与发布工件校验。
+
 ## [1.0.0] - 2026-07-27
 
 Cheapcoding News 首个正式版。0.6.0rc1–rc6 六个部署候选在线打磨,加上终审 8 项 P0 安全加固后转正。

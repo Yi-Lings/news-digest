@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ---------------------------------------------------------------------------
-# news-digest worker 镜像：每日流水线（抓取→选题→翻译→构建）的一次性任务容器。
+# news-digest worker 镜像：每日流水线（抓取→翻译→构建→投递）的一次性任务容器。
 # 阶段 7 源码侧模板：只在 GitHub Actions（release.yml）中构建，服务器不构建镜像。
 #
 # 版本策略（为什么固定 tag 而不固定基础镜像 digest）：
@@ -76,7 +76,8 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 WORKDIR /app
 USER 10001:10001
 
-# 每日入口：news-digest run --yes（含真实翻译调用）；
+# 每日入口：news-digest run --yes（抓取、翻译、构建、投递四阶段；
+# 邮件关闭时投递阶段明确跳过）；
 # ENTRYPOINT/CMD 拆开，便于 `docker compose run --rm worker <子命令>` 执行其他任务
 ENTRYPOINT ["news-digest"]
 CMD ["run", "--yes"]

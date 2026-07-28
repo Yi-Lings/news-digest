@@ -36,8 +36,8 @@
 
 1. 一台能跑 Docker 的 Linux 服务器（1 GB 内存足够）
 2. 一个解析到这台服务器的域名
-3. 一个 OpenAI 兼容的翻译 API：地址、密钥、模型名（官方或任意中转都行）
-4. （可选）一个 SMTP 邮箱，想每天收邮件版才需要
+3. 一个 OpenAI Chat 或 Anthropic Messages 兼容的翻译 API：地址、密钥、模型名
+4. （可选）一个支持 SSL/TLS 或 STARTTLS 的 SMTP 邮箱；邮件投递和公开订阅需要
 
 ### 一条命令
 
@@ -48,7 +48,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Yi-Lings/news-digest/main/de
 ```
 
 它会自动体检环境、拉取镜像、装好定时任务和 HTTPS，然后**停下来让你填密钥**：
-编辑 `/srv/news-digest/config/.env`，填入翻译 API 三项（邮箱五项可留空），再跑一次同一条命令即完成。
+编辑 `/srv/news-digest/config/.env`，填入翻译 API 配置（SMTP 可暂留空且邮件保持关闭），再跑一次同一条命令即完成。
 
 想换域名、端口或安装目录？执行命令前设置环境变量即可，例如：
 
@@ -70,8 +70,15 @@ cat /srv/news-digest/config/admin-password.initial
 
 登录后请立即在面板里改掉它。面板能做的事：
 
-- **换翻译模型 / 换 API**：新增一个档案（填地址、密钥、模型名），点「启用」，下次更新即生效。密钥只进服务器配置文件，页面上永远只显示掩码
+- **换翻译模型 / 换 API**：选择 OpenAI Chat 或 Anthropic Messages 协议，新增档案并设为唯一默认；“测试连接”会在确认后发送一次固定 `Hi` 的最小真实请求，可能计费
+- **配置邮件**：设置 SSL/TLS 或 STARTTLS、主文/简讯数量、语言、来源、摘要长度和版式；收件人统一在订阅名单中管理，连接测试不发信，测试邮件需要再次确认
+- **查看与重试投递**：逐收件人显示 `sent` / `failed` / `unknown`；只自动重试 `failed`，`unknown` 必须确认可能重复送达的风险
+- **管理订阅**：查看脱敏订阅状态；公开表单采用 double opt-in，一键退订后不能在面板直接复活
 - **改面板口令**：需要输入当前口令；改完所有已登录的浏览器都会下线，重新登录即可
+
+公开订阅默认关闭。确认生产 HTTPS、SMTP、发件人和全局邮件投递均可用后，在服务器 `config/.env` 设置 `PUBLIC_SUBSCRIPTION_ENABLED=true` 并重新构建站点；Admin 逐请求读取该开关，无需重启。隐私说明位于 `/privacy/`。
+
+正式刊物邮件仅发送 UTF-8 纯文本，Admin 中的 HTML 只用于页面预览，不进入 SMTP；邮件仍含标准一键退订头。SMTP 部分拒收会逐收件人记录；连接在 DATA 后中断时标为 `unknown`，系统不会自动重发，避免可能已经送达的邮件重复出现。
 
 ### 手动触发一次更新
 
@@ -80,6 +87,8 @@ cat /srv/news-digest/config/admin-password.initial
 ```bash
 cd /srv/news-digest && docker compose run --rm worker
 ```
+
+该命令执行抓取、翻译、构建、投递四阶段。邮件关闭时明确跳过；邮件开启时只有处于 08:00 补跑窗口且当天 release 有效才自动投递。白天人工发送指定刊期应使用 Admin 的预览与确认流程。
 
 ## 常见问题
 
@@ -98,8 +107,8 @@ rm -f /srv/news-digest/config/session-secret
 **站点打不开或 404？**
 `cd /srv/news-digest && docker compose ps` 看 web 是否 healthy；`curl http://127.0.0.1:8618/healthz` 应输出 ok。
 
-**想改每天的更新时间？**
-编辑 `/etc/systemd/system/news-digest.timer` 里的 `OnCalendar`（自带时区写法），然后 `systemctl daemon-reload`。
+**为什么固定每天 08:00？**
+正式版把 `NEWS_TIMEZONE=Asia/Shanghai` 与 systemd timer 固定为同一时区和 08:00；bootstrap 会拒绝不一致配置，避免刊期、主题日期和补跑窗口分叉。
 
 **个别文章没有中文？**
 模型偶尔输出不合格会被整篇丢弃（宁缺毋滥），当天该篇只显示英文，次日新一期自然覆盖。

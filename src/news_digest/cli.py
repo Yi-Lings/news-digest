@@ -1,6 +1,7 @@
 """Command-line entry point."""
 
 import argparse
+import os
 from pathlib import Path
 
 from news_digest import __version__
@@ -51,24 +52,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SLUG",
         help="强制重翻指定主文章（可多次使用），不受 --limit 约束",
     )
-    translate.add_argument(
-        "--yes", action="store_true", help="确认执行真实 API 调用（会产生费用）"
-    )
+    translate.add_argument("--yes", action="store_true", help="确认执行真实 API 调用（会产生费用）")
 
-    run = subparsers.add_parser(
-        "run", help="完整每日流水线：抓取→选题→翻译（需 --yes）→构建"
-    )
+    run = subparsers.add_parser("run", help="完整每日流水线：抓取→选题→翻译（需 --yes）→构建→投递")
     run.add_argument("--window-hours", type=int, default=None, metavar="N")
-    run.add_argument(
-        "--yes", action="store_true", help="包含真实翻译调用；缺省只做抓取+选题+构建"
-    )
+    run.add_argument("--yes", action="store_true", help="包含真实翻译调用；缺省只做抓取+选题+构建")
 
     import_edition = subparsers.add_parser(
         "import-edition", help="把一期版次 JSON 併入数据库（翻译成果原样保留，幂等）"
     )
-    import_edition.add_argument(
-        "file", metavar="FILE", help="fetched 快照或裸版次 JSON 文件路径"
-    )
+    import_edition.add_argument("file", metavar="FILE", help="fetched 快照或裸版次 JSON 文件路径")
 
     preview = subparsers.add_parser(
         "preview", help="本地预览站点并提供模型供应商切换面板（仅 127.0.0.1）"
@@ -85,15 +78,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     send_email.add_argument("--date", default=None, metavar="YYYY-MM-DD")
     send_email.add_argument(
-        "--resend", action="store_true", help="忽略防重记录，强制再次发送"
+        "--resend", action="store_true", help="兼容别名：仅重试 failed，不重发 sent"
     )
     send_email.add_argument(
-        "--yes", action="store_true", help="确认真实发送（缺省只显示发送计划）"
+        "--retry-unknown",
+        action="store_true",
+        help="重试可能已送达的 unknown（必须同时加 --confirm-unknown-risk）",
     )
+    send_email.add_argument(
+        "--confirm-unknown-risk",
+        action="store_true",
+        help="确认 unknown 重试可能产生重复邮件",
+    )
+    send_email.add_argument("--yes", action="store_true", help="确认真实发送（缺省只显示发送计划）")
     send_email.add_argument(
         "--smoke",
         action="store_true",
-        help="只发一封无链接的最小测试信，验证 SMTP 通道（不检查站点、不写防重记录）",
+        help="发送带[测试]标识的当前已发布刊物给 saved Admin 收件人（不写正式状态）",
     )
 
     admin = subparsers.add_parser(
@@ -131,33 +132,64 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "send-email":
         if args.smoke:
             return _run_send_smoke(args.yes)
-        return _run_send_email(args.date, args.resend, args.yes)
+        return _run_send_email(
+            args.date,
+            args.resend,
+            args.yes,
+            retry_unknown=args.retry_unknown,
+            confirm_unknown=args.confirm_unknown_risk,
+        )
     parser.print_help()
     return 0
 
 
 def _email_payload(date: str | None):
-    """定位日期与选题后版次，渲染邮件三件套；失败打印原因返回 None。"""
-    from news_digest.config import build_config_from_env
-    from news_digest.rendering.email import render_email
+    """Load one retained immutable release manifest and render its configured preview."""
+    from news_digest.config import build_config_from_env, fetch_config_from_env
+    from news_digest.delivery.delivery_service import (
+        DeliveryServiceError,
+        preview_published,
+    )
 
-    fetch_config = _fetch_config(None)
-    located = _translate_edition_for(date, fetch_config)
-    if located is None:
+    build_config = build_config_from_env()
+    fetch_config = fetch_config_from_env()
+    try:
+        preview = preview_published(
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            edition_date=date,
+        )
+    except (DeliveryServiceError, ValueError) as error:
+        print(str(error))
         return None
-    date, edition = located
-    subject, text, html = render_email(edition, build_config_from_env().site_url)
-    return fetch_config, date, edition, subject, text, html
+    rendered = preview.rendered
+    return (
+        fetch_config,
+        preview.release.release_date,
+        preview.release.edition,
+        rendered.subject,
+        rendered.text,
+        rendered.html,
+    )
 
 
 def _run_preview_email(date: str | None) -> int:
+    from news_digest.config import load_env_file
     from news_digest.delivery.mailer import compose, write_eml
 
+    load_env_file()
     payload = _email_payload(date)
     if payload is None:
         return 1
     fetch_config, date, _, subject, text, html = payload
-    message = compose(subject, text, html, "preview@localhost", ("preview@localhost",))
+    message = compose(
+        subject,
+        text,
+        html,
+        "preview@invalid.example",
+        ("preview@invalid.example",),
+    )
     mail_dir = Path("var/mail")
     eml_path = write_eml(message, mail_dir, date)
     html_path = mail_dir / f"{date}.html"
@@ -169,88 +201,133 @@ def _run_preview_email(date: str | None) -> int:
 
 
 def _run_send_smoke(yes: bool) -> int:
-    from news_digest.config import load_env_file, smtp_config_from_env
-    from news_digest.delivery.mailer import MailError, compose, send, validate_smtp
+    from news_digest.config import (
+        build_config_from_env,
+        fetch_config_from_env,
+        load_env_file,
+        smtp_config_from_env,
+    )
+    from news_digest.delivery.delivery_service import (
+        DeliveryServiceError,
+        deliver_published,
+        preview_published,
+    )
 
     load_env_file()
-    smtp = smtp_config_from_env()
+    build_config = build_config_from_env()
+    fetch_config = fetch_config_from_env()
     try:
-        validate_smtp(smtp)
-    except MailError as error:
+        smtp = smtp_config_from_env()
+        preview = preview_published(
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            smtp_config=smtp,
+            test=True,
+        )
+    except (DeliveryServiceError, ValueError) as error:
         print(str(error))
         return 1
-    print(f"服务器：{smtp.host}:{smtp.port}；收件人 {len(smtp.recipients)} 个")
-    if not yes:
-        print("通道测试预览模式；加 --yes 真实发送一封无链接测试信。")
-        return 0
-    message = compose(
-        "Cheapcoding News 投递通道测试",
-        "这是一封投递通道测试邮件。收到即说明 SMTP 配置与发信域名工作正常。",
-        "<p>这是一封投递通道测试邮件。收到即说明 SMTP 配置与发信域名工作正常。</p>",
-        smtp.sender,
-        smtp.recipients,
+    print(
+        f"测试刊期：{preview.release.release_name}；服务器：{smtp.host}:{smtp.port}；"
+        f"已保存收件人 {len(smtp.recipients)} 个"
     )
-    try:
-        send(message, smtp)
-    except MailError as error:
-        print(str(error))
-        return 1
-    print("通道测试邮件已发出，请检查收件箱与垃圾箱。")
-    return 0
-
-
-def _run_send_email(date: str | None, resend: bool, yes: bool) -> int:
-    import datetime
-
-    from news_digest.config import build_config_from_env, smtp_config_from_env
-    from news_digest.delivery.mailer import MailError, compose, send, validate_smtp, write_eml
-    from news_digest.storage import db
-
-    payload = _email_payload(date)
-    if payload is None:
-        return 1
-    fetch_config, date, _, subject, text, html = payload
-
-    issues_dir = build_config_from_env().output_root / "current" / "issues" / date
-    try:
-        site_ready = issues_dir.is_dir()
-    except OSError:  # current 链接在某些文件系统上不可遍历
-        site_ready = False
-    if not site_ready:
-        print(f"站点尚未包含 {date}（{issues_dir} 不可达）；先运行 build 再发送。")
-        return 1
-
-    smtp = smtp_config_from_env()
-    try:
-        validate_smtp(smtp)
-    except MailError as error:
-        print(str(error))
-        return 1
-
-    conn = db.connect(fetch_config.database)
-    try:
-        sent = db.sent_detail(conn, date)
-        if sent and not resend:
-            print(f"{date} 已发送过（{sent}）；确需重发请加 --resend。")
-            return 1
-        print(f"主题：{subject}")
-        print(f"服务器：{smtp.host}:{smtp.port}；收件人 {len(smtp.recipients)} 个")
-        if not yes:
-            print("当前为预览模式，未发送。确认无误后加 --yes 执行。")
-            return 0
-        message = compose(subject, text, html, smtp.sender, smtp.recipients)
-        try:
-            send(message, smtp)
-        except MailError as error:
-            print(str(error))
-            return 1
-        stamp = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
-        db.mark_sent(conn, date, f"{stamp} -> {len(smtp.recipients)} 人")
-        write_eml(message, Path("var/mail"), date)
-        print(f"已发送，并归档 var/mail/{date}.eml；重复执行将被防重记录拦截。")
+    if not yes:
+        print("测试邮件预览模式；加 --yes 后仅发送给已保存 Admin 收件人，不写正式状态。")
         return 0
-    finally:
-        conn.close()
+    try:
+        report = deliver_published(
+            "test",
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            timezone=fetch_config.timezone,
+            smtp_config=smtp,
+        )
+    except (DeliveryServiceError, ValueError) as error:
+        print(str(error))
+        return 1
+    print(
+        f"测试邮件：成功 {report.sent_count}，失败 {report.failed_count}，"
+        f"unknown {report.unknown_count}；不污染正式投递状态。"
+    )
+    return 0 if report.succeeded else 1
+
+
+def _run_send_email(
+    date: str | None,
+    resend: bool,
+    yes: bool,
+    *,
+    retry_unknown: bool = False,
+    confirm_unknown: bool = False,
+) -> int:
+    from news_digest.config import (
+        build_config_from_env,
+        fetch_config_from_env,
+        load_env_file,
+        smtp_config_from_env,
+    )
+    from news_digest.delivery.delivery_service import (
+        DeliveryServiceError,
+        deliver_published,
+        preview_published,
+    )
+
+    load_env_file()
+    if retry_unknown and resend:
+        print("--resend 与 --retry-unknown 不能同时使用。")
+        return 1
+    if confirm_unknown and not retry_unknown:
+        print("--confirm-unknown-risk 只能与 --retry-unknown 同时使用。")
+        return 1
+    build_config = build_config_from_env()
+    fetch_config = fetch_config_from_env()
+    try:
+        smtp = smtp_config_from_env()
+        preview = preview_published(
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            smtp_config=smtp,
+            edition_date=date,
+        )
+    except (DeliveryServiceError, ValueError) as error:
+        print(str(error))
+        return 1
+
+    mode = "retry_unknown" if retry_unknown else "retry_failed" if resend else "manual"
+    print(f"主题：{preview.rendered.subject}")
+    print(
+        f"刊期：{preview.release.release_name}；服务器：{smtp.host}:{smtp.port}；"
+        f"已保存收件人 {len(smtp.recipients)} 个"
+    )
+    if retry_unknown and not confirm_unknown:
+        print("unknown 可能已由 SMTP 接受；重试有重复风险，需加 --confirm-unknown-risk。")
+        return 1
+    if not yes:
+        print("当前为预览模式，未发送。确认无误后加 --yes 执行。")
+        return 0
+    try:
+        report = deliver_published(
+            mode,
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            timezone=fetch_config.timezone,
+            smtp_config=smtp,
+            edition_date=date,
+            confirm_unknown=confirm_unknown,
+        )
+    except (DeliveryServiceError, ValueError) as error:
+        print(str(error))
+        return 1
+    print(
+        f"投递结果：成功 {report.sent_count}，失败 {report.failed_count}，"
+        f"unknown {report.unknown_count}，跳过 {report.skipped_count}；"
+        f"归档 {report.archive_status}"
+    )
+    return 0 if report.succeeded else 1
 
 
 def _fetch_config(window_hours: int | None):
@@ -326,10 +403,17 @@ def _translate_edition_for(date: str | None, config) -> tuple[str, object] | Non
     return date, edition
 
 
-def _run_translate(
-    date: str | None, limit: int | None, yes: bool, redo: frozenset[str]
-) -> int:
-    from news_digest.config import translation_config_from_env
+def _runtime_translation_config():
+    profiles_file = os.environ.get("TRANSLATION_PROVIDERS_FILE", "").strip()
+    from news_digest.admin_providers import PROFILES_FILE, runtime_translation_config
+
+    if not profiles_file:
+        profiles_file = PROFILES_FILE
+
+    return runtime_translation_config(Path(profiles_file), os.environ)
+
+
+def _run_translate(date: str | None, limit: int | None, yes: bool, redo: frozenset[str]) -> int:
     from news_digest.pipeline import store_translated
     from news_digest.translation.client import ApiTranslator, TranslationError
     from news_digest.translation.service import translate_edition
@@ -347,7 +431,11 @@ def _run_translate(
         return 1
     pending = [a for a in edition.articles if not a.translated_by and a.slug not in redo]
     planned = (len(pending) if limit is None else min(limit, len(pending))) + len(redo)
-    config = translation_config_from_env()
+    try:
+        config = _runtime_translation_config()
+    except ValueError as error:
+        print(f"翻译接口配置错误：{error}")
+        return 1
 
     print(f"日期：{date}；主文章 {len(edition.articles)} 篇，其中未翻译 {len(pending)} 篇")
     if redo:
@@ -386,7 +474,15 @@ def _run_translate(
 
 
 def _run_daily(window_hours: int | None, yes: bool) -> int:
-    from news_digest.config import build_config_from_env, translation_config_from_env
+    from news_digest.config import (
+        build_config_from_env,
+        email_delivery_enabled_from_env,
+        smtp_config_from_env,
+    )
+    from news_digest.delivery.delivery_service import (
+        DeliveryServiceError,
+        deliver_published,
+    )
     from news_digest.pipeline import (
         build_editions,
         fetch_daily,
@@ -398,52 +494,95 @@ def _run_daily(window_hours: int | None, yes: bool) -> int:
 
     fetch_config = _fetch_config(window_hours)
 
-    print("[1/3] 抓取")
+    print("[1/4] 抓取")
     edition, report = fetch_daily(fetch_config)
     _print_fetch(fetch_config, report)
     if edition is None:
         print("抓取无结果；继续用数据库既有内容构建。")
 
-    print("[2/3] 翻译")
+    print("[2/4] 翻译")
     exit_code = 0
     if not yes:
         print("未加 --yes：跳过翻译，主文章将以英文原文成刊。")
     else:
         located = _translate_edition_for(None, fetch_config)
         if located is None:
-            return 1
-        date, mains = located
-        try:
-            translator = ApiTranslator(translation_config_from_env())
-        except TranslationError as error:
-            print(f"{error}；跳过翻译。")
+            exit_code = 1
         else:
+            date, mains = located
             try:
-                updated, t_report = translate_edition(
-                    mains,
-                    translator,
-                    translation_config_from_env().cache_dir,
-                    on_progress=print,
-                )
-            except KeyboardInterrupt:
-                print("\n翻译被中断，改以当前状态成刊。")
-                updated, t_report = mains, None
-            finally:
-                translator.close()
-            store_translated(fetch_config, date, updated.articles)
-            if t_report is not None:
-                print(
-                    f"翻译：成功 {t_report.succeeded}（缓存 {t_report.cache_hits}），"
-                    f"失败 {t_report.failed}，此前已译 {t_report.already_done}"
-                )
-                if t_report.failed:
+                translation_config = _runtime_translation_config()
+                translator = ApiTranslator(translation_config)
+            except (TranslationError, ValueError) as error:
+                print(f"{error}；跳过翻译。")
+                exit_code = 1
+            else:
+                try:
+                    updated, t_report = translate_edition(
+                        mains,
+                        translator,
+                        translation_config.cache_dir,
+                        on_progress=print,
+                    )
+                except KeyboardInterrupt:
+                    print("\n翻译被中断，改以当前状态成刊。")
                     exit_code = 1
+                else:
+                    store_translated(fetch_config, date, updated.articles)
+                    print(
+                        f"翻译：成功 {t_report.succeeded}（缓存 {t_report.cache_hits}），"
+                        f"失败 {t_report.failed}，此前已译 {t_report.already_done}"
+                    )
+                    if t_report.failed:
+                        exit_code = 1
+                finally:
+                    translator.close()
 
-    print("[3/3] 构建")
-    release = build_editions(load_db_editions(fetch_config), build_config_from_env())
+    print("[3/4] 构建")
+    build_config = build_config_from_env()
+    try:
+        release = build_editions(load_db_editions(fetch_config), build_config)
+    except Exception as error:
+        print(f"构建失败：{error}")
+        print("[4/4] 投递：构建未成功，未发送邮件。")
+        return 1
     print(f"构建完成：{release}")
+
+    print("[4/4] 投递")
+    try:
+        delivery_enabled = email_delivery_enabled_from_env()
+    except ValueError as error:
+        print(f"邮件配置错误：{error}")
+        return 1
+    if not delivery_enabled:
+        print("邮件未启用，已跳过。")
+        print("本地预览：双击 preview.bat")
+        return exit_code
+    try:
+        smtp = smtp_config_from_env()
+    except ValueError as error:
+        print(f"邮件配置错误：{error}")
+        return 1
+    try:
+        delivery = deliver_published(
+            "auto",
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            timezone=fetch_config.timezone,
+            smtp_config=smtp,
+            just_built_release_name=release.name,
+        )
+    except (DeliveryServiceError, ValueError) as error:
+        print(f"邮件投递失败：{error}")
+        return 1
+    print(
+        f"邮件投递：成功 {delivery.sent_count}，失败 {delivery.failed_count}，"
+        f"unknown {delivery.unknown_count}，跳过 {delivery.skipped_count}；"
+        f"归档 {delivery.archive_status}"
+    )
     print("本地预览：双击 preview.bat")
-    return exit_code
+    return exit_code if delivery.succeeded else 1
 
 
 def _run_import(file: Path) -> int:
@@ -477,11 +616,52 @@ def _run_import(file: Path) -> int:
 
 
 def _run_admin(port: int, config_dir: Path) -> int:
+    from news_digest.config import (
+        load_env_file,
+        public_subscription_enabled_from_env,
+        smtp_config_from_env,
+    )
+    from news_digest.delivery import subscriptions
+    from news_digest.delivery.mailer import MailError, validate_smtp
     from news_digest.preview_server import create_server
 
     if not config_dir.is_dir():
         print(f"配置目录不存在：{config_dir}")
         return 1
+    load_env_file(config_dir / ".env")
+    site_url = os.environ.get("NEWS_SITE_URL", "").rstrip("/")
+    if not site_url:
+        print("配置缺少 NEWS_SITE_URL，公开订阅端点不会启动")
+        return 1
+    configured_database = os.environ.get("NEWS_DATABASE_PATH", "")
+    configured_output = os.environ.get("NEWS_OUTPUT_PATH", "")
+    container_database = Path("/data/news.db")
+    container_output = Path("/site")
+    if Path("/data").is_dir():
+        database = container_database
+    elif configured_database:
+        database = Path(configured_database)
+    else:
+        database = config_dir / "news.db"
+    if Path("/site").is_dir():
+        output_root = container_output
+    elif configured_output:
+        output_root = Path(configured_output)
+    else:
+        output_root = Path("var/site")
+    timezone = os.environ.get("NEWS_TIMEZONE", "Asia/Shanghai")
+    public_subscription_enabled = False
+    try:
+        requested = public_subscription_enabled_from_env()
+        if requested:
+            subscriptions.public_https_base(site_url)
+            smtp = smtp_config_from_env()
+            if not smtp.delivery_enabled:
+                raise ValueError("EMAIL_DELIVERY_ENABLED 必须为 true")
+            validate_smtp(smtp, require_recipients=False)
+            public_subscription_enabled = True
+    except (MailError, ValueError) as error:
+        print(f"公开订阅未就绪，表单与提交接口保持关闭：{error}")
     print(f"生产模型切换面板：http://127.0.0.1:{port}/admin/")
     server = create_server(
         config_dir,
@@ -491,6 +671,11 @@ def _run_admin(port: int, config_dir: Path) -> int:
         profiles_file="providers.json",
         serve_static=False,  # /config 含明文密钥，绝不提供静态文件回落
         htpasswd_file=config_dir / "htpasswd-admin",
+        db_path=database,
+        site_url=site_url,
+        output_root=output_root,
+        timezone=timezone,
+        public_subscription_enabled=public_subscription_enabled,
     )
     try:
         server.serve_forever()
@@ -502,17 +687,34 @@ def _run_admin(port: int, config_dir: Path) -> int:
 
 
 def _run_preview(port: int) -> int:
-    from news_digest.config import build_config_from_env
+    from news_digest.config import (
+        build_config_from_env,
+        fetch_config_from_env,
+        load_env_file,
+    )
     from news_digest.preview_server import create_server
 
     root = Path.cwd()
-    site_dir = build_config_from_env().output_root / "current"
+    load_env_file()
+    build_config = build_config_from_env()
+    fetch_config = fetch_config_from_env()
+    site_dir = build_config.output_root / "current"
     if not (site_dir / "index.html").is_file():
         print(f"提示：{site_dir} 尚无站点，先运行 build（或双击 daily.bat）")
     print(f"站点预览：http://127.0.0.1:{port}/")
     print(f"模型设置：http://127.0.0.1:{port}/admin/")
     print("按 Ctrl+C 停止。")
-    server = create_server(root, site_dir, port)
+    server = create_server(
+        root,
+        site_dir,
+        port,
+        db_path=fetch_config.database,
+        site_url=build_config.site_url,
+        output_root=build_config.output_root,
+        timezone=fetch_config.timezone,
+        public_subscription_enabled=build_config.public_subscription_enabled,
+        loopback_public_subscription=build_config.public_subscription_enabled,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

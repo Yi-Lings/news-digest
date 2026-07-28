@@ -206,8 +206,8 @@ Windows 注意：目录重命名会被已打开的文件句柄阻塞（例如预
 ```dotenv
 # Local paths and site
 NEWS_ENV=development
-NEWS_SITE_URL=http://127.0.0.1:8000
-NEWS_TIMEZONE=
+NEWS_SITE_URL=http://127.0.0.1:8618
+NEWS_TIMEZONE=Asia/Shanghai
 NEWS_DATABASE_PATH=var/data/news.db
 NEWS_OUTPUT_PATH=var/site
 
@@ -215,23 +215,27 @@ NEWS_OUTPUT_PATH=var/site
 TRANSLATION_API_BASE_URL=
 TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
-TRANSLATION_TIMEOUT_SECONDS=60
+TRANSLATION_API_TYPE=openai_chat
+TRANSLATION_STREAM=true
+TRANSLATION_TIMEOUT_SECONDS=180
 
-# SMTP; optional until phase 5
+# Email delivery; disabled until SMTP, recipients, and content are verified in Admin
+EMAIL_DELIVERY_ENABLED=false
 SMTP_HOST=
-SMTP_PORT=
+SMTP_PORT=465
 SMTP_USERNAME=
 SMTP_PASSWORD=
+SMTP_SECURITY=implicit_tls
 SMTP_FROM=
 SMTP_RECIPIENTS=
-SMTP_USE_TLS=true
+PUBLIC_SUBSCRIPTION_ENABLED=false
 ```
 
 约束：
 
 - 缺少当前命令不需要的配置时不得阻止启动。例如页面 fixture 构建不要求 SMTP 配置。
 - 调用真实翻译接口前必须显示目标接口、模型、文章数量和预计调用次数。
-- 发送真实邮件必须使用显式 `send-email` 命令，不得由页面预览或测试隐式触发。
+- 每日任务仅在 `EMAIL_DELIVERY_ENABLED=true` 且通过投递门禁后执行第四阶段；测试邮件和人工投递必须由 Admin 或 CLI 明确确认，页面加载、配置保存和邮件预览不得隐式发送。
 - 测试不得读取 `.env.local`，防止测试意外访问真实服务。
 - 日志不得输出 API Key、SMTP 密码、完整授权头或包含凭据的 URL。
 
@@ -436,7 +440,7 @@ uv run python -m http.server 8000 --directory var/site/current
 
 ### 阶段 7：CI 镜像构建与服务器部署
 
-状态：`v1.0.0 已定稿并本地打标（不推送，deploy-all 流程负责推送与部署）：终审 8 项 P0 的 7 项代码修复经复审逐项通过（docs/v1.0.0-rereview.md），111 项测试全绿；2026-07-27 08:00 自动周期实证正常后用户拍板转正。部署后必做：send-email --smoke 复测（SMTP TLS 转强校验是唯一行为性回归点）+ 核对 backups/DEPLOYED.log 首条记录 + P0-8 凭据轮换完成确认 + 面板重新启用供应商`
+状态：`冻结，不得部署或发布。v1.0.0 标签已于本轮新增需求提出前创建并推送，指向 806a4f7；该标签不可移动、覆盖或删除，且其代码不包含下方“阶段 7A”新增前置需求，当前不得用于生产部署。后续开发、验收、版本号与手动部署严格按阶段 7A 执行。`
 
 前置条件：
 
@@ -476,7 +480,235 @@ uv run python -m http.server 8000 --directory var/site/current
 - 完成一次备份恢复和上一镜像版本回滚演练。
 - 连续观察至少两个生成周期，单次失败不会破坏上一版站点或重复发信。
 
-验收门：用户最终确认后发布 `1.0.0` 并转入日常运行。
+验收门：本验收门已被下方“阶段 7A”冻结并取代；不得再按原 `1.0.0` 流程部署或发布。
+
+### 阶段 7A：正式版前置整改唯一清单（Admin API 多协议 + SMTP 自动投递）
+
+状态：`阶段 7A 代码、定向回归、Admin UI、本地 preview、SMTP/订阅状态机及发布工件已收口（2026-07-28）。用户已确认 Admin、默认 provider 固定 Hi、SMTP、订阅与 UI 人工验收通过；默认 provider 的单篇 p3 正式 schema 兼容验证随后以恰好一次真实请求通过（api_calls=1、cache_hits=0，不记录 URL、key、文章或完整响应）。唯一最终离线全量为 507 passed、1 skipped、7 deselected(network)，全仓 Ruff 与 diff check 通过。用户已确定 v1.1.0 并明确授权提交、推送、创建全新不可变标签及正式部署；当前只剩发布 preflight、CI digest 和线上健康门禁。下列内容仍是唯一验收清单；若其他历史记录与本节冲突，以本节及最新用户授权为准。`
+
+范围与强制边界：
+
+- 开发范围只包括本节要求及其直接影响范围。修复完成后的审查也只复审本轮最新改动及其直接影响范围，做必要的针对性回归；**不再重复此前已通过的全项目全面复审**。
+- 阶段 7A 开发期间的发布冻结已在用户确认人工验收、真实 schema 门禁和最终全量通过后解除。用户已授权按既有发布脚本发布并部署 `v1.1.0`；仍禁止移动、覆盖或删除任何既有标签，任一发布/CI/部署门禁失败必须停止。
+- 仓库中的 `v1.0.0` 标签早于本节新增需求，已创建并推送，指向 `806a4f7`，不包含本节能力且不得移动。阶段 7A 使用全新 `v1.1.0` annotated tag。
+- 任何真实翻译 API 请求、SMTP 连接测试或真实测试邮件，都必须由用户在 Admin 中明确点击确认或另行明确授权；默认测试套件只能使用 mock/fake，不访问真实服务。
+
+#### A. 2026-07-27 早间未收到邮件：已确认根因与服务器脱敏证据
+
+代码层根因已经确认：08:00 定时邮件从未接入。证据链为：
+
+1. `news-digest.timer` 每日 08:00 触发 `news-digest.service`；
+2. service 只运行默认 worker；
+3. worker 默认命令为 `news-digest run --yes`；
+4. `_run_daily()` 只有抓取、翻译、构建三个阶段，从未调用 `send-email`；
+5. `deploy/README.md` 也记录邮件编排尚未并入每日任务。
+
+因此，即使 SMTP 与收件人全部正确，现有 08:00 流水线也不会发送邮件。修复后每日流水线必须成为可审计的“抓取 → 翻译 → 构建 → 投递”四阶段。
+
+服务器脱敏只读取证已完成，结果为：
+
+- `news-digest.timer` 于上海时间 2026-07-27 08:00 实际触发；
+- 旧 `news-digest.service` 成功结束，但 journal 只有抓取、翻译、构建三个阶段；
+- 服务器实际 service 命令与上述三阶段旧 worker 路径一致，没有邮件投递阶段或发送尝试；
+- 生产 SMTP 六项配置为 `SET`，但没有 `EMAIL_DELIVERY_ENABLED` / `SMTP_SECURITY` 新键；
+- 证据与“旧版本从未进入投递阶段”的代码根因一致，未发现部分拒收或异常被吞掉的发送记录。
+
+复核时可重复使用下列只读取证命令：
+
+```bash
+systemctl status news-digest.timer --no-pager
+systemctl show news-digest.timer -p LastTriggerUSec -p NextElapseUSecRealtime -p Result
+systemctl status news-digest.service --no-pager
+systemctl show news-digest.service -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp
+journalctl -u news-digest.service --since "2026-07-27 00:00:00 UTC" --until "2026-07-28 00:00:00 UTC" --no-pager
+systemctl cat news-digest.service
+awk -F= '/^(EMAIL_DELIVERY_ENABLED|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_USE_TLS|SMTP_FROM|SMTP_RECIPIENTS)=/ { v=substr($0,index($0,"=")+1); printf "%s=%s\n",$1,(length(v)?"SET":"EMPTY") }' /srv/news-digest/config/.env
+```
+
+#### B. Admin SMTP 配置与持久化
+
+Admin 必须提供完整 SMTP 配置并持久化到生产 `/config/.env`，worker 下次启动立即读取。至少包括：
+
+- `EMAIL_DELIVERY_ENABLED`：定时邮件启停；
+- SMTP 服务器地址；
+- 可编辑的 SMTP 端口（保存、连接测试和正式投递统一校验 1–65535；UI 明示 465/SSL-TLS、587/STARTTLS、2525/供应商备用端口等常见组合，禁止出现“能保存但不能测试”的规则分叉）；
+- 用户名；
+- 密码；
+- 明确的加密方式枚举；
+- 发件人；
+- 收件人列表。
+
+加密方式不得继续由含混的 `SMTP_USE_TLS` 猜测，至少明确区分：
+
+- `implicit_tls`：SSL/TLS，通常端口 465；
+- `starttls`：先建立 SMTP 再升级 TLS，通常端口 587。
+
+生产不得允许“明文 SMTP + 用户名/密码”。如果迁移旧 `SMTP_USE_TLS`，必须有确定、可测试的兼容规则，非法值不得静默回退。用户名/密码必须同时为空或同时非空，只填一项属于配置错误。
+
+密码要求：API 永不返回明文或前后缀掩码，只返回 `password_set`；编辑时留空表示保留旧值，清除必须是独立显式操作。任何响应、DOM、日志、异常或测试报告不得包含密码、认证头或 SMTP 凭据。
+
+持久化要求：配置写入使用进程锁、临时文件、flush/fsync、`os.replace()` 原子切换并保持 `0600`；并发保存不得截断文件或丢失非受管键。Admin 展示的状态必须与实际生效 `.env` 一致，不得出现“页面显示已启用但 worker 仍读旧值”。
+
+#### C. 多收件人管理与投递正确性
+
+Admin 必须以列表形式支持新增、删除、查看和管理多个收件人，持久化后用于 08:00 自动投递：
+
+- 逐项校验邮箱格式，去首尾空白、大小写不敏感去重；
+- 拒绝空项、非法地址及 CR/LF 邮件头注入；
+- 自动邮件启用时不得保存空收件人列表；
+- 不得让不同收件人看到其他人的邮箱地址。优先逐人发送；若群发则使用 Bcc 并明确 envelope recipients；
+- 必须检查 `smtp.send_message()` 的返回值：空字典才是全部接受，非空表示部分拒收；部分拒收不得记为全部成功；
+- 按收件人记录成功/失败，至少支持只重试失败者，不得因重跑给已成功者重复发送；日志只记脱敏标识、数量与错误分类，不记完整地址。
+
+防重复与失败状态至少覆盖 `pending` / `sending` / `sent` / `failed` / `unknown`（或等价设计），并处理并发 worker 和“SMTP 服务器可能已经接受 DATA、但本地写防重记录前进程崩溃”的窗口。SMTP 无法提供通用的严格 exactly-once：此窗口必须标记为 `unknown/可能已送达`，自动任务不得盲目重试，Admin 风险确认后才能人工重发。文档需明确投递语义；不得继续只用单个 `sent:<date>` 将部分成功伪装成完整成功，也不得为追求理论 exactly-once 在 v1 引入分布式事务或消息代理。
+
+#### D. SMTP 连接测试、测试邮件与错误提示
+
+Admin 必须分离两个显式动作：
+
+1. **连接并认证测试**：验证 DNS、TCP、TLS、EHLO、STARTTLS（如选择）、认证和 NOOP，不发送邮件；
+2. **发送测试邮件**：用户明确点击并确认后，向已保存且页面已展示确认的收件人发送带“测试”标识的邮件，不得从请求体临时指定任意地址，不写入正式刊物防重状态。
+
+保存配置、页面加载或切换开关不得隐式连接或发送。测试错误必须在 Admin 清晰分类显示，例如 DNS 失败、连接超时、连接拒绝、TLS 证书失败、不支持 STARTTLS、认证失败、发件人拒绝、收件人拒绝、部分拒收、限流和配置不完整；不得直接回显 traceback、完整 SMTP 响应或秘密。
+
+SMTP 测试属于有副作用、高敏感操作，必须具备会话绑定 CSRF token、严格 Origin/Host、`application/json`、专用低频限流、同一时刻一个测试任务和测试邮件幂等键。连接测试必须使用**当前表单值**，允许保存前测试；编辑既有配置且密码留空时只读沿用已存密码，测试前后不得写 `.env`。发送测试邮件可使用当前 SMTP 表单，但收件人只能来自已保存列表；新安装尚无已保存收件人时只能连接测试。TLS 必须校验证书链和主机名，生产不得提供“忽略证书”开关；连接、EHLO、TLS、认证和 DATA 各阶段均有硬超时。Admin 目前使用 host network/root，测试任意 host/port 会形成 TCP SSRF；必须拒绝 loopback、私网、link-local、metadata、保留地址及非法 DNS 结果，保存/测试/投递使用一致的端口规则，不允许代理绕过。优先在现有架构内完成严格校验；独立的非 host-network/受限 egress helper 属 P1，只有现有架构无法可靠收敛时才升级为 P0。
+
+#### E. 08:00 自动投递阶段
+
+每日任务必须显式增加第四阶段，并满足：
+
+- `EMAIL_DELIVERY_ENABLED=false`：清晰记录“邮件未启用，已跳过”，站点任务正常完成；
+- 已启用但 SMTP/发件人/收件人配置不完整：明确告警并返回失败，不得假装发送成功；
+- 只有**当天**站点发布成功且刊期与 `NEWS_TIMEZONE` 的当天一致时才发送；构建失败或当天无刊不得默认发送数据库最新的旧刊；
+- 站点发布成功、邮件失败时保留已发布站点，但 service 最终非零，journal 可明确识别邮件阶段失败；
+- 重跑同一天不得重复发送给已成功收件人；systemd `Persistent=true` 的补跑时限和是否补发必须明确定义并测试；
+- SMTP 部分拒收、全部拒收与归档失败必须有明确状态，不得输出“已发送 N 人”这种错误总成功信息。
+
+#### F. Admin 翻译 API 真实测试与多协议适配
+
+每个 API/供应商档案都必须有一个明确的 **“测试连接”** 按钮，交互参考 sub2api：用户点击一次后，系统自动用固定的最小 `Hi` 提示（可附随机 nonce 以验证真实回包）发送一次真实生成请求，并显示模型的简短返回。用户**不需要也不提供任意测试消息输入框**。这一次测试必须同时验证 URL 规范化、DNS/TLS、鉴权、模型存在/有生成权限、所选协议、流式或非流式响应和正式 parser；不能只做 TCP/`/models` 测活，也不能把“HTTP 可达”当成测试成功。结果应分阶段呈现，例如“连接与鉴权成功”“模型已返回内容”，任一阶段失败则显示对应错误分类、HTTP 状态（如有）、协议、模型和耗时。
+
+测试支持**保存前执行**；编辑既有档案且 key 留空时只读沿用已存 key。测试不得保存档案、启用档案、改默认项、改 `.env`、写数据库或写翻译缓存；不自动重试，使用短而明确的连接/首字节/读取/总超时和小输出额度。点击前明确提示会进行一次真实生成请求并可能计费；结果必须标注“正在测试未保存配置”或“与已保存配置一致”，并为所测配置保存不含 key 的安全指纹、最近测试时间、分阶段结果和错误分类；修改 URL、协议、模型、流模式或 key 后旧测试结果立即标记为过期，不能继续显示健康。模型返回只在页面显示经字符/Token 上限与 HTML 安全处理后的简短文本；不得返回或记录上游原始响应、请求头或秘密。
+
+正式翻译和“测试连接”必须复用同一请求构造、URL 解析、鉴权和响应 parser；不得另写只调用 `/models`、TCP 探测或简化 POST 的测试捷径。测试成功证明该档案能完成一次最小推理和解析，但不代表完整新闻翻译 schema 必然可用；正式版前还需由 mock 覆盖正式翻译 schema 路径，并在用户明确授权时对实际默认档案做一次小型端到端翻译兼容性验证。
+
+Admin API 档案的 P0 生命周期必须确定：可保存多个档案；每个档案有启用/停用状态；只有启用档案能设为默认，同一时刻至多一个默认档案；每日翻译只使用默认档案，没有默认或默认被停用时明确失败，不得静默回退；默认档案不可直接删除，须先选择替代项或停用翻译；设为默认前若从未完成“测试连接”或测试已过期，必须强警告并再次确认。v1 不做基于健康状态的自动供应商切换。
+
+档案列表 P0 至少展示：名称、显式协议、模型、流/非流模式、启用/默认状态、最近测试时间和分阶段结果；测试确认框展示本次恰好 1 个真实生成请求、固定 `Hi` 提示、输入/输出上限和“可能产生费用”。每档案必须明确 `stream` 或 `non_stream`；UI 只允许选择 adapter 真正支持且已有离线解析测试的模式。人工测试不重试；正式翻译仅对连接/读取超时、429 和明确可恢复的 5xx 做有次数与总时长上限的退避并尊重受限的 `Retry-After`，401/403/404、模型不存在、配置或协议/响应格式错误不重试；流已开始后的失败默认不自动整次重试，避免重复计费。所有路径均有硬总超时，不能无限挂住 08:00 任务。
+
+协议不能根据模型名前缀猜测，也不能要求用户手改请求头。供应商档案必须有显式 provider/API 类型（交互参考 ccswitch），正式翻译和“测试连接”由同一 adapter 根据所选类型**自动、原子地切换整套协议参数**：最终 URL/路径、鉴权头、版本头、请求体字段、system 消息位置、流/非流开关和响应 parser 必须一起切换，不得只改模型名或遗留上一协议的 header/payload/parser。至少支持：
+
+- `openai_chat`（或等价命名）：adapter 自动使用典型路径 `/v1/chat/completions`、`Authorization: Bearer <key>`、OpenAI `messages`/参数及 OpenAI Chat SSE `choices[0].delta.content` parser；不得携带 `x-api-key` 或 `anthropic-version`；
+- `anthropic_messages`（或等价命名）：adapter 自动使用典型路径 `/v1/messages`、`x-api-key: <key>` + `anthropic-version`、顶层 `system`/Anthropic messages 请求体及 Anthropic SSE `content_block_delta`/`delta.text` parser；不得残留 OpenAI Bearer/messages 形态；
+- 若支持 OpenAI Responses API，必须作为独立类型自动切换到 `/v1/responses`、相应鉴权、`input`/请求参数和响应事件 parser，不能假装是 chat completions。
+
+Base URL 的 P0 契约固定为“只填写 API Base URL，不填写完整操作 endpoint”：允许 HTTPS host 后带安全的路径前缀，也允许末尾 `/v1`；adapter 只在缺少时按所选协议追加规范路径，禁止猜测或静默修正已填的 `/chat/completions`、`/messages`、`/responses` 等完整 endpoint。保存前验证必须捕获重复/遗漏 `/v1`，不可产生 `/v1/chat/completions/chat/completions`、`/v1/v1`，也不可把官方 OpenAI 地址请求为缺少 `/v1` 的 `/chat/completions`；自定义网关的 `/openai`、`/openai/v1` 等路径前缀必须保留。切换协议后重新按目标 adapter 生成最终 URL，禁止携带旧路径、旧 header 或旧 parser；禁止跟随跨 host 重定向携带凭据。
+
+必须补齐双向切换与错误测试：
+
+- Claude/Anthropic-compatible → GPT/OpenAI-compatible：自动移除 Anthropic 专用头并切换为 OpenAI Bearer、目标路径、payload 与 parser；
+- GPT/OpenAI-compatible → Claude/Anthropic-compatible：自动移除 OpenAI 专用协议状态并切换为 `x-api-key`/`anthropic-version`、`/messages`、Anthropic payload 与 parser；
+- 同一个 OpenAI-compatible 网关内 Claude/GPT 模型切换；
+- 无效或重复 `/v1` 前缀；
+- 错误模型名；
+- 401、403、404、429、超时、TLS 失败；
+- OpenAI 响应喂给 Anthropic adapter、Anthropic 响应喂给 OpenAI adapter等响应格式不兼容；
+- key 不得出现在前端响应、日志或异常中；
+- 切换后不得误用旧供应商缓存；翻译缓存键必须纳入 provider/API 类型和 base URL 的安全标识（不含 key）。
+
+本轮 P0 明确同时支持两种原生协议，不再以“当前是否恰好经兼容网关”为由省略：`openai_chat` 与 `anthropic_messages` 两个 adapter 都必须实现并离线验收；Claude 即使也能走 OpenAI-compatible 网关，Admin 仍须让用户显式选择实际协议并自动适配请求头/路径/请求体/parser。OpenAI Responses API 只有用户实际目标模型必须使用时才升为 P0，否则列 P1。正式验收必须证明 OpenAI↔Anthropic 两种协议及用户实际采用的 Claude↔GPT 接入方式都能双向切换，且切换后无旧 header、路径、payload、parser 或缓存残留。
+
+API 测试端点同样必须先修 Admin DOM XSS（用户输入全部用 `textContent`/DOM 节点，不拼 `innerHTML`）、CSRF、Origin/Host、JSON Content-Type、限流和 HTTP SSRF 防护；生产只允许 HTTPS 公网目标，拒绝 userinfo、私网/metadata 地址、危险 query/fragment 和重定向。
+
+#### G. 邮件内容目标、刊期链接与用户体验（P0 可配置组合）
+
+正式版前，Admin 必须允许用户配置邮件内容目标，而不是把邮件锁死为单一模板。可配置项至少包括：
+
+- 主文条数上限：从本期已发布主文中选择，允许 0 至本期实际数量；
+- 简讯条数上限：从本期已发布简讯中选择，允许 0 至本期实际数量；
+- 语言：双语、仅中文、仅英文；
+- 栏目/内容类型：至少可分别启用主文、简讯，并支持按当前站点已有栏目/来源分类筛选；若当前数据没有稳定的栏目字段，UI 只展示数据模型确实支持的筛选，禁止按标题临时猜栏目；
+- 主题：可选择当前刊期数据中已有的主题/标签；没有结构化主题时不得伪造，须先补稳定字段和测试；
+- 版式：至少提供“摘要导读”和“紧凑列表”两种经过测试的固定模板，不做任意 HTML/WYSIWYG；
+- 摘要长度：短/标准/长三个确定档位，必须由已发布内容做确定性截取或选字段，不在发送阶段再次调用模型。
+
+这些配置必须持久化、可预览、可组合，并由统一的内容选择器生成；Admin 应即时显示预计主文数、简讯数和语言/筛选结果。组合必须满足：至少选择主文或简讯之一；数量不得超过本期实际内容；筛选后为空时禁止开启/执行发送并给出可操作提示；语言缺失时遵循明确降级规则；任何组合都不得绕过刊期、翻译状态和链接一致性检查。邮件预览、测试邮件、08:00 自动投递和指定刊期人工发送必须复用同一已保存组合，不能各用一套默认值。
+
+邮件仍只能基于**刚发布当期**的 edition/release manifest（或等价不可变发布对象）生成，不得在发送阶段重新查询“数据库最新一期”或再次调用翻译 API；内容排序必须沿用刊物最终排序，邮件不得创建与站点不一致的隐式选题规则。
+- 部分翻译时不临时调用 API：已发布刊物若允许降级，则保留英文并明确标“译文暂缺”，在投递状态标记 `degraded`；如果构建规则认为缺译不可发布，则邮件同样阻止。两者必须与站点发布门一致并有测试；
+- 主题日期、正文日期、edition ID、release 日期和链接日期必须来自同一个 `NEWS_TIMEZONE` 与同一发布对象；“查看整刊”使用不可变刊期路径 `/issues/YYYY-MM-DD/`，每篇主文链接属于该刊期并指向对应在线新闻页，不得使用会变化的 `/current`；
+- `NEWS_SITE_URL` 必须是有效 HTTPS 公网基址。投递前对本次 release 做离线链接一致性检查：日期、路径和 manifest 对齐；任一关键链接无法构造时不发送，不能发旧刊、错日期或已知失效链接；不要求 worker 为验证而依赖外网回访自己的网站；
+- 无新闻、当天无可发布刊物、构建失败、当日刊物未原子发布、链接检查失败时不发送；重复发送、部分收件人失败和 `unknown` 状态按 C/E 节处理。
+
+Admin 必须提供与正式发送共用同一内容选择器的**邮件预览**：显示刊期、固定主题、收件人数、内容条数、降级状态、HTML 版与纯文本版；预览不连接 SMTP、不写防重状态。刊物与刊物测试邮件仅发送 UTF-8 `text/plain`，HTML 由同一选择结果渲染但只用于 Admin 页面预览，不进入 SMTP；HTML 预览仍须单栏、内联 CSS、无 JavaScript、无表单和追踪像素，并有窄屏/移动端快照或结构测试。主题 P0 固定为 `Cheapcoding News｜YYYY-MM-DD 每日简报`（测试邮件强制加 `[测试]`），主题、From 展示名和地址全部防 CR/LF 注入；v1 不做 WYSIWYG 或任意主题模板。
+
+时区与计划 P0 固定：每日 08:00，使用部署配置唯一 IANA `NEWS_TIMEZONE`；Admin 只读显示当前时区、08:00 和可计算时的下一次计划时间。timer、刊期计算与邮件主题使用同一时区。`Persistent=true` 只在文档规定的补跑窗口内自动补发；超过窗口不自动发旧刊，改由 Admin 对指定刊期人工操作。自定义时区和发送时间列 P1。
+
+Admin P0 状态页至少显示：最近一次定时投递的 run ID、刊期、开始/结束时间、总收件人数、成功/失败/unknown 数、是否 degraded、错误分类和尝试次数；邮箱只显示脱敏标识。提供“仅重试失败收件人”操作，显式确认后只选择 `failed`，绝不包含 `sent`；`unknown` 显示“可能已送达”的重复风险并要求额外确认。提供按指定已发布刊期手动发送/重发入口，但必须先预览，默认仍只投递未成功者，不能绕过刊期/链接校验和幂等状态。
+
+公开订阅与一键退订属于正式版 P0，而不是仅靠 Admin 手工维护名单：
+
+- 公开站点提供清晰的订阅表单，至少收集邮箱并完成格式/长度/CRLF 校验；响应不得暴露某邮箱是否已订阅（防枚举），接口有 CSRF/Origin、限流、反自动化蜜罐或等价轻量保护；
+- 采用确认订阅（double opt-in）：首次提交进入 `pending`，发送带单次、随机、高熵、有有效期 token 的确认邮件；只有点击确认后才进入 `active` 并参与定时投递。确认邮件与正式简报分开，不污染刊期防重状态；
+- 每封正式邮件的 HTML 与纯文本版本都包含可识别的一键退订链接，并设置符合邮件客户端习惯的 `List-Unsubscribe` 与 `List-Unsubscribe-Post: List-Unsubscribe=One-Click` 头；退订 GET 显示确认/结果页面，one-click POST 可直接完成退订，均须幂等；
+- token 只存不可逆摘要，不包含明文邮箱，不出现在日志；过期、重复使用、篡改 token 均安全失败且不泄露订阅状态。退订后立即进入 `unsubscribed`，后续定时、失败重试和人工重发都必须排除；不得因重新部署或 Admin 导入重新激活；
+- Admin 可查看脱敏订阅状态与数量，手工新增仍须明确标记来源并遵循授权规则；可停用/删除内部测试收件人，但不得绕过公开订阅者的退订状态。收件人状态至少区分 `pending` / `active` / `unsubscribed` / `bounced-or-disabled`（或等价）；
+- 对订阅确认、退订、并发请求、token 过期/篡改、地址枚举、限流、已退订不再发送、重新订阅流程、HTML/纯文本与 List-Unsubscribe 头补齐离线测试和隐私文档。生产域名、隐私说明、发件身份和退订入口未正确配置时不得开启公开订阅。
+
+Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停后所有自动邮件停止，恢复时不能补发暂停期间旧刊。
+
+#### H. P0 / P1 范围裁决与 Admin 交互流程
+
+**P0（正式版前置）**：A–G 的已确认根因与证据、SMTP/订阅持久化、双测试和脱敏、安全/超时、逐收件人状态与 `unknown`、08:00 第四阶段、每档案自动 `Hi` 最小推理测试、OpenAI/Anthropic 双 adapter 自动切换整套 header/路径/payload/parser、唯一默认档案、最近测试/投递状态、主文/简讯条数、语言、栏目、主题、摘要长度和版式可组合、刊期/链接一致性、纯文本刊物投递与 HTML 页面预览、移动端、公开 double-opt-in 订阅与一键退订、失败重试和文档测试，全部阻塞正式版。
+
+**非目标（明确不做）**：用户确认不需要额外 P1 功能；以下内容不进入正式版，也不作为默认后续 backlog：API 档案复制、拖拽排序、完整测试趋势图、后台持续测活、健康评分/自动 failover、动态模型列表或复杂能力探测、供应商价格同步/精确成本账单、多 SMTP 档案、任意发送时区/时间、更多邮件模板/WYSIWYG、订阅偏好中心/分组营销、强制给所有已成功者批量重发。若未来用户重新明确提出，再单独立项；当前开发不得顺手实现或为其增加抽象层。
+
+推荐 Admin 页面使用四个职责清楚的页签/区块，沿用现有站点的编辑台语汇而非做复杂仪表盘：
+
+1. **模型接口**：档案列表显示名称、协议、模型、流模式、启用/默认和最近测试；新增/编辑 → 点击“测试连接”（系统自动发送固定 `Hi` 并显示连接/鉴权与模型回包的分阶段结果）→ 保存 → 启用并设默认。不提供任意消息输入框；未保存配置有明确标记，失败不自动切供应商。
+2. **邮件设置**：编辑 SMTP、加密方式、From、Admin 内部收件人行列表和内容组合（主文/简讯数量、语言、现有栏目/主题、摘要长度、版式）→ 使用当前表单“连接并认证测试” → 保存 → 查看所选组合预览 → 显式确认“发送测试邮件” → 开启每日投递。保存、测试、预览、发送四个动作不得混成一个按钮。
+3. **订阅管理**：查看 pending/active/unsubscribed/disabled 的脱敏数量与名单，复制公开订阅入口，检查确认邮件/退订配置；Admin 不得把已退订地址直接改回 active，重新订阅必须走确认流程。
+4. **投递状态**：只读展示时区/08:00/下一次时间、最新刊期预览和最近投递摘要；失败时提供“仅重试失败者”，unknown 单独风险确认；指定刊期手动重发先进入预览确认。
+
+交互文案使用用户可识别的动作：“测试连接”“保存更改”“设为默认”“发送测试邮件”“开启每日投递”“仅重试失败者”；模型的“测试连接”必须在同一结果区分别说明“连接/鉴权”和“模型返回”，但只需一次点击、一次固定 `Hi` 请求。错误必须说明发生在哪一步和下一步怎么改，禁止只显示“测试失败”或“HTTP 错误”。所有表单支持键盘操作、可见焦点和移动端窄屏；状态不能只靠颜色区分。
+
+#### I. 测试与文档验收
+
+所有新增测试默认离线，使用 fake SMTP、受控 fake server 或 `httpx.MockTransport`；不得访问真实 SMTP/API。至少覆盖：
+
+- SMTP 各字段保存/重载/重启持久化，端口全链路统一校验 1–65535，安全模式、用户名/密码成对规则及旧配置迁移；
+- 密码留空保留、显式清除，响应/DOM/日志无密码；
+- 多收件人增删改、去重、非法地址/CRLF、隐私保护；
+- 全部成功、部分拒收、全部拒收、连接/TLS/认证错误，以及 DATA 后断连/崩溃进入 `unknown`；
+- SMTP 连接测试使用当前未保存表单、测试邮件显式确认、限流、幂等、不污染正式防重状态；
+- 配置文件原子写、权限和并发保存；
+- 邮件禁用跳过、启用但配置不全失败、构建失败不发、当天无刊不发旧刊、成功只发一次、重跑不重复、部分失败只重试失败者、unknown 不自动重试、补跑窗口外不自动发旧刊；
+- 邮件从刚发布 manifest 生成；主题/正文/刊期/链接日期一致，整刊与具体文章均为 HTTPS 绝对不可变刊期链接；链接基址/路径无效阻止发送；部分翻译降级与站点规则一致；
+- 预览与正式发送复用同一内容选择结果；刊物 SMTP 消息仅含 UTF-8 `text/plain`，HTML 只用于 Admin 页面预览，测试主题带 `[测试]`，From/Subject 防注入，HTML 预览有窄屏结构/快照验证；
+- 最近投递状态、按刊期手动发送、仅重试 failed、unknown 风险确认与逐收件人幂等；
+- 未登录、错误 CSRF/Origin/Content-Type、HTTP/SMTP 私网目标及重定向被拒绝；
+- 每个 API 档案的“测试连接”自动发送固定 `Hi` 并分别显示连接/鉴权与模型返回阶段；使用当前未保存表单和同一正式 adapter，恰好一次请求、有硬超时/输入输出上限/计费提示、不提供任意消息输入，修改配置后结果过期；
+- API 测试成功前后 providers/.env/default/数据库/缓存不变；档案启停、唯一默认、默认删除/停用保护和无默认时明确失败；
+- 本轮 OpenAI/Anthropic 两个 adapter 与所支持的 stream/non-stream 模式，其最终路径、Base URL 前缀、自动鉴权/版本 header、payload、system 位置和 parser，以及 Claude↔GPT 双向切换；断言切换后旧协议 header/path/payload/parser 全部消失，401/403/404/429/响应错配分类正确，生产重试只覆盖有上限的可恢复错误；
+- 邮件内容组合的持久化与组合矩阵：主文/简讯数量边界、双语/中文/英文、现有栏目/来源与结构化主题筛选、短/标准/长摘要、摘要导读/紧凑列表；筛选为空、缺译降级、预览/测试/自动投递/人工重发复用同一组合；
+- 公开订阅提交不泄露地址存在性、double opt-in 的 pending→active、确认 token 摘要/过期/篡改/并发/幂等、退订 GET/one-click POST、List-Unsubscribe 头、active→unsubscribed 后所有投递路径排除、重新订阅必须再确认、限流和隐私脱敏；
+- systemd/Compose 集成验证默认定时命令包含投递阶段、显示同一 IANA 时区/08:00，并正确传播邮件阶段退出码。
+- 本地 `preview` 显式注入 database、site URL、output root 和 timezone，邮件设置、订阅名单与 fake SMTP HTTP 回归可用；开发 HTTP 下公开订阅提交保持关闭，无当前 release 时返回明确的 release 错误。
+- Admin 复用主站冷纸白/墨黑/朱砂红和编辑部排版；360px、768px、1440px 对长 provider/model/URL/error/recipient/timestamp 做真实浏览器验收，无页面横向溢出、按钮文字溢出或控件遮挡，移动表格与 `prefers-reduced-motion` 行为正确。
+
+必须同步更新 `.env.example`、README、`deploy/README.md`、`docs/OPERATIONS.md`、bootstrap 的生产 `.env` 模板、deploy-all 受管键、Admin/公开订阅/退订使用说明、隐私说明与故障排查。清理 06:30 残留，统一为 08:00；准确说明 465 SSL/TLS 与 587 STARTTLS、端口统一规则、邮件启停、内容组合与预览、纯文本刊物 SMTP 语义、刊期/链接规则、double opt-in 与一键退订/List-Unsubscribe、journal 与 Admin 状态证据、部分拒收、unknown、防重复/补跑/人工重发语义、API 自动 `Hi` 最小推理测试、OpenAI/Anthropic 协议切换自动请求头与路径、唯一默认档案、流模式、超时/重试和 Base URL 填法。SMTP 未配置或邮件未真正投递时必须清楚告警，绝不宣称发送成功。
+
+#### J. 针对性复审门
+
+主开发会话完成本节后，审查会话只做以下复审：
+
+1. 查看从本节开发基线到最新提交的 diff，逐条映射 A–I；
+2. 审查直接影响文件：Admin/公开订阅与退订端点、translation adapters/config/cache、SMTP/config/mailer/CLI/db/内容选择器与邮件模板、systemd/Compose/deploy 配置、相关测试和文档；
+3. 运行新增测试与必要的直接回归，不重复此前已通过的 fetch/render/publisher/CI 等全量人工审计；
+4. 核对服务器脱敏证据，但不执行部署、不发真实邮件、不调用真实 API；
+5. 明确给出“通过/不通过”和遗留项。只有代码复审通过、用户授权的实际 API/SMTP 测试通过且用户决定版本号后，才进入获授权的发布部署流程。
+
+验收门：本节 P0 与 A–I 全部完成且针对性复审明确“通过”后，才可按用户明确授权发布部署；“非目标”功能不实施、不影响验收。2026-07-28 用户已决定 `v1.1.0` 并授权执行，仍须逐项通过本地、CI、digest、服务器 preflight 与线上健康门禁。
 
 ## 9. 通用本地验收流程
 
@@ -566,4 +798,8 @@ uv run python -m http.server 8000 --directory var/site/current
 | 2026-07-27 | 阶段 7 | rc4 分叉→rc5 上线 | 用户实测定位标签分叉：本地 rc4 重打过标签（a72ff52，含 import-edition），远端仍是旧 rc4（70609b3），服务器镜像无 import-edition；我的外网探测误判（302 判别式只能证明 CSP 批次）。处置：标签一经推送永不移动（教训第二次，固化为纪律），干净发 `v0.6.0rc5`（`269e630`）。用户完成部署与导入：创刊号 44 篇（18 译）+ 简讯 10 条入库 |
 | 2026-07-27 | 阶段 7 | 生产缺陷：发布器自删 | 用户发现 build 报成功但 releases/ 无新目录、current 悬空 404（手动 ln 到 -06 临时恢复）。根因组合缺陷：`_release_name` 复用被修剪的 -01 低序号 + 修剪器按名称排序删"最旧"恰为刚发布版本——每次构建发布后立即被自己删除。修复 `v0.6.0rc6`（`921de16`）：序号改当日最大值+1 永不复用；修剪器绝不删刚发布版本（双保险）；2 条事故回归测试，106 项全绿。待用户 deploy.bat 升级后重跑 build |
 | 2026-07-27 | 阶段 7 | rc6 上线 + 全面复核 | 复审会话放行后用户部署 rc6：build 产出 -08（序号递增修复实证）、current 自动接管、创刊号归档上线（外网验证 /issues/2026-07-26/ 完整渲染：6 双语主文 + 33 简讯其中 12 条双语——缓存复水译文全部在线）。面板三连验收用户完成（登录页/初始口令/录密钥+改口令）。外网安全复核 7 项全绿：/admin/ 独立 CSP 与安全头在位；未登录 providers、改口令均 401；错误口令 401+恒定延迟（实测 1.26s）；7 条配置路径探测（.env/providers/htpasswd/session-secret + 3 种路径穿越）全 404 零泄漏标记。新 backlog（低危）：两处 CSP 增加 frame-ancestors 'none'（server 层与 /admin/ location 同加，同 HSTS 双处陷阱；SameSite=Strict 已使带会话点击劫持失效） |
+| 2026-07-27 | 阶段 7A | 正式版冻结 / 唯一清单补全 | 用户在既有 `v1.0.0` 标签之后新增正式版前置需求；阶段 7A 是主开发与针对性复审唯一清单。代码审查确认 08:00 timer 只运行 `run --yes`（抓取/翻译/构建），未接 `send-email`，为当日未收邮件的确定代码根因。P0 最终范围：每 API 档案一个自动固定 `Hi` 的“测试连接”；OpenAI/Anthropic 双 adapter 按 ccswitch 模式随协议自动切换请求头、路径、payload、system 位置和 parser；档案启停/唯一默认/最近测试；邮件主文/简讯条数、语言、已有栏目/主题、摘要长度和两种版式自由组合；从刚发布 manifest 生成、刊期/绝对链接一致、预览/multipart/移动端；公开 double-opt-in 订阅、一键退订与 List-Unsubscribe；unknown 投递语义、最近状态及仅重试失败者。用户确认不需要其余 P1（复制/排序/持续测活/动态价格/自动 failover/WYSIWYG/任意发送时间等），已移出 backlog 并列为非目标。冻结所有部署/发布/tag 操作；已有 v1.0.0 不可移动且当前禁用，最终版本号由用户决定；后续只复审本轮 diff 及直接影响范围。 |
+| 2026-07-28 | 阶段 7A | 最新修复定向通过，暂停等待人工验收 | 在既有 7A 能力上补齐本地 preview 的 DB/site/timezone wiring、legacy current 无 manifest 时 SMTP 设置与连接测试解耦、SMTP DATA/QUIT 共享 wall-clock deadline、password token 单次解码、Admin 主站视觉及 360/768/1440 排版/reduced-motion、Admin 与 uid 10001 worker 的 SQLite 共享 GID/umask。定向证据：Admin/CLI/SMTP/preview 组合 `177 passed, 1 skipped`；最新 UI `57 passed`；最新 SMTP/投递 `69 passed, 1 skipped`；发布工件 `8 passed`；Ruff、PowerShell AST、JS 语法与 `git diff --check` 通过，fake 浏览器三视口无溢出且 busy 均恢复。旧全量 `433 passed, 1 skipped, 7 deselected(network)` 早于最新修复，仅作历史参考；最终全量尚未运行，必须等待用户人工测试 API、SMTP 保存/连接/预览/测试邮件、订阅管理与 UI 并明确确认通过后唯一执行。真实默认 provider 固定 `Hi` 的连接、鉴权和模型返回已由用户确认；未记录 URL、key 或完整响应。仍未访问真实 SMTP、未部署、发布、推送或操作 tag；仍待小型正式 schema、SMTP 连接与测试邮件实际送达、最终版本号和手动部署时间。 |
+| 2026-07-28 | 阶段 7A | SMTP unknown 与发布阻断定向收口 | 人工测试邮件未送达且旧 UI 仅显示 `0/0/1` 后，补齐 DATA command/body/final-response 精确阶段：354 前失败为 failed，正文或最终响应不确定为 unknown，最终 2xx 后 deadline/QUIT 异常保持 sent。test-message 新增独立 schema v4 脱敏持久状态，只存 key hash、请求指纹、计数及封闭错误枚举；同 key、新 key和 preview 重启均阻止 unresolved running/unknown 重发。同步修复 preview 测试环境泄漏、provider runtime 文件 ignore、worker 只读 providers 权限，`.env` 与认证材料仍 root-only。最新受影响组合：SMTP/Delivery/Admin `150 passed, 1 skipped`；首页渲染/链接 `14 passed`；preview env/import `2 passed`；持久状态/权限/runtime hygiene `9 passed`；Ruff 与 `git diff --check` 通过。纯离线 build 产出 `2026-07-26-12`，8618 preview 已使用最新代码重启，主页与 Admin HTTP 200。未运行最终全量、未由开发会话访问真实 API/SMTP、未部署、发布、推送或操作 tag；等待用户人工核对 provider queue 后验收。 |
+| 2026-07-28 | 阶段 7A | 验收通过，进入 v1.1.0 发布 | 用户完成 Admin/API/SMTP/订阅/UI 人工验收并授权正式发布。默认 provider 固定 `Hi` 已通过；修复 p3 schema parser、provider 唯一权威源和硬总时限后，使用临时缓存、无业务 DB 写入、`max_attempts=1` 执行恰好一次单篇正式 schema 请求，结果成功（`api_calls=1`、`cache_hits=0`，未记录秘密或正文）。唯一最终离线全量 `507 passed, 1 skipped, 7 deselected(network)`；其后独立发布复审补出“provider 文件缺失不得回退”及 p3 数量/标题边界，红测修复后的 translation/provider 直接回归 `127 passed`、发布工件回归 `27 passed`。全仓 Ruff、PowerShell AST 与 diff check 通过；版本确定为 `v1.1.0`，进入提交、全新 annotated tag、CI digest、服务器 preflight 与线上健康门禁。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

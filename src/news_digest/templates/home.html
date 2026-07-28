@@ -103,6 +103,47 @@
 </section>
 {% endif %}
 
+{% if is_root and is_today and public_subscription_enabled %}
+<section id="subscribe" class="subscribe" aria-labelledby="subscribe-title">
+  <div class="subscribe-copy">
+    <p class="subscribe-kicker">每日一封 · 随时退订</p>
+    <h2 id="subscribe-title">把双语简报送到邮箱</h2>
+    <p>提交后请到邮箱点击确认链接；未经确认不会开始投递。</p>
+    <p><a href="/privacy/">查看订阅隐私说明</a></p>
+  </div>
+  <form class="subscribe-form" data-subscribe-form>
+    <label for="subscribe-email">邮箱地址</label>
+    <div class="subscribe-fields">
+      <input id="subscribe-email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" required placeholder="you@example.com">
+      <button type="submit">订阅每日简报</button>
+    </div>
+    <div class="subscribe-honeypot" aria-hidden="true">
+      <label for="subscribe-website">网站</label>
+      <input id="subscribe-website" name="website" type="text" tabindex="-1" autocomplete="off">
+    </div>
+    <p class="subscribe-status" data-subscribe-status role="status" aria-live="polite"></p>
+  </form>
+</section>
+{% endif %}
+
+{% if is_root and is_today %}
+<section id="support" class="support" aria-labelledby="support-title">
+  <div class="support-copy">
+    <p class="support-kicker">READER SUPPORTED</p>
+    <h2 id="support-title">本站完全用爱发电</h2>
+    <p>这份日报会一直免费。如果它恰好帮到了你，愿意投喂一杯咖啡，我会感激不尽；你的支持会用于维持站点和邮件服务，也让我更有底气把它认真做下去。</p>
+  </div>
+  <details class="support-action">
+    <summary>支持本站</summary>
+    <div class="support-panel" data-support-panel>
+      <p>量力而行，心意已经足够。谢谢你让这份小报继续更新。</p>
+      <img src="/assets/alipay-support-qr.jpg" alt="支付宝支持本站二维码" width="768" height="768" loading="lazy">
+      <p class="support-pay-label">支付宝</p>
+    </div>
+  </details>
+</section>
+{% endif %}
+
 <nav class="issue-nav" aria-label="日期导航">
   <span class="filter-label">按日期浏览</span>
   {% for date in all_dates %}

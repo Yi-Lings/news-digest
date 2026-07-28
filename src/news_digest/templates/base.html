@@ -39,6 +39,18 @@
     <div class="topnav-links">
       <a href="/"{% if nav_active == "today" %} class="is-active" aria-current="page"{% endif %}>今日</a>
       <a href="/archive/"{% if nav_active == "archive" %} class="is-active" aria-current="page"{% endif %}>往期归档</a>
+      {% if nav_active == "today" %}
+      {% if is_root and public_subscription_enabled %}
+      <a class="subscribe-entry" href="#subscribe">订阅简报</a>
+      {% endif %}
+      {% if is_root %}
+      <a class="support-entry" href="#support">支持本站</a>
+      {% endif %}
+      <a class="admin-entry" href="/admin/">
+        <span>管理后台</span>
+        <span class="admin-entry-arrow" aria-hidden="true">→</span>
+      </a>
+      {% endif %}
     </div>
     <div class="mode-switch" role="group" aria-label="阅读模式">
       <span class="mode-label">阅读模式</span>
@@ -57,7 +69,7 @@
   {% else %}
   <p>内容取自各新闻来源的公开 RSS 与页面，版权归原出版方所有；每篇文章均标注并链接原始来源，中文与学习内容由 AI 生成（阶段 3 起提供）。</p>
   {% endif %}
-  <p>{{ site_name }} · {{ site_tagline }} · 个人英语学习用途，不公开转载受版权保护全文</p>
+  <p>{{ site_name }} · {{ site_tagline }} · 个人英语学习用途，不公开转载受版权保护全文 · <a href="/privacy/">隐私说明</a></p>
 </footer>
 <script src="/assets/app.js"></script>
 </body>

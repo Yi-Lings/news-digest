@@ -5,7 +5,7 @@
 
 ## 1. 日常使用
 
-**每天一次：双击 `daily.bat`。** 执行 `uv run news-digest run --yes`（抓取 → 选题 6 篇 → 真实翻译 → 构建，产生 API 费用），完成后自动打开 `http://127.0.0.1:8618/`。未设代理时脚本自动补 `NEWS_HTTP_PROXY=http://127.0.0.1:2231`；代理端口变了改 `daily.ps1` 里这一行。流水线部分失败时站点通常仍已构建，看窗口输出即可。
+**每天一次：双击 `daily.bat`。** 执行 `uv run news-digest run --yes`（抓取 → 选题 6 篇 → 真实翻译 → 构建 → 投递，产生 API 费用；邮件默认关闭），完成后自动打开 `http://127.0.0.1:8618/`。未设代理时脚本自动补 `NEWS_HTTP_PROXY=http://127.0.0.1:2231`；代理端口变了改 `daily.ps1` 里这一行。邮件失败时已发布站点不回滚，但进程返回非零。
 
 **只看页面：双击 `preview.bat`。** 不调用翻译 API：有 `var/data/fetched/*.json` 则先 `build` 发布最新数据；既无抓取数据也无站点时才构建 demo 演示页。随后在 8618 起预览服务（端口已被本服务占用时直接复用）并打开浏览器。服务器窗口最小化运行，关掉该窗口即停止预览。
 
@@ -16,10 +16,10 @@
 | `fetch` | 抓取真实新闻源并入库，同时写 `var/data/fetched` 快照；`--window-hours N` 覆盖时间窗口（默认 24） |
 | `translate` | 翻译当日选题主文章；默认只打印计划，加 `--yes` 才真实调用；`--date YYYY-MM-DD`（默认最新一期）、`--limit N` 限量、`--redo SLUG` 强制重翻（可多次，不受 `--limit` 约束） |
 | `build` | 由数据库版次生成静态站点并切换 `var/site/current`；`--fixtures tests/fixtures/demo` 改用演示数据 |
-| `run` | 完整流水线：抓取→选题→翻译→构建；不加 `--yes` 跳过翻译、主文章以英文原文成刊 |
+| `run` | 四阶段流水线：抓取→选题/翻译→构建→投递；不加 `--yes` 跳过翻译，邮件关闭时投递阶段明确跳过 |
 | `preview` | 伺服 `var/site/current` 并提供 `/admin/` 模型面板；仅绑定 127.0.0.1，`--port` 默认 8618 |
-| `preview-email` | 渲染当日简报为 `.eml` + `.html` 到 `var/mail`，不联网；`--date` 可指定 |
-| `send-email` | 真实发送简报，需 `--yes`；前置：SMTP 配置齐全、站点已含当日、当日未发送过（`--resend` 越过防重记录） |
+| `preview-email` | 从不可变 release manifest 和已保存内容组合渲染 `.eml` + `.html` 到 `var/mail`，不联网；`--date` 可指定 |
+| `send-email` | 真实发送指定刊期，需 `--yes`；`--resend` 仅重试 `failed`，`unknown` 需同时使用 `--retry-unknown --confirm-unknown-risk` |
 
 ## 2. 配置
 
@@ -29,7 +29,7 @@
 |---|---|---|
 | `NEWS_ENV` | development | 预留标识，当前代码未读取 |
 | `NEWS_SITE_URL` | `http://127.0.0.1:8618` | 页面与邮件中的站点入口地址 |
-| `NEWS_TIMEZONE` | `Asia/Shanghai` | 抓取窗口与日期归属 |
+| `NEWS_TIMEZONE` | `Asia/Shanghai` | 抓取窗口与日期归属；生产必须与固定的 08:00 systemd timer 一致，bootstrap 会拒绝其他值或重复键 |
 | `NEWS_DATABASE_PATH` | `var/data/news.db` | SQLite 文章池路径 |
 | `NEWS_OUTPUT_PATH` | `var/site` | 静态站点输出根目录 |
 | `NEWS_DATA_DIR` | `var/data` | 数据目录；翻译缓存在其下 `translations/` |
@@ -38,14 +38,37 @@
 | `TRANSLATION_API_BASE_URL` | 空 | **translate / run --yes 必填**；通常以 `/v1` 结尾 |
 | `TRANSLATION_API_KEY` | 空 | **同上必填**；接口密钥 |
 | `TRANSLATION_MODEL` | 空 | **同上必填**；模型名 |
-| `TRANSLATION_TIMEOUT_SECONDS` | 180 | 单请求超时；长文流式生成可达数分钟 |
+| `TRANSLATION_API_TYPE` | `openai_chat` | `openai_chat` 或 `anthropic_messages`；不按模型名猜协议 |
+| `TRANSLATION_STREAM` | true | 是否使用对应 adapter 的流式 parser |
+| `TRANSLATION_TIMEOUT_SECONDS` | 180 | 单请求硬总超时；连接 10 秒、流读取静默 30 秒，正式翻译的可恢复重试总预算 95 秒 |
 | `TRANSLATION_MAX_TOKENS` | 8192 | 译文长度余量；Claude 系后端必填此参数 |
-| `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` | 空 | **仅 send-email 必填** |
+| `EMAIL_DELIVERY_ENABLED` | false | 每日自动投递总开关；关闭时不解析残留 SMTP 字段 |
+| `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` | 空 | 开启投递前必填；用户名/密码必须同时为空或同时设置 |
 | `SMTP_PORT` | 465 | 465 隐式 SSL，587 STARTTLS |
-| `SMTP_RECIPIENTS` | 空 | 收件地址，逗号分隔；**仅 send-email 必填** |
-| `SMTP_USE_TLS` | true | 设 false 关闭加密（不建议） |
+| `SMTP_SECURITY` | `implicit_tls` | `implicit_tls` 或 `starttls`；生产不支持明文 SMTP |
+| `SMTP_RECIPIENTS` | 空 | 仅供旧安装一次性导入；正式收件人统一在 Admin 订阅名单管理 |
+| `EMAIL_MAINS_ENABLED` / `EMAIL_BRIEFS_ENABLED` | true | 是否选择主文/简讯；至少开启一种 |
+| `EMAIL_MAIN_LIMIT` / `EMAIL_BRIEF_LIMIT` | 6 / 5 | 不得超过当前 release 实际数量 |
+| `EMAIL_LANGUAGE` | `bi` | `bi` / `zh` / `en` |
+| `EMAIL_SOURCE_FILTERS` | 空 | 当前 release 的结构化来源，逗号分隔；空表示不限 |
+| `EMAIL_LAYOUT` | `digest` | `digest`（摘要导读）或 `compact`（紧凑列表） |
+| `EMAIL_SUMMARY_LENGTH` | `standard` | `short` / `standard` / `long`，发送时不再次调用模型 |
+| `EMAIL_CATCHUP_WINDOW_HOURS` | 6 | 08:00 后自动补跑窗口，0–24；窗口外不自动发旧刊 |
+| `PUBLIC_SUBSCRIPTION_ENABLED` | false | 公开新订阅门；既有确认/退订端点不受关闭影响 |
 
-**模型切换面板：** preview 运行中访问 `http://127.0.0.1:8618/admin/`。供应商档案（base_url + model + key）存于 `.env.providers.local`（JSON、明文密钥、仅本机、.gitignore 排除）；点「启用」把三个 `TRANSLATION_*` 写入 `.env.local`，下次 translate 生效。页面只显示密钥掩码，编辑档案时密钥留空表示沿用；翻译缓存按模型隔离，切换供应商互不污染。
+Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的 UTF-8 Base64，
+用于避免 Compose 对 `$`、引号、空格和 `#` 的 dotenv 解释改变密码；这只是传输编码，
+不是加密。旧明文配置仍可读取，下一次 Admin 保存时自动迁移。
+
+**Admin：** preview 运行中访问 `http://127.0.0.1:8618/admin/`。供应商档案存于 `.env.providers.local`（生产为 `/config/providers.json`）；每档案显式保存协议、stream、启用和默认状态。每日翻译只使用唯一默认档案。页面只返回 `key_set`，编辑时 key 留空表示沿用。点击“测试连接”前会确认一次固定 `Hi` 的真实生成请求（2 字符输入、最多 8 output tokens、可能计费），不提供任意测试消息输入框。
+
+邮件区的连接测试使用当前表单但不写配置、不发信；测试邮件可使用当前 SMTP 表单，但内容组合和收件人强制使用已保存值，且必须从 active 订阅行按单个 `subscription_id` 选择。预览、测试、08:00 自动投递和指定刊期人工发送共用同一内容选择器。投递状态按收件人记录；`unknown` 表示 SMTP 可能已接受 DATA，自动任务不得重试。
+
+正式刊物与刊物测试邮件仅发送 UTF-8 `text/plain`；Admin 的 HTML 仅用于页面预览，不进入 SMTP。正式订阅刊物仍设置 `List-Unsubscribe` 与 RFC 8058 one-click 头。SMTP 部分拒收逐收件人记 `failed`，全部拒收
+使 run 失败；DATA 后连接复位等无法确认是否送达的结果记 `unknown`。`.eml` 归档失败会令
+服务返回失败，但不会把已经成功投递的收件人改回未发送，也不会触发自动重复发送。
+
+公开订阅默认关闭。生产只有 `NEWS_SITE_URL` 为公网 HTTPS、SMTP 完整且 `EMAIL_DELIVERY_ENABLED=true` 时才允许设置 `PUBLIC_SUBSCRIPTION_ENABLED=true`。提交端点逐请求读取该开关，Admin 无需重启；修改后运行 `docker compose run --rm worker build` 重新生成带表单的首页。Admin 不管理该生产就绪门。订阅采用 double opt-in，确认 token 限时且数据库只存摘要。退订为 RFC 8058 one-click，`active → unsubscribed` 后自动、失败重试和人工重发均排除；重新订阅必须重新确认。隐私说明页为 `/privacy/`。
 
 ## 3. 已知环境坑与对策
 
@@ -55,9 +78,11 @@
 
 **8000 与 8080 端口被本机常驻程序占用。** 预览固定用 8618（`preview --port` 与 `NEWS_SITE_URL` 默认值一致），不要改回。
 
-**翻译网关 504。** 长文生成超过网关（Nginx）读超时会被截断，已改流式 SSE 响应根治，无需配置；`TRANSLATION_TIMEOUT_SECONDS=180` 即按此设定。
+**翻译网关超时。** 每个阶段与整个请求都有硬 deadline；可恢复的连接/读取超时、429 和受限 5xx 才会有限重试，401/403/404、TLS、协议或 schema 错误不重试。流已开始后不整次重试，避免重复计费。
 
-**模型参数兼容。** Claude 系后端必填 `max_tokens`（对应 `TRANSLATION_MAX_TOKENS`）；推理系模型拒绝 `temperature`（代码已不发送）。均已在代码处理；换供应商报 400 时先想到这两条，错误信息会带响应体片段。
+**API/SMTP 出网目标。** translation client 明确忽略系统 `HTTP_PROXY` / `HTTPS_PROXY`；API 与 SMTP 都先要求 DNS 的全部结果为公网地址，再把本次 TCP 连接固定到已验证地址，同时继续用原域名执行 HTTP Host、TLS SNI 与证书主机名校验。环境代理不会绕过 provider 校验，DNS 重绑定也不能把实际连接切到私网地址。
+
+**模型参数兼容。** OpenAI Chat 与 Anthropic Messages 由 adapter 原子切换 URL、鉴权 header、payload、system 位置和 parser；不要把完整 `/chat/completions` 或 `/messages` endpoint 填入 Base URL。Admin 只显示脱敏分类、HTTP status、协议、模型与耗时，不回显上游原始响应或秘密。
 
 **邮件被 554 内容反垃圾拒发**：`NEWS_SITE_URL` 必须是公网正式域名——默认的 `127.0.0.1:8618` 会让邮件正文布满 localhost 链接，触发服务商内容反垃圾（阿里云 DirectMail 实测 554 spam content）。
 
@@ -102,24 +127,26 @@ Compress-Archive -Path var\data\news.db, var\data\translations `
 ```powershell
 $env:UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple/"   # 见 §3
 uv sync
-Copy-Item .env.example .env.local   # 填入 TRANSLATION_* 三项与 NEWS_HTTP_PROXY
+Copy-Item .env.example .env.local   # 填入 TRANSLATION_* 与 NEWS_HTTP_PROXY
 # 有备份则先还原 var\data\news.db 与 var\data\translations\
 uv run pytest                       # 可选自检，应全绿
 ```
 
-然后双击 `daily.bat` 完成首次完整流水线。无备份时数据库自动新建，当天即产出完整站点，历史日期从零积累。`TRANSLATION_*` 也可不手填：先双击 `preview.bat`，在 `/admin/` 面板录入档案并启用。
+然后双击 `daily.bat` 完成首次完整流水线。无备份时数据库自动新建，当天即产出完整站点，历史日期从零积累。`TRANSLATION_*` 也可不手填：先双击 `preview.bat`，在 `/admin/` 面板录入档案、测试后设为默认。
 
 ## 7. 生产环境（服务器）
 
-**模型切换面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会使所有已登录端失效（轮换会话密钥）并自动删除该初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap 重新生成。面板支持完整管理：切换档案、改接口地址、改模型名、**新增/更换密钥**（用户决定 2026-07-27 开放；密钥经 HTTPS + 登录会话提交后只落服务器文件，页面与接口响应永远只显示掩码，编辑时留空表示沿用旧密钥）。点「启用」把三个 `TRANSLATION_*` 写入服务器 `/srv/news-digest/config/.env`，**无需重启任何容器**：worker 每次由 timer 经 `docker compose run` 拉起时重读 `.env`，下一期即生效。也仍可 ssh 直接编辑 `config/providers.json`，两种方式等效。
+**Admin 管理面板。** 浏览器访问 `https://news.cheapcoding.top/admin/`，进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会轮换会话密钥、使所有已登录端失效，并自动删除初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap。面板管理 provider 唯一默认档案、SMTP/内容组合、订阅与逐收件人投递状态；worker 每次启动都重新读取 `/config`，无需重启容器。
 
-**换密钥的正确姿势。** ssh 登录服务器直接编辑文件（两个文件均 root:600，改完都不用重启）：
+**换密钥的正确姿势。** 优先在 Admin 编辑档案（key 留空沿用）并重新执行固定 `Hi` 测试；也可 ssh 编辑 `/srv/news-digest/config/providers.json`。该文件是生产 provider 权威源，档案字段为 `base_url`、`api_key`、`model`、`api_type`、`stream`、`enabled`、`is_default`，同一时刻至多一个默认档案。改完不需要重启，下一次一次性 worker 会重读。
 
-- 新增/更换供应商档案：编辑 `/srv/news-digest/config/providers.json`（`base_url` / `api_key` / `model` 三字段，格式见 `deploy/README.md` §13），保存后刷新面板即可见、可切换；
-- 只换当前生效的密钥：编辑 `/srv/news-digest/config/.env` 的 `TRANSLATION_API_KEY`；注意把 `providers.json` 里对应档案的 `api_key` 同步改掉，否则日后在面板点「启用」会把旧 key 写回去。
+- `providers.json` 的唯一默认档案决定每日翻译；`.env` 的 `TRANSLATION_*` 仅保留迁移兼容，不在缺少默认档案时回退；
+- 保存或设默认前会统一验证公网 HTTPS 目标；实际测试和正式翻译同样执行该校验。
 
-**部署会重置面板热切换。** 每次跑 deploy-all 部署，Windows 本地 `.env.local` 的受管键（含三个
-`TRANSLATION_*`）会定点合并进服务器 `config/.env`——若此前在面板热切换过供应商，生效供应商会被
-还原为部署值，需要部署后回面板重新点「启用」（供应商档案与密钥都存 `providers.json`，不会丢失）。
+**配置所有权。** `deploy-all` 仅在服务器尚无 `config/.env` 的首次安装中，从本地 `.env.local`
+初始化受管键。服务器配置一旦存在，后续部署会删除遗留 `.env.incoming` 并保留 Admin/operator
+热配置，不再用本地文件覆盖。镜像版本与运行时配置分别管理。
 
-密钥永远不经网页、不进 Git、不进镜像；翻译缓存按模型隔离，切换供应商互不污染。面板故障不影响每日任务（admin 是独立常驻容器，worker 只依赖 `.env` 文件本身）。
+密钥可经 HTTPS + 登录会话写入 Admin，但永不由 API 回传、不进 Git/镜像/日志。翻译缓存 identity
+包含协议、规范化 Base URL 和模型，不含 key。面板故障不影响已配置的每日任务；worker 读取
+`/config/providers.json` 的唯一默认档案和 `/config/.env` 的邮件设置。

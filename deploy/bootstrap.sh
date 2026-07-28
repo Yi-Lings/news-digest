@@ -10,9 +10,9 @@
 # 退出码：0 完成；2 等待人工填写 .env；3 等待人工 docker login；1 其他错误。
 set -euo pipefail
 
-# ---------------- 变量区（VAR="${ND_XXX:-默认值}"，执行前 export ND_XXX 即可覆盖）----------------
+# ---------------- 变量区（执行前 export ND_*；发布身份必须由 Release 工件传入）----------------
 OWNER="${ND_OWNER:-yi-lings}"             # GHCR 命名空间（必须全小写）
-TAG="${ND_VERSION:-v1.0.0}"               # 发布 tag 兜底值；编排链路会以 ND_VERSION 覆盖（版本单源 __init__.py）
+TAG="${ND_VERSION:-}"                     # 发布 tag；仅用于审计与镜像 label 核对
 APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、config/、备份）
 CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
 DOMAIN="${ND_DOMAIN:-news.cheapcoding.top}"
@@ -23,29 +23,29 @@ CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 NGINX_CONF="/etc/nginx/conf.d/news.conf"
 HTPASSWD_FILE="${CONFIG_DIR}/htpasswd-admin"     # 面板登录口令哈希（面板登录页校验；nginx 不读取）
 WEBROOT="/var/www/certbot"                # certbot webroot 验证目录（news.conf 同路径）
-# 镜像引用：默认按 tag；给定 ND_WORKER_DIGEST/ND_WEB_DIGEST（形如 sha256: 加 64 位十六进制）
-# 时改按 digest 固定——tag 可被重推指向不同内容，生产宜钉死不可变 digest。当前语义：每次
-# 部署把实际解析到的 digest 追加写入 backups/DEPLOYED.log 台账；要固定/回滚时按 README §4
-# 从台账取 digest 经 ND_*_DIGEST 传入（deploy-all 暂不自动解析）。校验内联（die 尚未定义）。
+# 生产镜像只允许 Release 提供的两条不可变 digest；禁止 tag fallback 或混合引用。
 WORKER_DIGEST="${ND_WORKER_DIGEST:-}"
 WEB_DIGEST="${ND_WEB_DIGEST:-}"
-_validate_digest() {  # $1=值 $2=变量名；空值放行（表示本次不按 digest 固定）
-  [ -z "$1" ] && return 0
+if [ -z "$TAG" ]; then
+  printf '\n错误：缺少 ND_VERSION；必须通过同一 Release 工件或上层发布编排传入。\n' >&2
+  exit 1
+fi
+if [[ ! "$TAG" =~ ^v[A-Za-z0-9_][A-Za-z0-9_.-]{0,126}$ ]]; then
+  printf '\n错误：ND_VERSION 非法：%s\n' "$TAG" >&2
+  exit 1
+fi
+if [ -z "$WORKER_DIGEST" ] || [ -z "$WEB_DIGEST" ]; then
+  printf '\n错误：ND_WORKER_DIGEST 与 ND_WEB_DIGEST 必须由同一 Release 成对提供；禁止退回可变 tag。\n' >&2
+  exit 1
+fi
+_validate_digest() {  # $1=值 $2=变量名
   [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     { printf '\n错误：%s 必须形如 sha256: 加 64 位十六进制，实得：%s\n' "$2" "$1" >&2; exit 1; }
 }
 _validate_digest "$WORKER_DIGEST" ND_WORKER_DIGEST
 _validate_digest "$WEB_DIGEST" ND_WEB_DIGEST
-if [ -n "$WORKER_DIGEST" ]; then
-  WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker@${WORKER_DIGEST}"
-else
-  WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker:${TAG}"
-fi
-if [ -n "$WEB_DIGEST" ]; then
-  WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web@${WEB_DIGEST}"
-else
-  WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web:${TAG}"
-fi
+WORKER_IMAGE="ghcr.io/${OWNER}/news-digest-worker@${WORKER_DIGEST}"
+WEB_IMAGE="ghcr.io/${OWNER}/news-digest-web@${WEB_DIGEST}"
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # 上传工件所在目录（incoming）
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -87,22 +87,12 @@ section "2/10 目录与配置工件就位"
 # backups 为 README §9 备份与回滚台账所依赖；mail 预留邮件归档
 install -d -m 755 "$APP_DIR" "$APP_DIR/mail" "$APP_DIR/backups"
 
-# compose.yaml：先在临时文件里渲染，再比对就位——重跑时内容一致即跳过（幂等）。
+# compose.yaml：先只在临时文件里渲染；section 6 拉取镜像并完成迁移前数据库备份后才就位，
+# 避免现有 timer 在备份前读到新 worker digest。重跑时内容一致仍会幂等跳过。
 # 渲染内容：OWNER/VERSION 占位符（worker 镜像两处：worker 与 admin 服务共用同一
 # 引用，sed 逐行匹配自动同时替换）、部署目录（env_file 与 admin 的 /config bind
 # 挂载）、web 宿主端口、admin 监听端口（admin 用 host 网络，command 的 --port
 # 即宿主端口）。若现有文件手工固定过 digest，会先备份再覆盖。
-# digest 纪律：线上 compose 已按 @sha256 固定、而本次任一 digest 未给（将退回可变 tag）时，
-# 属安全降级——可变 tag 可被重推指向不同镜像，生产不应从 digest 悄悄退回 tag。默认拒绝；
-# 确需回到某 tag 排查时显式 ND_ALLOW_TAG_DOWNGRADE=1 放行。
-if { [ -z "$WORKER_DIGEST" ] || [ -z "$WEB_DIGEST" ]; } &&
-   [ -f "${APP_DIR}/compose.yaml" ] && grep -q '@sha256:' "${APP_DIR}/compose.yaml"; then
-  if [ "${ND_ALLOW_TAG_DOWNGRADE:-0}" = "1" ]; then
-    warnbox "已放行：正把生产从 digest 固定退回可变 tag ${TAG}（ND_ALLOW_TAG_DOWNGRADE=1）"
-  else
-    die "线上 compose.yaml 已按 digest 固定，本次未给全 ND_WORKER_DIGEST/ND_WEB_DIGEST（将退回可变 tag ${TAG}）——拒绝把生产从 digest 降级回 tag。确需如此请设 ND_ALLOW_TAG_DOWNGRADE=1 重跑。"
-  fi
-fi
 sed -e "s|ghcr.io/OWNER/news-digest-worker:VERSION|${WORKER_IMAGE}|" \
     -e "s|ghcr.io/OWNER/news-digest-web:VERSION|${WEB_IMAGE}|" \
     -e "s|/srv/news-digest|${APP_DIR}|g" \
@@ -110,16 +100,14 @@ sed -e "s|ghcr.io/OWNER/news-digest-worker:VERSION|${WORKER_IMAGE}|" \
     -e "s|\"--port\", \"8619\"|\"--port\", \"${ADMIN_PORT}\"|" \
     "${SRC_DIR}/compose.yaml" > "${TMP_DIR}/compose.yaml"
 if [ -f "${APP_DIR}/compose.yaml" ] && ! cmp -s "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml"; then
-  echo "注意：现有 compose.yaml 内容不同，将被本次工件覆盖（原文件自动备份；若曾固定 digest 请事后核对）"
+  echo "注意：现有 compose.yaml 内容不同；将在迁移前数据库备份成功后覆盖（原文件自动备份）"
 fi
-install_file "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml" 644
 
 # service 单元的 ExecStart 写死部署目录：模板文件保持默认值不动，安装时按 APP_DIR
 # 渲染——换目录部署时 timer 触发的任务才能找到 compose.yaml（timer 无路径，无需渲染）
 sed -e "s|/srv/news-digest|${APP_DIR}|g" \
     "${SRC_DIR}/news-digest.service" > "${TMP_DIR}/news-digest.service"
 install_file "${TMP_DIR}/news-digest.service" /etc/systemd/system/news-digest.service 644
-install_file "${SRC_DIR}/news-digest.timer"   /etc/systemd/system/news-digest.timer   644
 # nginx 的 news.conf 留到第 9 步按证书状态选版本就位：证书未签发时提前放完整版
 # 会让全局 nginx -t 失败，殃及主站与 SUB2API 的后续 reload。
 
@@ -134,7 +122,7 @@ section "3/10 生产密钥文件 .env"
 # 配置收窄（rc2 安全整改）：可被面板读写的配置全部集中到 config/ 子目录，admin
 # 容器只 bind 挂载该子目录——面板即使被攻破也触不到 compose.yaml 与运维脚本。
 mkdir -p "$CONFIG_DIR"
-chown root:root "$CONFIG_DIR"
+chown root:10001 "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
 # 幂等迁移：旧位置存在且新位置尚无同名文件才 mv（mv 保留属主与权限）；重跑自动跳过
 migrate_cfg() {  # $1=旧路径 $2=新路径
@@ -163,19 +151,34 @@ NEWS_SITE_URL=https://${DOMAIN}
 NEWS_TIMEZONE=Asia/Shanghai
 NEWS_FETCH_WINDOW_HOURS=24
 
-# ---- 翻译网关（SUB2API），三项均必填 ----
+# ---- 翻译供应商；生产运行以 providers.json 的唯一默认档案为权威源 ----
 TRANSLATION_API_BASE_URL=
 TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
+TRANSLATION_API_TYPE=openai_chat
+TRANSLATION_STREAM=true
 
-# ---- SMTP 发信（RECIPIENTS 逗号分隔）----
+# ---- SMTP 发信与邮件内容（SMTP_RECIPIENTS 仅用于旧安装一次性导入）----
+EMAIL_DELIVERY_ENABLED=false
 SMTP_HOST=
 SMTP_PORT=465
 SMTP_USERNAME=
 SMTP_PASSWORD=
+SMTP_SECURITY=implicit_tls
 SMTP_FROM=
 SMTP_RECIPIENTS=
-SMTP_USE_TLS=true
+EMAIL_MAINS_ENABLED=true
+EMAIL_BRIEFS_ENABLED=true
+EMAIL_MAIN_LIMIT=6
+EMAIL_BRIEF_LIMIT=5
+EMAIL_LANGUAGE=bi
+EMAIL_SOURCE_FILTERS=
+EMAIL_LAYOUT=digest
+EMAIL_SUMMARY_LENGTH=standard
+EMAIL_CATCHUP_WINDOW_HOURS=6
+
+# HTTPS、SMTP、全局邮件开关均就绪后，再由 Admin 开启公开订阅
+PUBLIC_SUBSCRIPTION_ENABLED=false
 
 # ---- 出网代理：本服务器直连，不需要代理，保持留空 ----
 NEWS_HTTP_PROXY=
@@ -188,7 +191,7 @@ ENVEOF
 >>> 需要人工操作：填写生产密钥 <<<
 已生成模板 ${ENV_FILE}（root:600）。请在服务器上：
   1. 用编辑器填入真实值，例如：nano ${ENV_FILE}
-  2. 保存后重新执行本脚本：bash ${SRC_DIR}/bootstrap.sh
+  2. 保存后重新执行原始 install/deploy-all/server-push 入口，让同一 Release 的版本与 digest 再次传入
 本脚本不经参数或标准输入接收密钥，只能人工落盘后重跑。
 STOPEOF
     exit 2
@@ -223,6 +226,18 @@ fi
 # 幂等收紧：无论谁动过，权限始终回到 root:600
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+if ! awk '
+  /^[[:space:]]*NEWS_TIMEZONE=/ {
+    value=$0
+    sub(/^[[:space:]]*NEWS_TIMEZONE=/, "", value)
+    sub(/[[:space:]]+$/, "", value)
+    count++
+  }
+  END { exit !(count == 1 && value == "Asia/Shanghai") }
+' "$ENV_FILE"; then
+  die "生产 NEWS_TIMEZONE 必须且只能设置一次 Asia/Shanghai，与每日 08:00 systemd timer 保持一致"
+fi
+install_file "${SRC_DIR}/news-digest.timer" /etc/systemd/system/news-digest.timer 644
 if ! grep -qE '^TRANSLATION_API_KEY=.+' "$ENV_FILE"; then
   warnbox ".env 中 TRANSLATION_API_KEY 仍为空——worker 首刊会失败，请尽快填写"
 fi
@@ -230,14 +245,14 @@ echo ".env 就绪（权限已确认 600），继续"
 
 # ---------------------------------------------------------------
 section "4/10 模型供应商档案 providers.json"
-# 模型切换面板（/admin/）在既有档案间切换；生产模式密钥不经网页传输，
-# 新增供应商 = 登录服务器直接编辑本文件（格式见 deploy/README.md §13）。
+# Admin（/admin/）管理档案、唯一默认项和真实连接测试；密钥可经受保护的 HTTPS
+# 会话写入，但不会由 API 回传。也可登录服务器直接编辑（格式见 deploy/README.md §13）。
 PROVIDERS_FILE="${CONFIG_DIR}/providers.json"
 if [ -f "$PROVIDERS_FILE" ]; then
   # 幂等收紧权限；内容绝不覆盖——面板或手工编辑过的档案是运行时状态，不是部署工件
-  chown root:root "$PROVIDERS_FILE"
-  chmod 600 "$PROVIDERS_FILE"
-  echo "providers.json 已存在（权限已确认 600），跳过生成"
+  chown root:10001 "$PROVIDERS_FILE"
+  chmod 640 "$PROVIDERS_FILE"
+  echo "providers.json 已存在（权限已确认 root:10001/640），跳过生成"
 else
   env_get() { sed -n "s/^[[:space:]]*$1=//p" "$ENV_FILE" | head -n1; }
   # 极简 JSON 转义：URL/密钥/模型名里按理不会出现 " 或 \，防御性处理一下
@@ -245,22 +260,37 @@ else
   P_URL="$(env_get TRANSLATION_API_BASE_URL)"
   P_KEY="$(env_get TRANSLATION_API_KEY)"
   P_MODEL="$(env_get TRANSLATION_MODEL)"
+  P_TYPE="$(env_get TRANSLATION_API_TYPE)"
+  P_STREAM="$(env_get TRANSLATION_STREAM)"
+  [ -n "$P_TYPE" ] || P_TYPE="openai_chat"
+  [ -n "$P_STREAM" ] || P_STREAM="true"
+  case "$P_TYPE" in
+    openai_chat|anthropic_messages) ;;
+    *) die "TRANSLATION_API_TYPE 必须是 openai_chat 或 anthropic_messages" ;;
+  esac
+  case "$P_STREAM" in
+    true|false) ;;
+    *) die "TRANSLATION_STREAM 必须是 true 或 false" ;;
+  esac
   if [ -n "$P_URL" ] && [ -n "$P_KEY" ] && [ -n "$P_MODEL" ]; then
-    # 用 .env 已填好的三项生成首个档案：面板开箱即有 default 可切换
+    # 用 .env 已填好的字段生成首个唯一默认档案
     cat > "$PROVIDERS_FILE" <<PROVEOF
 {
- "active": "default",
  "providers": {
   "default": {
    "base_url": "$(json_escape "$P_URL")",
    "api_key": "$(json_escape "$P_KEY")",
-   "model": "$(json_escape "$P_MODEL")"
+   "model": "$(json_escape "$P_MODEL")",
+   "api_type": "$(json_escape "$P_TYPE")",
+   "stream": $P_STREAM,
+   "enabled": true,
+   "is_default": true
   }
  }
 }
 PROVEOF
-    chown root:root "$PROVIDERS_FILE"
-    chmod 600 "$PROVIDERS_FILE"
+    chown root:10001 "$PROVIDERS_FILE"
+    chmod 640 "$PROVIDERS_FILE"
     echo "已生成首个供应商档案（default，取自 .env）：${PROVIDERS_FILE}"
   else
     # 不中止：面板暂无档案不影响其余部署；填全 .env 后重跑本脚本自动补生成
@@ -285,17 +315,113 @@ else
   2. 执行：docker login ghcr.io -u ${OWNER}
      （token 在提示时自行粘贴；本脚本不接收、不记录）
   3. 收紧凭据权限：chmod 600 /root/.docker/config.json
-  4. 重新执行本脚本：bash ${SRC_DIR}/bootstrap.sh
+  4. 重新执行原始 install/deploy-all/server-push 入口，让同一 Release 的版本与 digest 再次传入
 LOGINEOF
   exit 3
 fi
 
 # ---------------------------------------------------------------
 section "6/10 拉取镜像、启动 web 与 admin、worker 首刊"
+docker pull "$WORKER_IMAGE"
+docker pull "$WEB_IMAGE"
+
+# Admin 与 worker 打开旧数据库时会自动执行 schema 迁移；任何数据库消费者启动前，先用
+# SQLite online backup 生成 WAL 一致快照。无既有卷或无有效 news.db 时才允许明确跳过。
+backup_database_before_migration() {
+  local DATA_VOLUME="news-digest_news-data"
+  local volumes backup_dir backup_workdir backup_tmp suffix backup_path
+  local checksum_tmp checksum_path status=0
+
+  if ! volumes="$(docker volume ls --format '{{.Name}}')"; then
+    die "无法列出 Docker volumes，拒绝在数据库备份状态未知时继续"
+  fi
+  if ! grep -Fxq -- "$DATA_VOLUME" <<< "$volumes"; then
+    echo "未发现数据卷 ${DATA_VOLUME}，跳过迁移前数据库备份"
+    return 0
+  fi
+  docker volume inspect "$DATA_VOLUME" >/dev/null 2>&1 ||
+    die "数据卷 ${DATA_VOLUME} 存在于列表但无法 inspect，拒绝继续"
+
+  backup_dir="${APP_DIR}/backups"
+  install -d -m 755 "$backup_dir"
+  backup_workdir="$(mktemp -d "${backup_dir}/.sqlite-backup.XXXXXX")"
+  chown root:root "$backup_workdir"
+  chmod 700 "$backup_workdir"
+  backup_tmp="${backup_workdir}/news.db"
+  install -o root -g root -m 600 /dev/null "$backup_tmp"
+
+  docker run --rm --network none --read-only --user 0:0 \
+    --entrypoint python \
+    --mount "type=volume,src=${DATA_VOLUME},dst=/data,readonly" \
+    --mount "type=bind,src=${backup_workdir},dst=/backup" \
+    "$WORKER_IMAGE" -c '
+import sqlite3
+from pathlib import Path
+
+source_path = Path("/data/news.db")
+if source_path.is_symlink():
+    raise SystemExit(4)
+if not source_path.exists():
+    raise SystemExit(3)
+if not source_path.is_file():
+    raise SystemExit(4)
+if source_path.stat().st_size == 0:
+    raise SystemExit(3)
+
+with sqlite3.connect(
+    "file:/data/news.db?mode=ro", uri=True, timeout=30
+) as source, sqlite3.connect("/backup/news.db", timeout=30) as target:
+    source.backup(target)
+    if target.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+        raise SystemExit(4)
+' || status=$?
+
+  if [ "$status" -eq 3 ]; then
+    rm -f -- "$backup_tmp" "${backup_tmp}-journal" "${backup_tmp}-wal" "${backup_tmp}-shm"
+    rmdir -- "$backup_workdir" 2>/dev/null || true
+    echo "数据卷中无有效 news.db，跳过迁移前数据库备份"
+    return 0
+  fi
+  if [ "$status" -ne 0 ] || [ ! -s "$backup_tmp" ]; then
+    rm -f -- "$backup_tmp" "${backup_tmp}-journal" "${backup_tmp}-wal" "${backup_tmp}-shm"
+    rmdir -- "$backup_workdir" 2>/dev/null || true
+    die "SQLite 迁移前备份或完整性校验失败，Admin 与 worker 未启动"
+  fi
+
+  suffix="${backup_workdir##*.}"
+  backup_path="${backup_dir}/news-db-${TAG}-${STAMP}-${suffix}.sqlite3"
+  [ ! -e "$backup_path" ] || die "迁移前备份目标已存在，拒绝覆盖：${backup_path}"
+  mv -- "$backup_tmp" "$backup_path"
+  rm -f -- "${backup_tmp}-journal" "${backup_tmp}-wal" "${backup_tmp}-shm"
+  rmdir -- "$backup_workdir" 2>/dev/null || true
+
+  checksum_tmp="$(mktemp "${backup_dir}/.news-db-checksum.XXXXXX")"
+  chown root:root "$checksum_tmp"
+  chmod 600 "$checksum_tmp"
+  checksum_path="${backup_path}.sha256"
+  if ! (cd "$backup_dir" && sha256sum "$(basename "$backup_path")") > "$checksum_tmp"; then
+    rm -f -- "$backup_path" "$checksum_tmp"
+    die "迁移前数据库备份的 SHA-256 生成失败"
+  fi
+  [ ! -e "$checksum_path" ] || {
+    rm -f -- "$backup_path" "$checksum_tmp"
+    die "迁移前数据库校验文件已存在，拒绝覆盖：${checksum_path}"
+  }
+  mv -- "$checksum_tmp" "$checksum_path"
+  chown root:root "$backup_path" "$checksum_path"
+  chmod 600 "$backup_path" "$checksum_path"
+  if ! (cd "$backup_dir" && sha256sum --check "$(basename "$checksum_path")" >/dev/null); then
+    rm -f -- "$backup_path" "$checksum_path"
+    die "迁移前数据库备份的 SHA-256 复核失败"
+  fi
+  echo "迁移前数据库备份已验证：${backup_path}（SHA-256：${checksum_path}）"
+}
+
+backup_database_before_migration
+install_file "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml" 644
 COMPOSE=(docker compose -f "${APP_DIR}/compose.yaml")
-"${COMPOSE[@]}" pull
 # 记录本次实际部署的镜像 digest，供回滚溯源（回滚指引见收尾段与 README §10）。pull 后本地
-# 镜像已带 RepoDigests；即便本次按 tag 部署，也把 tag 解析成的不可变 digest 落盘台账。
+# 镜像已按 Release digest 固定；同时把运行时解析结果落盘台账供回滚核对。
 record_deployed() {
   local logdir="${APP_DIR}/backups" wd bd
   install -d -m 755 "$logdir"
@@ -310,14 +436,14 @@ record_deployed() {
 }
 record_deployed
 # 先常驻 web 再首刊是安全的：/healthz 不依赖站点内容，current 出现前仅健康检查可用。
-# admin（模型切换面板）一并常驻：与 worker 同镜像已随 pull 就绪；up -d 幂等，重跑安全
+# admin（配置与投递管理面板）一并常驻：与 worker 同镜像已随 pull 就绪；up -d 幂等
 "${COMPOSE[@]}" up -d web admin
-# 首刊用 run --yes：只生成站点不发信（发信编排属部署阶段后续决策，README §12）。
-# 失败不中止安装：timer 明日会再跑；但必须显著警告并给出排查入口。
+# 首刊用 run --yes：抓取、翻译、构建、投递四阶段；邮件默认关闭时明确跳过。
+# 失败不中止安装：timer 明日会再跑；投递失败不回滚已发布站点。
 if "${COMPOSE[@]}" run --rm worker run --yes; then
   echo "worker 首刊完成"
 else
-  warnbox "worker 首刊失败——不影响后续安装，但站点暂无内容。排查：先核对 .env 密钥与翻译网关连通性，再手动重试：docker compose -f ${APP_DIR}/compose.yaml run --rm worker run --yes"
+  warnbox "worker 首刊流水线失败——请按阶段输出排查；若仅投递失败，已发布站点仍保留。修复后手动重试：docker compose -f ${APP_DIR}/compose.yaml run --rm worker run --yes"
 fi
 
 # ---------------------------------------------------------------
@@ -357,6 +483,14 @@ else
   echo "登录面板后请立即在网页上修改口令（修改成功会自动删除该文件），"
   echo "或 cat ${INITIAL_PASS_FILE} 查看后手动删除。"
 fi
+
+# Admin 创建的认证材料始终只允许 root 读取；重复部署会收紧被误改的权限。
+for private_file in "${CONFIG_DIR}/session-secret" "${CONFIG_DIR}/admin-password.initial"; do
+  if [ -f "$private_file" ]; then
+    chown root:root "$private_file"
+    chmod 600 "$private_file"
+  fi
+done
 
 # ---------------------------------------------------------------
 section "9/10 宿主机 Nginx 与 HTTPS"
@@ -495,7 +629,7 @@ fi
 cat <<DONEEOF
 
 部署完成。
-模型切换面板：https://${DOMAIN}/admin/（网页登录，用户名 admin；初始口令查看：
+Admin 管理面板：https://${DOMAIN}/admin/（网页登录，用户名 admin；初始口令查看：
   cat ${CONFIG_DIR}/admin-password.initial，登录后请立即在面板网页修改口令——
   修改成功会自动删除该文件；忘记口令重置：
   rm ${CONFIG_DIR}/htpasswd-admin ${CONFIG_DIR}/session-secret 后重跑本脚本）。

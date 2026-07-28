@@ -47,22 +47,24 @@ def _smtp_config(**overrides) -> SmtpConfig:
         "password": "secret",
         "sender": "news@example.com",
         "recipients": ("me@example.com", "you@example.com"),
-        "use_tls": True,
+        "delivery_enabled": True,
+        "security": "starttls",
     }
     values.update(overrides)
     return SmtpConfig(**values)
 
 
-def test_render_email_bilingual_with_links():
+def test_render_email_bilingual_without_news_links():
     subject, text, html = render_email(_edition(), SITE)
-    assert "2026 年 7 月 26 日" in subject and "1 篇" in subject
+    assert subject == "Cheapcoding News 已更新｜2026-07-26"
     for body in (text, html):
         assert "What we know so far" in body
         assert "柏林骄傲游行冲撞事件" in body
-        assert f"{SITE}/issues/2026-07-26/berlin-pride.html" in body
+        assert "完整内容请访问 Cheapcoding News 官网" in body
+        assert "https://" not in body
         assert "AI 生成" in body
-    assert "冰川监测网络站点翻倍" in html
-    assert f"{SITE}/" in text
+    assert "href=" not in html
+    assert "冰川监测网络站点翻倍" not in html
 
 
 def test_compose_and_eml_roundtrip(tmp_path):
@@ -73,11 +75,26 @@ def test_compose_and_eml_roundtrip(tmp_path):
 
     parsed = email.message_from_bytes(path.read_bytes(), policy=email.policy.default)
     assert parsed["From"] == "news@example.com"
-    assert "双语简报" in parsed["Subject"]
+    assert "已更新" in parsed["Subject"]
     plain = parsed.get_body(preferencelist=("plain",))
     rich = parsed.get_body(preferencelist=("html",))
     assert plain is not None and "柏林骄傲游行冲撞事件" in plain.get_content()
-    assert rich is not None and "在网站阅读全文" in rich.get_content()
+    assert rich is not None and "完整内容请访问 Cheapcoding News 官网" in rich.get_content()
+
+
+def test_compose_supports_a_single_html_part():
+    message = compose(
+        "Update",
+        None,
+        "<p>Published</p>",
+        "news@example.com",
+        ("me@example.com",),
+    )
+    assert message.get_content_type() == "text/html"
+    assert message.get_body(preferencelist=("html",)) is not None
+    assert message.get_body(preferencelist=("plain",)) is None
+    with pytest.raises(ValueError, match="text or html"):
+        compose("Empty", None, None, "news@example.com", ("me@example.com",))
 
 
 class FakeSMTP:
@@ -98,24 +115,30 @@ class FakeSMTP:
     def __exit__(self, *args) -> None:
         pass
 
-    def starttls(self, context=None) -> None:
+    def starttls(self, context=None) -> tuple[int, bytes]:
         self.starttls_context = context
         self.calls.append("starttls")
+        return 220, b"ready"
+
+    def ehlo(self) -> tuple[int, bytes]:
+        self.calls.append("ehlo")
+        return 250, b"ok"
 
     def login(self, username: str, password: str) -> None:
         self.calls.append(f"login:{username}")
 
-    def send_message(self, message) -> None:
+    def send_message(self, message) -> dict:
         self.calls.append(f"send:{message['To']}")
+        return {}
 
 
 def test_send_uses_starttls_and_login(tmp_path):
     FakeSMTP.instances.clear()
     subject, text, html = render_email(_edition(), SITE)
     message = compose(subject, text, html, "news@example.com", ("me@example.com",))
-    send(message, _smtp_config(), smtp_factory=FakeSMTP)
+    send(message, _smtp_config(recipients=("me@example.com",)), smtp_factory=FakeSMTP)
     smtp = FakeSMTP.instances[-1]
-    assert smtp.calls == ["starttls", "login:user", "send:me@example.com"]
+    assert smtp.calls == ["ehlo", "starttls", "ehlo", "login:user", "send:me@example.com"]
     # STARTTLS 必须传入校验证书的上下文（否则加密不认证，凭据可被中间人截获）
     assert smtp.starttls_context is not None
 
@@ -123,7 +146,11 @@ def test_send_uses_starttls_and_login(tmp_path):
 def test_send_port_465_skips_starttls():
     FakeSMTP.instances.clear()
     message = compose("s", "t", "<p>h</p>", "a@example.com", ("b@example.com",))
-    send(message, _smtp_config(port=465), smtp_factory=FakeSMTP)
+    send(
+        message,
+        _smtp_config(port=465, security="implicit_tls", recipients=("b@example.com",)),
+        smtp_factory=FakeSMTP,
+    )
     smtp = FakeSMTP.instances[-1]
     assert "starttls" not in smtp.calls
     # 465 隐式 SSL 必须把校验上下文传给构造器
@@ -131,10 +158,12 @@ def test_send_port_465_skips_starttls():
 
 
 def test_validate_smtp_missing_fields():
-    with pytest.raises(MailError, match="SMTP_HOST"):
+    with pytest.raises(MailError) as host_error:
         validate_smtp(_smtp_config(host=""))
-    with pytest.raises(MailError, match="SMTP_RECIPIENTS"):
+    assert host_error.value.category == "configuration"
+    with pytest.raises(MailError) as recipients_error:
         validate_smtp(_smtp_config(recipients=()))
+    assert recipients_error.value.category == "configuration"
 
 
 def test_sent_state_roundtrip(tmp_path):

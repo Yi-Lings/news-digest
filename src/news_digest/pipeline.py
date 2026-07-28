@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 from news_digest.config import BuildConfig, FetchConfig
-from news_digest.delivery.publisher import publish
+from news_digest.delivery.publisher import publish, write_release_manifest
 from news_digest.extractors.body import extract_body, reading_minutes
 from news_digest.models import (
     Article,
@@ -27,6 +27,7 @@ from news_digest.rendering.pages import (
     render_archive,
     render_article,
     render_home,
+    render_privacy,
 )
 from news_digest.selection.dedupe import dedupe
 from news_digest.selection.score import select_daily
@@ -360,13 +361,27 @@ def build_editions(
     for edition in editions:
         issue_dir = build_dir / "issues" / edition.date
         issue_dir.mkdir(parents=True)
-        home_html = render_home(env, edition, is_today=edition is latest, all_dates=all_dates)
+        home_html = render_home(
+            env,
+            edition,
+            is_today=edition is latest,
+            all_dates=all_dates,
+            public_subscription_enabled=config.public_subscription_enabled,
+            is_root=False,
+        )
         (issue_dir / "index.html").write_text(home_html, encoding="utf-8")
         for article in edition.articles:
             article_html = render_article(env, edition, article)
             (issue_dir / f"{article.slug}.html").write_text(article_html, encoding="utf-8")
 
-    root_html = render_home(env, latest, is_today=True, all_dates=all_dates)
+    root_html = render_home(
+        env,
+        latest,
+        is_today=True,
+        all_dates=all_dates,
+        public_subscription_enabled=config.public_subscription_enabled,
+        is_root=True,
+    )
     (build_dir / "index.html").write_text(root_html, encoding="utf-8")
 
     archive_dir = build_dir / "archive"
@@ -383,12 +398,19 @@ def build_editions(
     ]
     (archive_dir / "index.html").write_text(render_archive(env, entries), encoding="utf-8")
 
+    privacy_dir = build_dir / "privacy"
+    privacy_dir.mkdir()
+    (privacy_dir / "index.html").write_text(render_privacy(env), encoding="utf-8")
+
     shutil.copytree(_STATIC_DIR, build_dir / "assets")
     if fixture_images is not None and fixture_images.is_dir():
         shutil.copytree(fixture_images, build_dir / "assets" / "demo")
 
     _validate_build(build_dir)
-    return publish(build_dir, output_root, _release_name(output_root, latest.date))
+    release_name = _release_name(output_root, latest.date)
+    write_release_manifest(build_dir, release_name, latest)
+    _validate_build(build_dir, require_manifest=True)
+    return publish(build_dir, output_root, release_name)
 
 
 def _release_name(output_root: Path, date: str) -> str:
@@ -405,13 +427,15 @@ def _release_name(output_root: Path, date: str) -> str:
     return f"{date}-{highest + 1:02d}"
 
 
-def _validate_build(build_dir: Path) -> None:
+def _validate_build(build_dir: Path, *, require_manifest: bool = False) -> None:
     required = [
         build_dir / "index.html",
         build_dir / "archive" / "index.html",
         build_dir / "assets" / "style.css",
         build_dir / "assets" / "app.js",
     ]
+    if require_manifest:
+        required.append(build_dir / "release.json")
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"构建产物缺失，已中止发布：{missing}")

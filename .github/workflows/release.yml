@@ -26,11 +26,11 @@ jobs:
     # 固定 runner 版本而不用 ubuntu-latest：发布链路的每个环节版本都要可复现
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # uv 固定为与本地开发一致的版本（PLAN.md 环境表），锁文件解析行为完全相同
       - name: 安装 uv 0.11.28
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.11.28"
 
@@ -69,17 +69,17 @@ jobs:
       worker-digest: ${{ steps.push-worker.outputs.digest }}
       web-digest: ${{ steps.push-web.outputs.digest }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # GHCR 仓库路径必须全小写；用户名含大写时不能直接用 github.repository_owner
       - name: 计算镜像仓库前缀
         id: vars
         run: echo "image_prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: 登录 GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -91,7 +91,7 @@ jobs:
       # tag 策略：版本 tag + 完整 commit sha，两者都推，不推 latest。
       - name: 构建并推送 worker 镜像
         id: push-worker
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/docker/Dockerfile.worker
@@ -108,7 +108,7 @@ jobs:
 
       - name: 构建并推送 web 镜像
         id: push-web
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/docker/Dockerfile.web
@@ -143,17 +143,24 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: 打包部署工件
         # 拍平 systemd/nginx 子目录：bootstrap.sh 按扁平布局查找工件
         # （与 server-push.ps1 的上传布局一致）；Windows 侧编排脚本不入包
         run: |
+          cat > digests.env <<EOF
+          ND_VERSION=${GITHUB_REF_NAME}
+          ND_WORKER_DIGEST=${{ needs.build.outputs.worker-digest }}
+          ND_WEB_DIGEST=${{ needs.build.outputs.web-digest }}
+          EOF
+          cp digests.env deploy/digests.env
           tar -czf news-digest-deploy.tgz \
             --transform='s|^deploy/systemd/|deploy/|;s|^deploy/nginx/|deploy/|' \
             --exclude='deploy/server-push.ps1' \
             --exclude='deploy/deploy-all.ps1' \
             deploy/
+          sha256sum news-digest-deploy.tgz > news-digest-deploy.tgz.sha256
 
       - name: 创建 Release 并上传部署包
         env:
@@ -161,10 +168,11 @@ jobs:
         run: |
           # 显式区分「已存在→补传」与「不存在→创建」，避免 || 兜底掩盖真实错误
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" news-digest-deploy.tgz --clobber
+            gh release upload "$GITHUB_REF_NAME" \
+              news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env --clobber
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag \
               --title "$GITHUB_REF_NAME" \
               --notes "一键部署：见 deploy/README.md 的「一键部署」章节；附件为服务器端部署包。" \
-              news-digest-deploy.tgz
+              news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env
           fi

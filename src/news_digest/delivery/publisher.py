@@ -9,12 +9,206 @@ The switch is designed for both platforms:
   of the link entry only, never of the release directory itself.
 """
 
+import datetime as dt
+import hashlib
+import json
 import os
+import re
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+from news_digest.models import DailyEdition, edition_from_dict, edition_to_dict
+
 _KEEP_RELEASES = 5  # 保留最近版本数：满足回滚需要，防止磁盘无限增长
+_MANIFEST_SCHEMA = 1
+_MANIFEST_NAME = "release.json"
+_MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+_RELEASE_NAME = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})-(?P<sequence>\d{2,})")
+
+
+@dataclass(frozen=True)
+class PublishedRelease:
+    release_name: str
+    release_date: str
+    published_at: dt.datetime
+    edition: DailyEdition
+    path: Path
+    edition_sha256: str
+
+
+def _canonical_edition(edition: DailyEdition) -> bytes:
+    return json.dumps(
+        edition_to_dict(edition),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _validated_date(value: str, field: str) -> str:
+    try:
+        parsed = dt.date.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be YYYY-MM-DD") from error
+    if parsed.isoformat() != value:
+        raise ValueError(f"{field} must be YYYY-MM-DD")
+    return value
+
+
+def _release_identity(name: str) -> tuple[str, int]:
+    if not isinstance(name, str) or not (match := _RELEASE_NAME.fullmatch(name)):
+        raise ValueError("release name is invalid")
+    date = _validated_date(match.group("date"), "release date")
+    return date, int(match.group("sequence"))
+
+
+def write_release_manifest(
+    build_dir: Path,
+    release_name: str,
+    edition: DailyEdition,
+    *,
+    published_at: dt.datetime | None = None,
+) -> Path:
+    """Write and re-read the self-contained immutable release identity before publication."""
+    release_date, _ = _release_identity(release_name)
+    if edition.date != release_date:
+        raise ValueError("release name date does not match edition date")
+    timestamp = published_at or dt.datetime.now(dt.UTC)
+    if timestamp.tzinfo is None:
+        raise ValueError("published_at must be timezone-aware")
+    timestamp = timestamp.astimezone(dt.UTC)
+    edition_payload = edition_to_dict(edition)
+    payload = {
+        "schema_version": _MANIFEST_SCHEMA,
+        "release_name": release_name,
+        "release_date": release_date,
+        "published_at": timestamp.isoformat(timespec="seconds"),
+        "edition_sha256": hashlib.sha256(_canonical_edition(edition)).hexdigest(),
+        "edition": edition_payload,
+    }
+    path = build_dir / _MANIFEST_NAME
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+    with path.open("xb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    load_release_manifest(build_dir, expected_release_name=release_name)
+    return path
+
+
+def load_release_manifest(
+    release_dir: Path, *, expected_release_name: str | None = None
+) -> PublishedRelease:
+    """Validate one manifest and all release-relative identities without database fallback."""
+    path = release_dir / _MANIFEST_NAME
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("published release manifest is missing or unsafe")
+    raw = path.read_bytes()
+    if not raw or len(raw) > _MAX_MANIFEST_BYTES:
+        raise ValueError("published release manifest is empty or too large")
+    try:
+        data = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("published release manifest is damaged") from error
+    if not isinstance(data, dict) or set(data) != {
+        "schema_version",
+        "release_name",
+        "release_date",
+        "published_at",
+        "edition_sha256",
+        "edition",
+    }:
+        raise ValueError("published release manifest fields are invalid")
+    if data.get("schema_version") != _MANIFEST_SCHEMA:
+        raise ValueError("published release manifest schema is unsupported")
+
+    release_name = data.get("release_name")
+    release_date, _ = _release_identity(release_name)
+    if expected_release_name is not None and release_name != expected_release_name:
+        raise ValueError("published release identity does not match its directory")
+    if data.get("release_date") != release_date:
+        raise ValueError("published release dates are inconsistent")
+    try:
+        published_raw = data.get("published_at")
+        if not isinstance(published_raw, str):
+            raise TypeError
+        published_at = dt.datetime.fromisoformat(published_raw)
+    except (TypeError, ValueError) as error:
+        raise ValueError("published_at is invalid") from error
+    if published_at.tzinfo is None:
+        raise ValueError("published_at must be timezone-aware")
+
+    edition_data = data.get("edition")
+    if not isinstance(edition_data, dict):
+        raise ValueError("published edition is missing")
+    try:
+        edition = edition_from_dict(edition_data)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("published edition is damaged") from error
+    if edition.date != release_date:
+        raise ValueError("published edition date does not match release date")
+    digest = hashlib.sha256(_canonical_edition(edition)).hexdigest()
+    if data.get("edition_sha256") != digest:
+        raise ValueError("published edition digest does not match")
+
+    issue_dir = release_dir / "issues" / release_date
+    if not (issue_dir / "index.html").is_file():
+        raise ValueError("published release issue page is missing")
+    for article in edition.articles:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", article.slug):
+            raise ValueError("published article slug is unsafe")
+        article_path = issue_dir / f"{article.slug}.html"
+        if article_path.parent != issue_dir or not article_path.is_file():
+            raise ValueError("published release article page is missing")
+    return PublishedRelease(
+        release_name=release_name,
+        release_date=release_date,
+        published_at=published_at.astimezone(dt.UTC),
+        edition=edition,
+        path=release_dir,
+        edition_sha256=digest,
+    )
+
+
+def resolve_published_release(
+    output_root: Path, *, edition_date: str | None = None
+) -> PublishedRelease:
+    """Resolve current, or a retained explicit edition, strictly below ``releases/``."""
+    releases = output_root / "releases"
+    try:
+        releases_root = releases.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("published releases directory is unavailable") from error
+    if not releases_root.is_dir():
+        raise ValueError("published releases directory is unavailable")
+
+    if edition_date is None:
+        current = output_root / "current"
+        try:
+            release_dir = current.resolve(strict=True)
+        except OSError as error:
+            raise ValueError("current published release is unavailable") from error
+    else:
+        wanted = _validated_date(edition_date, "requested edition date")
+        candidates: list[tuple[int, Path]] = []
+        for entry in releases.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                date, sequence = _release_identity(entry.name)
+            except ValueError:
+                continue
+            if date == wanted:
+                candidates.append((sequence, entry.resolve(strict=True)))
+        if not candidates:
+            raise ValueError("requested edition has no retained release manifest")
+        release_dir = max(candidates, key=lambda item: item[0])[1]
+
+    if release_dir.parent != releases_root or not release_dir.is_dir():
+        raise ValueError("published release path escapes releases directory")
+    return load_release_manifest(release_dir, expected_release_name=release_dir.name)
 
 
 def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
@@ -22,8 +216,9 @@ def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
     releases = output_root / "releases"
     releases.mkdir(parents=True, exist_ok=True)
     target = releases / release_name
-    if target.exists():
-        shutil.rmtree(target)
+    target_exists = target.exists()
+    if target.is_symlink() or target_exists:
+        raise FileExistsError(f"release already exists: {release_name}")
     shutil.move(str(build_dir), str(target))
     switch_current(output_root, target)
     _prune_releases(releases, keep_name=target.name)

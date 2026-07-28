@@ -114,6 +114,9 @@ def test_rerun_same_day_is_idempotent(tmp_path, no_dns):
     assert len(editions) == 1  # 不产生重复归档日期
     output_root = tmp_path / "site"
     build_editions(editions, BuildConfig(output_root=output_root, site_url="http://x"))
+    manifest = output_root / "current" / "release.json"
+    assert manifest.is_file()
+    assert '"release_date": "2026-07-26"' in manifest.read_text(encoding="utf-8")
     build_editions(editions, BuildConfig(output_root=output_root, site_url="http://x"))
     releases = sorted(p.name for p in (output_root / "releases").iterdir())
     assert releases == ["2026-07-26-01", "2026-07-26-02"]

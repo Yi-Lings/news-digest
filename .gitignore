@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp/
+.pytest-tmp-*/
 .ruff_cache/
 
 # Build artifacts
@@ -18,3 +19,11 @@ var/
 # Local secrets
 .env.local
 .env.providers.local
+
+# Provider test runtime
+/.provider-test-secret
+/provider-tests.json
+/.provider-tests.json.lock
+/..provider-test-secret.lock
+/..env.providers.local.lock
+/..env.local.lock
