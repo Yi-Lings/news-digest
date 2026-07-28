@@ -155,4 +155,8 @@ services:
 
 volumes:
   news-data:
+    # bootstrap 在任何 Admin/worker 启动前创建并修正权限；声明 external 避免
+    # Compose 把这个有意预创建的数据卷误报为来源不明，也防止 compose down -v 误删。
+    external: true
+    name: news-digest_news-data
   news-site:

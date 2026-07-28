@@ -1,15 +1,9 @@
 @echo off
 cd /d "%~dp0"
 
-rem Default is automation-safe: no PowerShell/SSH/PAT prompts and no trailing pause.
-rem Human operator who wants hidden prompts: deploy.bat --interactive
-if /i "%~1"=="--interactive" goto interactive
-
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0deploy\deploy-all.ps1"
-exit /b %ERRORLEVEL%
-
-:interactive
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy\deploy-all.ps1" -Interactive
+rem Pass every PowerShell-style deployment parameter through unchanged.
+rem Default is automation-safe; use deploy.bat -Interactive ... to allow prompts.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deploy\deploy-all.ps1" %*
 set "deploy_exit=%ERRORLEVEL%"
-pause
+if /i "%~1"=="-Interactive" pause
 exit /b %deploy_exit%

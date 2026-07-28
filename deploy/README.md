@@ -13,18 +13,25 @@
 新服务器上一条命令完成部署（root 执行）：
 
 ```bash
+export ND_OWNER=yi-lings
+export ND_APP_DIR=/opt/news-digest
+export ND_DOMAIN=news.example.com
+export ND_CERTBOT_EMAIL=ops@example.com
 export GH_TOKEN=你的repo只读token   # 仓库转公开后无需此行与认证头
 bash <(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
   https://raw.githubusercontent.com/Yi-Lings/news-digest/main/deploy/install.sh)
 ```
 
 自动完成：下载最新 Release 部署包 → 只读体检（preflight）→ 幂等部署（bootstrap：镜像、
-web 容器、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `/srv/news-digest/config/.env`
-生成密钥模板并暂停，在服务器上填好真实值后重跑同一命令续接。部署包
+Web/Admin、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `$ND_APP_DIR/config/.env`
+生成 API/SMTP 为空、邮件投递和公开订阅关闭的安全配置，然后直接完成。部署过程不接收
+API/SMTP 密钥，也不运行抓取、翻译、构建或投递；运行配置在部署后通过 Admin 设置。部署包
 （`news-digest-deploy.tgz`）由 CI 在每次推送 `v*` 标签时自动附到 Release，并携带该
 Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 digest 部署，不回退到默认 tag；
 已解包场景直接 `sudo bash deploy/install.sh`。
 换域名/换端口/换目录部署：执行命令前 export 对应 `ND_*` 环境变量即可，全表见 §0。
+普通用户保留官方 Release owner `ND_OWNER=yi-lings`；只有自己的 fork 已发布对应 Release
+和 GHCR 镜像时，才改为 fork 的小写 owner，并同时改用该 fork 的 `install.sh` 下载地址。
 
 ## 0. 占位符与部署参数（ND_*）对照表
 
@@ -38,24 +45,39 @@ Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 diges
 | `GHCR_USER` | 用于服务器登录 GHCR 的 GitHub 用户名 | 与 OWNER 相同或被授权的账号 |
 
 部署链已参数化：`install.sh` / `bootstrap.sh` 执行前 export 下列 `ND_*` 环境变量即可
-换域名/换端口/换目录部署，不改任何脚本。版本与两条 digest 没有默认值，必须来自同一个
-Release；其余未设置项使用本项目生产默认值。
+换域名/换端口/换目录部署，不改任何脚本。部署目标、版本与两条 digest 没有仓库内默认值；
+目标由操作员提供，版本与 digest 必须来自同一个 Release。
 占位符替换与域名/端口渲染均由 bootstrap 按这些变量自动完成。
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `ND_OWNER` | `yi-lings` | GHCR 命名空间；渲染 compose 中三处 image 引用（worker/admin 共用一处值） |
+| `ND_OWNER` | 必填 | GitHub/GHCR 命名空间；下载对应仓库 Release，并渲染 compose 中三处 image 引用 |
 | `ND_VERSION` | 必填 | Release tag；下载模式由 Release 元数据提供 |
 | `ND_WORKER_DIGEST` | 必填 | worker 不可变镜像摘要；正式 Release 由 `digests.env` 自动提供 |
 | `ND_WEB_DIGEST` | 必填 | web 不可变镜像摘要；必须与 worker digest 同时提供 |
-| `ND_APP_DIR` | `/srv/news-digest` | 部署目录（compose、`config/` 子目录内的 `.env` 与 `providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
-| `ND_DOMAIN` | `news.cheapcoding.top` | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
+| `ND_APP_DIR` | 必填 | 绝对部署目录（compose、`config/` 子目录内的 `.env` 与 `providers.json`、备份）；同步渲染 systemd 单元与 admin 挂载 |
+| `ND_DOMAIN` | 必填 | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
 | `ND_WEB_PORT` | `8618` | web 容器宿主回环端口；渲染 compose 与 nginx |
 | `ND_ADMIN_PORT` | `8619` | Admin 管理面板宿主回环端口；渲染 compose 与 nginx |
-| `ND_CERTBOT_EMAIL` | `1481835649@qq.com` | 证书到期/吊销通知邮箱 |
+| `ND_CERTBOT_EMAIL` | 必填 | 证书到期/吊销通知邮箱 |
 
-示例：`export ND_DOMAIN=news.example.com ND_WEB_PORT=9000` 后执行一键部署命令。
-后文手工步骤（§3、§6、§8 等）中的路径与端口均按默认值书写。
+示例：先设置 `ND_OWNER`、`ND_APP_DIR`、`ND_DOMAIN`、`ND_CERTBOT_EMAIL`，再按需
+`export ND_WEB_PORT=9000 ND_ADMIN_PORT=9001` 后执行一键部署命令。后文手工步骤
+（§3、§6、§8 等）中的路径与端口是示例值，实际操作以当前环境变量为准。
+
+Windows 发布入口 `deploy.bat` 原样透传 PowerShell 参数。例如：
+
+```powershell
+.\deploy.bat -Server deploy@server.example.com `
+  -KeyPath D:\keys\deploy_ed25519 -Owner your-github-owner `
+  -AppDir /opt/news-digest -Domain news.example.com `
+  -CertbotEmail ops@example.com
+```
+
+同名 `ND_SERVER`、`ND_KEY_PATH`、`ND_OWNER`、`ND_APP_DIR`、`ND_DOMAIN`、
+`ND_CERTBOT_EMAIL` 环境变量可替代参数；端口使用 `ND_WEB_PORT`、`ND_ADMIN_PORT`。
+个人生产值应放在仓库外的本地 PowerShell wrapper 或受限配置中，由 wrapper 设置这些
+环境变量后调用 `deploy.bat`。缺少任一必要目标时，入口会在 Git、GitHub 或 SSH 操作前失败。
 
 ## 1. 发布一个部署候选（本地 → GHCR）
 
@@ -78,7 +100,7 @@ uname -m                    # x86_64 → release.yml 的 PLATFORMS 保持 linux/
 systemctl --version | head -1   # 期望 systemd >= 236（timer 的 OnCalendar 时区语法）
 systemd-analyze calendar '*-*-* 08:00:00 Asia/Shanghai'   # 能解析并给出下次触发时间即可
 nginx -v                    # >= 1.25.1 才能启用 news.conf 中注释的 `http2 on;`
-dig +short news.cheapcoding.top   # 必须指向本服务器公网 IP
+dig +short news.example.com      # 必须指向本服务器公网 IP
 free -m && df -h /          # 内存、磁盘余量核对（worker 峰值目标 < 150 MB）
 ```
 
@@ -94,28 +116,29 @@ sudo chown root:root /srv/news-digest/config/.env
 sudo chmod 600 /srv/news-digest/config/.env            # 密钥文件：600，root 所有
 ```
 
-编辑 `/srv/news-digest/config/.env`（生产值示例；密钥只在服务器上出现，绝不进 Git / CI / 镜像）：
+手工部署未运行 bootstrap 时，先写入以下安全初始配置。API/SMTP 密钥在 Web/Admin 启动后设置，
+不通过部署命令、Git、CI 或镜像传递：
 
 ```dotenv
 NEWS_ENV=production
-NEWS_SITE_URL=https://news.cheapcoding.top
+NEWS_SITE_URL=https://news.example.com
 NEWS_TIMEZONE=Asia/Shanghai
 NEWS_FETCH_WINDOW_HOURS=24
 
-TRANSLATION_API_BASE_URL=（SUB2API 地址）
-TRANSLATION_API_KEY=（密钥）
-TRANSLATION_MODEL=（模型名）
+TRANSLATION_API_BASE_URL=
+TRANSLATION_API_KEY=
+TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
 
 EMAIL_DELIVERY_ENABLED=false
-SMTP_HOST=（现有 SMTP）
+SMTP_HOST=
 SMTP_PORT=465
-SMTP_USERNAME=（账号）
-SMTP_PASSWORD=（密码）
+SMTP_USERNAME=
+SMTP_PASSWORD=
 SMTP_SECURITY=implicit_tls
-SMTP_FROM=（发件地址）
-SMTP_RECIPIENTS=（仅供旧安装一次性导入；新安装留空）
+SMTP_FROM=
+SMTP_RECIPIENTS=
 EMAIL_MAINS_ENABLED=true
 EMAIL_BRIEFS_ENABLED=true
 EMAIL_MAIN_LIMIT=6
@@ -130,7 +153,7 @@ PUBLIC_SUBSCRIPTION_ENABLED=false
 
 Admin 保存后，`SMTP_PASSWORD` 会改写为 `nd-b64-v1:` 开头的 UTF-8 Base64，以保证
 Compose `env_file` 对 `$`、引号、空格和 `#` 不做破坏性解释；这只是传输编码，不是加密。
-旧明文值仍兼容，首次安装器与 Admin 会在写入生产配置时统一迁移。
+旧明文值仍兼容，Admin 下次保存时会统一迁移。
 
 `TRANSLATION_API_TYPE` 只能是 `openai_chat` 或 `anthropic_messages`；`SMTP_SECURITY`
 只能是 `implicit_tls`（通常 465）或 `starttls`（通常 587/2525）。先保持两个 enable
@@ -138,10 +161,9 @@ Compose `env_file` 对 `$`、引号、空格和 `#` 不做破坏性解释；这�
 公开订阅还要求公网 HTTPS 站点就绪。正式版的 timer 固定为 `Asia/Shanghai` 每日
 08:00；bootstrap 要求 `.env` 中唯一的 `NEWS_TIMEZONE` 与之完全一致，否则停止部署。
 
-手工部署没有运行 bootstrap 时，必须在首次 worker 前按 §13 的 JSON 格式创建
-`/srv/news-digest/config/providers.json`，将上述翻译配置写成一个 `enabled=true`、
-`is_default=true` 的唯一默认档案，并设置 `root:10001`、权限 `640`，供一次性 worker 只读。通过 bootstrap 或一键
-安装时会从 `.env` 自动生成该文件；无默认档案时 worker 明确失败，不回退 `.env`。
+部署完成后在 Admin 新增翻译档案，执行受控连接测试并设为唯一默认。Admin 会创建
+`/srv/news-digest/config/providers.json` 并设置共享权限；无默认档案时 worker 明确失败，
+不会回退 `.env`，也不会在部署过程中自动运行。
 
 **不要**在 `.env` 中设置 `NEWS_DATA_DIR`、`NEWS_OUTPUT_PATH`、`NEWS_DATABASE_PATH`：
 这三项已在 worker 镜像内固定为卷挂载点（`/data`、`/site`），env_file 会覆盖镜像 ENV，
@@ -197,28 +219,30 @@ sudo docker compose pull
 
 ## 6. 首次启动与验证
 
-启动 web/Admin 后跑一次 worker；`/healthz` 不依赖 `current`，首刊生成期间可正常探活：
-
-重复部署时，bootstrap 会先通过应用自身的 release resolver 校验 `/site/current`。若安全 manifest
-的刊期等于 `Asia/Shanghai` 当天，则跳过整条 worker 流水线，不再重复抓取、翻译、构建或投递；
-当天尚无正式刊物时才运行首刊。
+bootstrap 只启动 Web/Admin，不运行 worker；部署验收使用 `/healthz` 和 Admin 登录页，
+不以首页已有刊物为前提。重复部署同样不会夹带抓取、翻译、构建或投递。
 
 已有 `news-digest_news-data` 卷时，bootstrap 会在启动 Admin/worker 前使用已拉取的 worker
 镜像执行 SQLite online backup：源库按只读 URI 打开，备份通过 `PRAGMA integrity_check`
 后以唯一文件名和 0600 权限落到 `/srv/news-digest/backups/`，并生成 SHA-256 校验文件。
 无卷或无有效 `news.db` 时明确跳过；备份、完整性或校验失败会停止部署。未运行 bootstrap
 的手工部署也必须先完成同等的一致性备份，不得直接让新镜像打开旧数据库。
+备份后 bootstrap 会把共享数据卷统一为 GID 10001 组可写，并给目录设置 setgid；否则首次
+只启动 Admin 时，`cap_drop: ALL` 会使其无法在由 worker 镜像初始化的 0755 目录中创建 SQLite。
 
 ```bash
 cd /srv/news-digest
 sudo docker compose up -d web admin            # admin 为配置与投递面板常驻服务（§13）
-sudo docker compose run --rm worker            # 仅当天尚无正式刊物时手工执行
 curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
-curl -fsS http://127.0.0.1:8618/ | head -5     # 期望看到站点 HTML
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web 应为 healthy，admin 应为 running
 sudo systemctl start news-digest.timer         # 已有实例手工升级：恢复先前暂停的 timer
 ```
+
+登录 Admin 新增并测试翻译档案、设为唯一默认后，可等待 08:00 timer，或由操作员另行执行
+`sudo docker compose run --rm worker` 生成首刊。该命令属于运行操作，不属于部署步骤。
+bootstrap 在启用 `Persistent=true` 的 timer 前记录本次部署时刻，避免当天 08:00 已过时
+立即补跑；部署后的第一次自动任务从下一个 08:00 开始，之后停机错过的任务仍会补跑。
 
 顺带核对安全基线与内存：
 
@@ -254,26 +278,29 @@ journalctl -u news-digest.service -n 50        # 查看运行日志
 2. 准备 certbot webroot 并临时上线仅 80 的配置（443 块引用的证书还不存在，直接放会导致 `nginx -t` 失败）：
 
 ```bash
+DOMAIN=news.example.com   # 替换为实际域名
 sudo mkdir -p /var/www/certbot
 sudo cp news.conf /etc/nginx/conf.d/news.conf
+sudo sed -i "s/news\.example\.com/${DOMAIN}/g" /etc/nginx/conf.d/news.conf
 sudoedit /etc/nginx/conf.d/news.conf   # 用编辑器把第二个 server 块（443 那一整块，从 server { 到配对的 }）整体注释
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot certonly --webroot -w /var/www/certbot -d news.cheapcoding.top
+sudo certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN"
 ```
 
 3. 证书就绪后恢复完整配置并重载：
 
 ```bash
 sudo cp news.conf /etc/nginx/conf.d/news.conf   # 还原未注释版本
+sudo sed -i "s/news\.example\.com/${DOMAIN}/g" /etc/nginx/conf.d/news.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
 4. 验证（本机或任意外部机器）：
 
 ```bash
-curl -sI http://news.cheapcoding.top/ | head -3          # 301 → https
-curl -sI https://news.cheapcoding.top/ | grep -iE 'x-robots|content-security|x-content-type|referrer'
-curl -sI https://news.cheapcoding.top/privacy/ | head -3
+curl -sI http://news.example.com/ | head -3          # 301 → https
+curl -sI https://news.example.com/ | grep -iE 'x-robots|content-security|x-content-type|referrer'
+curl -sI https://news.example.com/privacy/ | head -3
 ```
 
 5. 安装「续期后重载 nginx」钩子。certbot 的 timer 会自动续期，但默认**不会**让 nginx 加载新证书——
@@ -371,7 +398,7 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
 `admin` 服务提供（复用 worker 镜像，`news-digest admin`，只监听宿主机
 `127.0.0.1:8619`），公网入口唯一经 nginx 的 `/admin/`。
 
-- **访问**：`https://news.cheapcoding.top/admin/`，面板自带网页登录页
+- **访问**：`https://news.example.com/admin/`，面板自带网页登录页
   （用户名默认 `admin`，登录后发放会话 Cookie——不再是浏览器 Basic Auth 弹窗）。
   首次口令由 bootstrap 写入服务器 `/srv/news-digest/config/admin-password.initial`
   （`sudo cat` 查看；口令不出现在部署输出/日志里）。
@@ -416,10 +443,10 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
 }
 ```
 
-- **首个档案**：bootstrap 第 4/10 步在 `providers.json` 不存在时自动从已填好的
-  `.env` 生成（名为 `default`）；已存在则永不覆盖。
-- **配置所有权**：首次安装可从本地 `.env.local` 初始化服务器配置；服务器
-  `config/.env` 一旦存在，后续 `deploy-all` 不再覆盖。Admin/operator 修改立即成为
-  权威运行时配置，镜像部署与运行时配置生命周期分离。
+- **首个档案**：新安装在部署完成后由 Admin 创建、测试并设为唯一默认；bootstrap 只为旧安装
+  保留从已填完整 `.env` 迁移档案的兼容路径，已存在的 `providers.json` 永不覆盖。
+- **配置所有权**：bootstrap 仅在服务器缺少 `config/.env` 时创建关闭状态的安全默认值；
+  `deploy-all` 不读取 `.env.local`，也不传输运行密钥。Admin/operator 修改立即成为权威运行时配置，
+  镜像部署与运行时配置生命周期分离。
 - **翻译缓存隔离**：缓存 identity 包含协议、规范化 Base URL 和模型，不含 key；
   切换协议或供应商不会误用旧缓存。

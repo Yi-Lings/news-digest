@@ -40,6 +40,26 @@ def test_bootstrap_shares_only_provider_config_with_worker_group():
     assert '/srv/news-digest/config:/config:ro' in compose
 
 
+def test_bootstrap_prepares_shared_data_volume_before_starting_admin():
+    bootstrap = _read("deploy/bootstrap.sh")
+    compose = _read("deploy/compose.yaml")
+
+    function_start = bootstrap.index("prepare_shared_data_volume()")
+    call = bootstrap.index("\nprepare_shared_data_volume\n", function_start)
+    admin = bootstrap.index('"${COMPOSE[@]}" up -d web admin', call)
+    function_body = bootstrap[function_start:call]
+
+    assert call < admin
+    assert 'DATA_VOLUME="news-digest_news-data"' in function_body
+    assert 'docker volume create "$DATA_VOLUME"' in function_body
+    assert "--network none --user 0:0" in function_body
+    assert 'chgrp -R 10001 /data' in function_body
+    assert 'chmod -R g+rwX /data' in function_body
+    assert "find /data -type d -exec chmod g+s {} +" in function_body
+    assert "news-data:\n    # bootstrap" in compose
+    assert "external: true\n    name: news-digest_news-data" in compose
+
+
 def test_admin_provider_replace_is_group_readable_but_secrets_remain_private(tmp_path):
     provider_path = tmp_path / "providers.json"
     secret_path = tmp_path / "session-secret"

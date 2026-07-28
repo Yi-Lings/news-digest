@@ -5,9 +5,36 @@
 # 退出码：0 = 可以继续 bootstrap（可能带警告）；1 = 存在阻断项，先处理再继续。
 set -u
 
-DOMAIN="news.cheapcoding.top"
-APP_DIR="/srv/news-digest"
-OWNER="yi-lings"
+for required_name in ND_OWNER ND_APP_DIR ND_DOMAIN ND_CERTBOT_EMAIL; do
+  if [ -z "${!required_name:-}" ]; then
+    printf '错误：缺少 %s；部署目标必须由操作员显式提供。\n' "$required_name" >&2
+    exit 1
+  fi
+done
+
+DOMAIN="$ND_DOMAIN"
+APP_DIR="$ND_APP_DIR"
+OWNER="$ND_OWNER"
+WEB_PORT="${ND_WEB_PORT:-8618}"
+ADMIN_PORT="${ND_ADMIN_PORT:-8619}"
+if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+   [[ ! "$APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$APP_DIR/" == *"//"* ]] ||
+   [[ "$APP_DIR/" == *"/./"* ]] || [[ "$APP_DIR/" == *"/../"* ]] ||
+   [[ ! "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] ||
+   [[ ! "$ND_CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]; then
+  printf '错误：部署目标格式非法。\n' >&2
+  exit 1
+fi
+for port_value in "$WEB_PORT" "$ADMIN_PORT"; do
+  if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
+    printf '错误：部署端口非法：%s\n' "$port_value" >&2
+    exit 1
+  fi
+done
+if [ "$WEB_PORT" = "$ADMIN_PORT" ]; then
+  printf '错误：ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。\n' >&2
+  exit 1
+fi
 
 OK_N=0; WARN_N=0; FAIL_N=0
 
@@ -82,36 +109,40 @@ else
   warn "certbot 未安装——bootstrap 将跳过 HTTPS（安装：apt-get update && apt-get install -y certbot）"
 fi
 
-# --- 端口占用：8618 是 web 容器要绑的宿主回环端口；8080 仅信息项（被既有服务占用属预期） ---
+# --- 端口占用：web/admin 宿主回环端口必须空闲或已由本项目对应 service 占用 ---
+existing_service_owns_port() {  # $1=service $2=port
+  local role="$1" port="$2" cid
+  [ -f "${APP_DIR}/compose.yaml" ] || return 1
+  cid="$(docker compose -f "${APP_DIR}/compose.yaml" ps -q "$role" 2>/dev/null | head -n1)"
+  [ -n "$cid" ] || return 1
+  [ "$(docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || return 1
+  case "$role" in
+    web)   grep -Fq "127.0.0.1:${port}:8080" "${APP_DIR}/compose.yaml" ;;
+    admin) grep -Fq -- "--port ${port}" "${APP_DIR}/compose.yaml" ;;
+    *)     return 1 ;;
+  esac
+}
+
 check_port() {
-  local port="$1" line proc
+  local port="$1" role="$2" line proc
   if ! command -v ss >/dev/null 2>&1; then
     warn "无 ss 命令，端口 ${port} 占用情况未检测——请人工确认"
     return
   fi
   line="$(ss -lntp 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$")' | head -n1)"
   if [ -z "$line" ]; then
-    if [ "$port" = "8618" ]; then
-      ok "端口 8618 空闲——web 容器可绑定 127.0.0.1:8618"
-    else
-      ok "端口 ${port} 空闲（信息项）"
-    fi
+    ok "${role} 端口 ${port} 空闲——容器可绑定 127.0.0.1:${port}"
+    return
+  fi
+  if existing_service_owns_port "$role" "$port"; then
+    ok "${role} 端口 ${port} 由本项目现有 ${role} service 占用——幂等重跑正常"
     return
   fi
   proc="$(printf '%s\n' "$line" | grep -oE '"[^"]+"' | head -n1 | tr -d '"')"
-  if [ "$port" = "8618" ]; then
-    case "$line" in
-      *docker-proxy*)
-        ok "端口 8618 由 docker-proxy 占用——多为本项目 web 容器已在运行（幂等重跑属正常）" ;;
-      *)
-        fail "端口 8618 被 ${proc:-未知进程} 占用——web 容器将无法绑定，请先释放该端口" ;;
-    esac
-  else
-    warn "端口 ${port} 被 ${proc:-未知进程} 占用——本项目不使用 ${port}，仅提示留意"
-  fi
+  fail "${role} 端口 ${port} 被 ${proc:-未知进程} 占用且不属于本项目 ${role} service——请先释放该端口"
 }
-check_port 8618
-check_port 8080
+check_port "$WEB_PORT" web
+check_port "$ADMIN_PORT" admin
 
 # --- 部署目录现状：存在与否都不阻断，只影响 bootstrap 是全新安装还是复用 ---
 if [ -d "$APP_DIR" ]; then

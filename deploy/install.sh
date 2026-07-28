@@ -14,27 +14,52 @@
 # B. 已解包目录内直接执行：
 #      sudo bash deploy/install.sh
 #
-# 本脚本只做编排：体检（preflight.sh）→ 部署（bootstrap.sh）；
-# 密钥仍遵循既有约束——首跑会生成 /srv/news-digest/.env 模板并暂停，
-# 在服务器上填好真实值后重跑即可续接。
+# 本脚本只做编排：体检（preflight.sh）→ 部署（bootstrap.sh）。首次部署生成关闭状态的
+# 服务器配置并直接完成；API/SMTP 在 Admin 后配，部署入口不接收密钥，也不运行 worker。
 #
-# 参数化部署：以下 ND_* 环境变量在执行前 export 即可覆盖默认值（bootstrap.sh 读取，
+# 参数化部署：以下 ND_* 环境变量在执行前 export（bootstrap.sh 读取，
 # 经 exec 链自动透传），换域名/换端口/换目录部署不用改任何脚本：
-#   ND_OWNER          GHCR 命名空间（全小写）        默认 yi-lings
+#   ND_OWNER          GHCR 命名空间（全小写）        必填
 #   ND_VERSION        Release tag（下载模式从 Release 元数据取得；本地模式必填）
 #   ND_WORKER_DIGEST  worker 不可变镜像 digest      Release 自动提供
 #   ND_WEB_DIGEST     web 不可变镜像 digest         Release 自动提供
-#   ND_APP_DIR        服务器部署目录                 默认 /srv/news-digest
-#   ND_DOMAIN         站点域名（nginx/certbot/站点URL） 默认 news.cheapcoding.top
+#   ND_APP_DIR        服务器部署目录                 必填
+#   ND_DOMAIN         站点域名（nginx/certbot/站点URL） 必填
 #   ND_WEB_PORT       web 宿主回环端口               默认 8618
 #   ND_ADMIN_PORT     模型切换面板宿主回环端口        默认 8619
-#   ND_CERTBOT_EMAIL  证书到期通知邮箱               默认 1481835649@qq.com
-# 例：export ND_DOMAIN=news.example.com ND_WEB_PORT=9000 后再执行本脚本。
-# 注意：preflight.sh 为只读体检，目前仍按默认值核对（域名/8618 端口等）——
-# 覆盖 ND_* 后个别体检项可能误报，属提示性质，可人工确认后继续。
+#   ND_CERTBOT_EMAIL  证书到期通知邮箱               必填
+# 例：export ND_OWNER=example ND_APP_DIR=/opt/news-digest \
+#     ND_DOMAIN=news.example.com ND_CERTBOT_EMAIL=ops@example.com
 set -u
 
-OWNER_REPO="Yi-Lings/news-digest"
+for required_name in ND_OWNER ND_APP_DIR ND_DOMAIN ND_CERTBOT_EMAIL; do
+    if [[ -z "${!required_name:-}" ]]; then
+        echo "缺少 $required_name；部署目标必须由操作员显式提供。" >&2
+        exit 1
+    fi
+done
+if [[ ! "$ND_OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+   [[ ! "$ND_APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$ND_APP_DIR/" == *"//"* ]] ||
+   [[ "$ND_APP_DIR/" == *"/./"* ]] || [[ "$ND_APP_DIR/" == *"/../"* ]] ||
+   [[ ! "$ND_DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] ||
+   [[ ! "$ND_CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]; then
+    echo "部署目标格式非法。" >&2
+    exit 1
+fi
+install_web_port="${ND_WEB_PORT:-8618}"
+install_admin_port="${ND_ADMIN_PORT:-8619}"
+for port_value in "$install_web_port" "$install_admin_port"; do
+    if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
+        echo "部署端口非法：$port_value" >&2
+        exit 1
+    fi
+done
+if [[ "$install_web_port" == "$install_admin_port" ]]; then
+    echo "ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。" >&2
+    exit 1
+fi
+
+OWNER_REPO="${ND_OWNER}/news-digest"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
 

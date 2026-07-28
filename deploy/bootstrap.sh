@@ -2,23 +2,58 @@
 # bootstrap.sh —— news-digest 阶段 7 服务器幂等部署（可反复执行直至全部就绪）
 # 红线（PLAN 阶段 7）：
 #   - 服务器不检出源码、不构建镜像：只消费 GHCR 已发布镜像与随本脚本上传的工件；
-#   - 密钥只在服务器端注入：本脚本不经参数/标准输入接收任何密钥，.env 由用户
-#     登录服务器后用编辑器填写（因此第 3/5 步会主动停下，填好后重跑即可）。
-# 参数化：变量区所有值均可在执行前 export ND_* 环境变量覆盖（全表见 install.sh
-# 头注释或 deploy/README.md §0），换域名/端口/目录部署不用改脚本；默认值即本项目生产实值。
-# 用法：由 server-push.ps1 上传到 /srv/news-digest/incoming 后，以 root 执行。
-# 退出码：0 完成；2 等待人工填写 .env；3 等待人工 docker login；1 其他错误。
+#   - 密钥只在服务器端通过 Admin 注入：本脚本不经参数、标准输入或部署主机接收密钥；
+#   - 部署只启动 Web/Admin，不执行抓取、翻译、构建或投递流水线。
+# 参数化：部署目标必须通过 ND_* 环境变量显式提供（全表见 install.sh
+# 头注释或 deploy/README.md §0），换域名/端口/目录部署不用改脚本。
+# 用法：由 server-push.ps1 上传到 ND_APP_DIR/incoming 后，以 root 执行。
+# 退出码：0 完成；3 等待人工 docker login；1 其他错误。
 set -euo pipefail
 
 # ---------------- 变量区（执行前 export ND_*；发布身份必须由 Release 工件传入）----------------
-OWNER="${ND_OWNER:-yi-lings}"             # GHCR 命名空间（必须全小写）
+for required_name in ND_OWNER ND_APP_DIR ND_DOMAIN ND_CERTBOT_EMAIL; do
+  if [ -z "${!required_name:-}" ]; then
+    printf '\n错误：缺少 %s；部署目标必须由操作员显式提供。\n' "$required_name" >&2
+    exit 1
+  fi
+done
+
+OWNER="$ND_OWNER"                         # GHCR 命名空间（必须全小写）
 TAG="${ND_VERSION:-}"                     # 发布 tag；仅用于审计与镜像 label 核对
-APP_DIR="${ND_APP_DIR:-/srv/news-digest}" # 部署目录（compose、config/、备份）
+APP_DIR="$ND_APP_DIR"                     # 部署目录（compose、config/、备份）
 CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
-DOMAIN="${ND_DOMAIN:-news.cheapcoding.top}"
+DOMAIN="$ND_DOMAIN"
 WEB_PORT="${ND_WEB_PORT:-8618}"           # web 宿主回环端口（服务器 8080 已被既有服务占用）
 ADMIN_PORT="${ND_ADMIN_PORT:-8619}"       # 模型切换面板宿主回环端口
-CERTBOT_EMAIL="${ND_CERTBOT_EMAIL:-1481835649@qq.com}"
+CERTBOT_EMAIL="$ND_CERTBOT_EMAIL"
+if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+  printf '\n错误：ND_OWNER 非法：%s\n' "$OWNER" >&2
+  exit 1
+fi
+if [[ ! "$APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$APP_DIR/" == *"//"* ]] ||
+   [[ "$APP_DIR/" == *"/./"* ]] || [[ "$APP_DIR/" == *"/../"* ]]; then
+  printf '\n错误：ND_APP_DIR 必须是无 . 或 .. 路径段的绝对路径：%s\n' "$APP_DIR" >&2
+  exit 1
+fi
+if [[ ! "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; then
+  printf '\n错误：ND_DOMAIN 非法：%s\n' "$DOMAIN" >&2
+  exit 1
+fi
+if [[ ! "$CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]; then
+  printf '\n错误：ND_CERTBOT_EMAIL 非法。\n' >&2
+  exit 1
+fi
+for port_name in WEB_PORT ADMIN_PORT; do
+  port_value="${!port_name}"
+  if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
+    printf '\n错误：%s 非法：%s\n' "$port_name" "$port_value" >&2
+    exit 1
+  fi
+done
+if [ "$WEB_PORT" = "$ADMIN_PORT" ]; then
+  printf '\n错误：ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。\n' >&2
+  exit 1
+fi
 CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 NGINX_CONF="/etc/nginx/conf.d/news.conf"
 HTPASSWD_FILE="${CONFIG_DIR}/htpasswd-admin"     # 面板登录口令哈希（面板登录页校验；nginx 不读取）
@@ -97,7 +132,7 @@ sed -e "s|ghcr.io/OWNER/news-digest-worker:VERSION|${WORKER_IMAGE}|" \
     -e "s|ghcr.io/OWNER/news-digest-web:VERSION|${WEB_IMAGE}|" \
     -e "s|/srv/news-digest|${APP_DIR}|g" \
     -e "s|127.0.0.1:8618:|127.0.0.1:${WEB_PORT}:|" \
-    -e "s|\"--port\", \"8619\"|\"--port\", \"${ADMIN_PORT}\"|" \
+    -e "s|--port 8619|--port ${ADMIN_PORT}|g" \
     "${SRC_DIR}/compose.yaml" > "${TMP_DIR}/compose.yaml"
 if [ -f "${APP_DIR}/compose.yaml" ] && ! cmp -s "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml"; then
   echo "注意：现有 compose.yaml 内容不同；将在迁移前数据库备份成功后覆盖（原文件自动备份）"
@@ -118,7 +153,7 @@ if [ "$DOCKER_BIN" != "/usr/bin/docker" ]; then
 fi
 
 # ---------------------------------------------------------------
-section "3/10 生产密钥文件 .env"
+section "3/10 服务器运行配置 .env"
 # 配置收窄（rc2 安全整改）：可被面板读写的配置全部集中到 config/ 子目录，admin
 # 容器只 bind 挂载该子目录——面板即使被攻破也触不到 compose.yaml 与运维脚本。
 mkdir -p "$CONFIG_DIR"
@@ -136,7 +171,6 @@ migrate_cfg "${APP_DIR}/providers.json"     "${CONFIG_DIR}/providers.json"
 migrate_cfg /etc/nginx/htpasswd-news-admin  "${CONFIG_DIR}/htpasswd-admin"
 
 ENV_FILE="${CONFIG_DIR}/.env"
-INCOMING_ENV="${CONFIG_DIR}/.env.incoming"   # deploy-all 经 scp 送来的受管键值（非命令行参数）
 if [ ! -f "$ENV_FILE" ]; then
   # 只写模板与注释，不含任何真实密钥。定界符不加引号：要展开 ${ENV_FILE}/${DOMAIN}
   # 两个部署参数；模板正文不含其他 $，无意外展开风险
@@ -185,42 +219,7 @@ NEWS_HTTP_PROXY=
 ENVEOF
   chown root:root "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  if [ ! -f "$INCOMING_ENV" ]; then
-    cat <<STOPEOF
-
->>> 需要人工操作：填写生产密钥 <<<
-已生成模板 ${ENV_FILE}（root:600）。请在服务器上：
-  1. 用编辑器填入真实值，例如：nano ${ENV_FILE}
-  2. 保存后重新执行原始 install/deploy-all/server-push 入口，让同一 Release 的版本与 digest 再次传入
-本脚本不经参数或标准输入接收密钥，只能人工落盘后重跑。
-STOPEOF
-    exit 2
-  fi
-  echo "已生成 .env 脚手架；检测到 .env.incoming，合并受管密钥后继续（无需人工停下）"
-fi
-
-# P0-4 定点合并：把 .env.incoming 的受管键 upsert 进 .env——只更新/追加这些键，逐行保留
-# 其余键与注释，绝不整文件覆盖（防止抹掉运维手工加的键）。secrets 只经 600 文件、不进命令行
-# 参数。awk 以首个 = 切分，值中含 = 也安全。合并后删除 incoming。
-if [ -f "$INCOMING_ENV" ]; then
-  merged="$(mktemp)"
-  awk -F= '
-    FNR==NR {
-      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { k=$1; v=substr($0,index($0,"=")+1); m[k]=v; ord[++n]=k }
-      next
-    }
-    {
-      if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/ && ($1 in m)) {
-        if (!done[$1]) { print $1"="m[$1]; done[$1]=1 }
-        next
-      }
-      print
-    }
-    END { for (i=1;i<=n;i++) if (!done[ord[i]]) print ord[i]"="m[ord[i]] }
-  ' "$INCOMING_ENV" "$ENV_FILE" > "$merged"
-  cat "$merged" > "$ENV_FILE"       # 覆写内容而非 mv，保留 root:600 属主与 inode
-  rm -f "$merged" "$INCOMING_ENV"
-  echo "已合并 .env.incoming 受管键到 ${ENV_FILE}（其余行/注释保留），并删除 incoming"
+  echo "已生成关闭 API、SMTP、自动投递与公开订阅的安全初始配置"
 fi
 
 # 幂等收紧：无论谁动过，权限始终回到 root:600
@@ -238,10 +237,7 @@ if ! awk '
   die "生产 NEWS_TIMEZONE 必须且只能设置一次 Asia/Shanghai，与每日 08:00 systemd timer 保持一致"
 fi
 install_file "${SRC_DIR}/news-digest.timer" /etc/systemd/system/news-digest.timer 644
-if ! grep -qE '^TRANSLATION_API_KEY=.+' "$ENV_FILE"; then
-  warnbox ".env 中 TRANSLATION_API_KEY 仍为空——worker 首刊会失败，请尽快填写"
-fi
-echo ".env 就绪（权限已确认 600），继续"
+echo ".env 就绪（权限已确认 600）；API、SMTP 与自动投递由 Admin 后续配置"
 
 # ---------------------------------------------------------------
 section "4/10 模型供应商档案 providers.json"
@@ -293,8 +289,8 @@ PROVEOF
     chmod 640 "$PROVIDERS_FILE"
     echo "已生成首个供应商档案（default，取自 .env）：${PROVIDERS_FILE}"
   else
-    # 不中止：面板暂无档案不影响其余部署；填全 .env 后重跑本脚本自动补生成
-    warnbox ".env 的 TRANSLATION_* 三项未填全，暂不生成 providers.json——面板将没有可切换档案；填好后重跑本脚本即可"
+    # 不中止：首次部署由 Admin 创建档案；旧安装仍可从已填完整的 .env 迁移。
+    warnbox "尚未配置翻译供应商；部署完成后请在 Admin 新增、测试并设为唯一默认档案"
   fi
 fi
 
@@ -321,7 +317,7 @@ LOGINEOF
 fi
 
 # ---------------------------------------------------------------
-section "6/10 拉取镜像、启动 web 与 admin、worker 首刊"
+section "6/10 拉取镜像并启动 web 与 admin"
 docker pull "$WORKER_IMAGE"
 docker pull "$WEB_IMAGE"
 
@@ -418,6 +414,26 @@ with sqlite3.connect(
 }
 
 backup_database_before_migration
+
+# Admin 以 0:10001 且 cap_drop=ALL 运行，不能依赖 root 绕过目录权限；worker 则以
+# 10001:10001 运行。统一已有内容的共享 GID/组写权限，并给目录加 setgid，保证两者
+# 创建的 SQLite、journal、邮件归档与子目录持续互相可写。必须在数据库备份后执行。
+prepare_shared_data_volume() {
+  local DATA_VOLUME="news-digest_news-data"
+  docker volume create "$DATA_VOLUME" >/dev/null ||
+    die "无法创建或确认共享数据卷 ${DATA_VOLUME}"
+  docker run --rm --network none --user 0:0 --read-only \
+    --entrypoint /bin/sh \
+    --mount "type=volume,src=${DATA_VOLUME},dst=/data" \
+    "$WORKER_IMAGE" -c '
+chgrp -R 10001 /data
+chmod -R g+rwX /data
+find /data -type d -exec chmod g+s {} +
+' || die "无法准备共享数据卷 ${DATA_VOLUME} 的 UID/GID 权限"
+  echo "共享数据卷权限已就绪：${DATA_VOLUME}（GID 10001、目录 setgid、组可写）"
+}
+
+prepare_shared_data_volume
 install_file "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml" 644
 COMPOSE=(docker compose -f "${APP_DIR}/compose.yaml")
 # 记录本次实际部署的镜像 digest，供回滚溯源（回滚指引见收尾段与 README §10）。pull 后本地
@@ -435,42 +451,20 @@ record_deployed() {
   echo "  web=${bd:-未解析}"
 }
 record_deployed
-# 先常驻 web 再首刊是安全的：/healthz 不依赖站点内容，current 出现前仅健康检查可用。
-# admin（配置与投递管理面板）一并常驻：与 worker 同镜像已随 pull 就绪；up -d 幂等
+# /healthz 不依赖站点内容，current 出现前仅健康检查可用。admin 与 worker 使用同一镜像，
+# 但部署阶段只常驻 Web/Admin，不执行任何 worker 业务流水线。
 "${COMPOSE[@]}" up -d web admin
-# 已有当天正式刊物时，部署只更新应用，不重复抓取、翻译、构建或投递。
-# 使用应用自身的 release resolver，确保 current 位于 releases/ 内且 manifest/hash 完整。
-current_release_is_today() {
-  "${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python worker - <<'PY'
-import datetime as dt
-from pathlib import Path
-from zoneinfo import ZoneInfo
-
-from news_digest.delivery.publisher import resolve_published_release
-
-try:
-    release = resolve_published_release(Path("/site"))
-except (OSError, ValueError):
-    raise SystemExit(1)
-today = dt.datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-raise SystemExit(0 if release.release_date == today else 1)
-PY
-}
-
-# 当天尚无正式刊物时用 run --yes：抓取、翻译、构建、投递四阶段。
-# 失败不中止安装：timer 明日会再跑；投递失败不回滚已发布站点。
-if current_release_is_today; then
-  echo "检测到 Asia/Shanghai 当天的安全正式刊物，跳过 worker 首刊流水线"
-elif "${COMPOSE[@]}" run --rm worker run --yes; then
-  echo "worker 首刊完成"
-else
-  warnbox "worker 首刊流水线失败——请按阶段输出排查；若仅投递失败，已发布站点仍保留。修复后手动重试：docker compose -f ${APP_DIR}/compose.yaml run --rm worker run --yes"
-fi
+echo "部署阶段已跳过抓取、翻译、构建与投递；请先在 Admin 完成运行配置"
 
 # ---------------------------------------------------------------
 section "7/10 systemd 定时任务"
 systemctl daemon-reload
-# 只 enable timer，不 enable service（service 无 [Install] 段，单元内注释已说明）
+# 部署发生在 08:00 之后时，Persistent=true 会把当天错过的任务立即补跑。先把本次部署时刻
+# 记为 timer 的持久状态，确保部署过程不间接触发 worker；下一次按正常 08:00 运行。
+install -d -m 755 /var/lib/systemd/timers
+touch /var/lib/systemd/timers/stamp-news-digest.timer
+# 只 enable timer，不 enable service（service 无 [Install] 段，单元内注释已说明）。
+# 后续真正因服务器停机错过的任务仍由 Persistent=true 补跑。
 systemctl enable --now news-digest.timer
 echo "下次触发（NEXT 列）："
 systemctl list-timers news-digest.timer --no-pager || true
@@ -520,7 +514,7 @@ section "9/10 宿主机 Nginx 与 HTTPS"
 # 渲染 nginx 配置：模板内写的是默认域名/端口的真实值（保持模板可读、可独立审阅），
 # 此处按本次部署参数替换。默认参数下渲染前后逐字节一致，不影响幂等比对。
 render_nginx_conf() {  # $1=源 $2=目标
-  sed -e "s|news.cheapcoding.top|${DOMAIN}|g" \
+  sed -e "s|news.example.com|${DOMAIN}|g" \
       -e "s|127.0.0.1:8618|127.0.0.1:${WEB_PORT}|g" \
       -e "s|127.0.0.1:8619|127.0.0.1:${ADMIN_PORT}|g" \
       "$1" > "$2"
@@ -553,11 +547,11 @@ install_nginx_conf() {  # $1=准备好的新配置
 # 域名/端口在模板里保持默认值，写完统一经 render_nginx_conf 渲染。
 write_http_only_conf() {
   cat > "${TMP_DIR}/news-http.tpl" <<'HTTPEOF'
-# news.cheapcoding.top —— http-only 首版（bootstrap 自动生成；证书签发成功后被完整版覆盖）
+# news.example.com —— http-only 首版（bootstrap 自动生成；证书签发成功后被完整版覆盖）
 server {
     listen 80;
     listen [::]:80;
-    server_name news.cheapcoding.top;
+    server_name news.example.com;
 
     # certbot webroot 验证路径
     location /.well-known/acme-challenge/ {
@@ -627,12 +621,30 @@ fi
 
 # ---------------------------------------------------------------
 section "10/10 收尾自检"
-HEALTH_LINE="$(curl -sI --max-time 10 "http://127.0.0.1:${WEB_PORT}/healthz" | head -n1 || true)"
-echo "web /healthz         ：${HEALTH_LINE:-（无响应——检查 docker compose ps 与 web 容器日志）}"
+HEALTH_CODE="000"
+for _ in {1..15}; do
+  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${WEB_PORT}/healthz" || true)"
+  [ "$HEALTH_CODE" = "200" ] && break
+  sleep 2
+done
+echo "web /healthz         ：HTTP ${HEALTH_CODE:-000}（期望 200）"
+if [ "$HEALTH_CODE" != "200" ]; then
+  "${COMPOSE[@]}" logs --no-color --tail 100 web >&2 || true
+  die "Web 健康检查失败，拒绝报告部署完成"
+fi
 # 未登录的 GET /admin/ 返回登录页（200）；生产模式无静态回落、HEAD 不保证实现，
 # 故用 -w 取状态码而不用 -I
-ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${ADMIN_PORT}/admin/" || true)"
-echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页；000 为无响应——检查 admin 容器日志）"
+ADMIN_CODE="000"
+for _ in {1..15}; do
+  ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/admin/" || true)"
+  [ "$ADMIN_CODE" = "200" ] && break
+  sleep 2
+done
+echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页）"
+if [ "$ADMIN_CODE" != "200" ]; then
+  "${COMPOSE[@]}" logs --no-color --tail 100 admin >&2 || true
+  die "Admin 健康检查失败，拒绝报告部署完成"
+fi
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
 # 版本自检：核对实际拉到的 worker 镜像 OCI version label 是否等于本次部署 TAG（CI 用
@@ -654,6 +666,8 @@ Admin 管理面板：https://${DOMAIN}/admin/（网页登录，用户名 admin�
   cat ${CONFIG_DIR}/admin-password.initial，登录后请立即在面板网页修改口令——
   修改成功会自动删除该文件；忘记口令重置：
   rm ${CONFIG_DIR}/htpasswd-admin ${CONFIG_DIR}/session-secret 后重跑本脚本）。
+首次部署的 API/SMTP 为空，邮件投递与公开订阅关闭；请登录 Admin 完成配置。
+部署过程未运行抓取、翻译、构建或投递流水线。
 回滚方法（README §10）：
   1. 编辑 ${APP_DIR}/compose.yaml，把三处 image 改回上一版 digest
      （worker 与 admin 共用 worker 镜像引用，须一并改；形如

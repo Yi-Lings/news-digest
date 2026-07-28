@@ -3,21 +3,72 @@
 # .ps1 files without a BOM and mixed codepages garble console output.
 # Flow: ssh mkdir incoming -> scp artifacts -> ssh preflight (read-only) ->
 #       pause for confirmation -> ssh bootstrap. Any non-zero step aborts.
-# Secrets never pass through this script: .env is edited on the server itself,
-# and the GHCR token is pasted by the user into docker login on the server.
+# API/SMTP secrets never pass through this script; first install leaves them disabled
+# for later Admin configuration. A standalone run may still require server GHCR login.
 
 param(
     [switch]$AutoYes,        # -AutoYes: skip the pause between preflight and bootstrap
     [switch]$NoPrompt,       # automation: native SSH/SCP must fail, never prompt
     [string]$Version,        # release tag to deploy; passed through to bootstrap as ND_VERSION
     [string]$WorkerDigest,   # immutable worker digest from this tag's Release asset
-    [string]$WebDigest       # immutable web digest from this tag's Release asset
+    [string]$WebDigest,      # immutable web digest from this tag's Release asset
+    [string]$Server = $env:ND_SERVER,
+    [string]$KeyPath = $env:ND_KEY_PATH,
+    [string]$Owner = $env:ND_OWNER,
+    [string]$AppDir = $env:ND_APP_DIR,
+    [string]$Domain = $env:ND_DOMAIN,
+    [string]$CertbotEmail = $env:ND_CERTBOT_EMAIL,
+    [string]$WebPort = $env:ND_WEB_PORT,
+    [string]$AdminPort = $env:ND_ADMIN_PORT
 )
 
-# ---- variables ----
-$KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
-$Server  = "root@cheapcoding.top"
-$AppDir  = "/srv/news-digest"
+if (-not $WebPort) { $WebPort = "8618" }
+if (-not $AdminPort) { $AdminPort = "8619" }
+
+$requiredTargets = [ordered]@{
+    Server = $Server; KeyPath = $KeyPath; Owner = $Owner; AppDir = $AppDir;
+    Domain = $Domain; CertbotEmail = $CertbotEmail
+}
+$missingTargets = @($requiredTargets.Keys | Where-Object { -not "$($requiredTargets[$_])".Trim() })
+if ($missingTargets.Count -gt 0) {
+    Write-Host "[FAIL] Missing deployment targets: $($missingTargets -join ', ')." -ForegroundColor Red
+    Write-Host "       Pass parameters or set ND_SERVER, ND_KEY_PATH, ND_OWNER, ND_APP_DIR, ND_DOMAIN and ND_CERTBOT_EMAIL." -ForegroundColor Red
+    exit 1
+}
+if ($Server -notmatch '^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$') {
+    Write-Host "[FAIL] Invalid SSH target: $Server" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
+    Write-Host "[FAIL] SSH key not found: $KeyPath" -ForegroundColor Red
+    exit 1
+}
+if ($Owner -notmatch '^[a-z0-9][a-z0-9-]*$') {
+    Write-Host "[FAIL] Invalid GHCR owner: $Owner" -ForegroundColor Red
+    exit 1
+}
+if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or $AppDir -match '(^|/)\.\.?(?:/|$)' -or $AppDir -match '//') {
+    Write-Host "[FAIL] Invalid absolute server app directory: $AppDir" -ForegroundColor Red
+    exit 1
+}
+if ($Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$') {
+    Write-Host "[FAIL] Invalid site domain: $Domain" -ForegroundColor Red
+    exit 1
+}
+if ($CertbotEmail -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$') {
+    Write-Host "[FAIL] Invalid certificate email." -ForegroundColor Red
+    exit 1
+}
+foreach ($port in @($WebPort, $AdminPort)) {
+    if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
+        Write-Host "[FAIL] Invalid deploy port: $port" -ForegroundColor Red
+        exit 1
+    }
+}
+if ($WebPort -eq $AdminPort) {
+    Write-Host "[FAIL] WebPort and AdminPort must differ." -ForegroundColor Red
+    exit 1
+}
 
 # Single-source the version: deploy-all.ps1 passes -Version, but when this script is run
 # standalone, derive the same tag ('v' + __version__) so we never fall back to a stale
@@ -106,10 +157,6 @@ if ($NoPrompt) {
     $SshArgs = $transportArgs + @("-i", $KeyPath)
     $ScpArgs = $transportArgs + @("-i", $KeyPath)
 }
-if (-not (Test-Path $KeyPath)) {
-    Write-Host "[FAIL] SSH key not found: $KeyPath" -ForegroundColor Red
-    exit 1
-}
 foreach ($f in $Files) {
     if (-not (Test-Path $f)) {
         Write-Host "[FAIL] Missing local file: $f" -ForegroundColor Red
@@ -135,9 +182,15 @@ Stop-OnError $LASTEXITCODE "scp upload"
 & ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
 Stop-OnError $LASTEXITCODE "normalize line endings"
 
+# These values are allow-list validated above before entering the remote POSIX shell.
+$deployEnv = "ND_OWNER='$Owner' ND_APP_DIR='$AppDir' ND_DOMAIN='$Domain' " +
+    "ND_CERTBOT_EMAIL='$CertbotEmail' ND_WEB_PORT='$WebPort' ND_ADMIN_PORT='$AdminPort' " +
+    "ND_VERSION='$Version' ND_WORKER_DIGEST='$WorkerDigest' ND_WEB_DIGEST='$WebDigest'"
+
 # ---- step 3: read-only preflight, shown verbatim ----
 Write-Host "[3/4] Running preflight.sh (read-only health check)..."
-& ssh @SshArgs $Server "bash $Incoming/preflight.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
+& ssh @SshArgs $Server "$deployEnv bash $Incoming/preflight.sh" 2>&1 |
+    ForEach-Object { $_.ToString() } | Tee-Object -FilePath $LogPath -Append
 Stop-OnError $LASTEXITCODE "preflight"
 
 Write-Host ""
@@ -148,31 +201,27 @@ if (-not $AutoYes) {
 }
 
 # ---- step 4: idempotent bootstrap ----
-# Pin the deploy to the resolved tag via ND_VERSION so bootstrap pulls the exact image
-# we just built, rather than its own in-script default. Single word, no secret, safe on argv.
-$bootstrapEnv = "ND_VERSION='$Version' ND_WORKER_DIGEST='$WorkerDigest' ND_WEB_DIGEST='$WebDigest'"
+# Pin the deploy to the exact validated target, tag and image digests.
 Write-Host "[4/4] Running bootstrap.sh (idempotent immutable deploy, ND_VERSION=$Version)..."
-& ssh @SshArgs $Server "$bootstrapEnv bash $Incoming/bootstrap.sh" 2>&1 | Tee-Object -FilePath $LogPath -Append
+& ssh @SshArgs $Server "$deployEnv bash $Incoming/bootstrap.sh" 2>&1 |
+    ForEach-Object { $_.ToString() } | Tee-Object -FilePath $LogPath -Append
 $BootstrapExit = $LASTEXITCODE
 
-# Bootstrap stops itself on purpose when manual input is required
-# (exit 2: fill .env, exit 3: docker login). Print the follow-ups either way.
-Write-Host ""
-Write-Host "== Follow-up steps (manual, on the server) =="
-Write-Host "If bootstrap stopped on purpose, finish the matching step and re-run:"
-Write-Host "  1. exit 2 - fill secrets:  ssh -i $KeyPath $Server"
-Write-Host "     then edit $AppDir/config/.env with an editor (secrets never pass through this script)"
-Write-Host "  2. exit 3 - GHCR login:    docker login ghcr.io -u yi-lings"
-Write-Host "     paste a read:packages token at the prompt, then: chmod 600 /root/.docker/config.json"
-Write-Host "  3. Re-run this script so the same release version and digests are passed again."
-Write-Host "     and repeat until bootstrap reports completion."
-
+if ($BootstrapExit -eq 3) {
+    Write-Host ""
+    Write-Host "[NOTE] The server still needs GHCR read access:" -ForegroundColor Yellow
+    Write-Host "  ssh -i $KeyPath $Server"
+    Write-Host "  docker login ghcr.io -u $Owner"
+    Write-Host "  chmod 600 /root/.docker/config.json"
+    Write-Host "Then re-run this command with the same release version and digests."
+    exit 3
+}
 if ($BootstrapExit -ne 0) {
     Write-Host ""
-    Write-Host "[NOTE] bootstrap.sh exited with code $BootstrapExit - see messages above." -ForegroundColor Yellow
+    Write-Host "[FAIL] bootstrap.sh exited with code $BootstrapExit - see messages above." -ForegroundColor Red
     exit $BootstrapExit
 }
 
 Write-Host ""
-Write-Host "[DONE] All steps completed."
+Write-Host "[DONE] Deployment completed. Configure API/SMTP in Admin; automatic delivery remains disabled until enabled there."
 exit 0

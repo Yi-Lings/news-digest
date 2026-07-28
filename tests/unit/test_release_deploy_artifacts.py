@@ -59,6 +59,81 @@ def test_windows_release_path_refuses_dirty_or_detached_tag_and_passes_digests()
     assert "^v[A-Za-z0-9_]" in server_push
 
 
+def test_deploy_targets_are_explicit_validated_and_forwarded():
+    deploy_all = _read("deploy/deploy-all.ps1")
+    server_push = _read("deploy/server-push.ps1")
+    deploy_bat = _read("deploy.bat")
+    installer = _read("deploy/install.sh")
+    preflight = _read("deploy/preflight.sh")
+    bootstrap = _read("deploy/bootstrap.sh")
+    deploy_docs = _read("deploy/README.md")
+
+    for script in (deploy_all, server_push):
+        for declaration in (
+            "[string]$Server = $env:ND_SERVER",
+            "[string]$KeyPath = $env:ND_KEY_PATH",
+            "[string]$Owner = $env:ND_OWNER",
+            "[string]$AppDir = $env:ND_APP_DIR",
+            "[string]$Domain = $env:ND_DOMAIN",
+            "[string]$CertbotEmail = $env:ND_CERTBOT_EMAIL",
+        ):
+            assert declaration in script
+        assert "Missing deployment targets" in script
+
+    assert deploy_all.index("Missing deployment targets") < deploy_all.index(
+        'foreach ($tool in @("ssh", "scp", "git", "gh"))'
+    )
+    assert server_push.index("Missing deployment targets") < server_push.index(
+        "$LogDir ="
+    )
+    assert "-Server $Server -KeyPath $KeyPath -Owner $Owner -AppDir $AppDir" in deploy_all
+    assert "-Domain $Domain -CertbotEmail $CertbotEmail" in deploy_all
+    assert '"ND_OWNER=\'$Owner\' ND_APP_DIR=\'$AppDir\' ND_DOMAIN=\'$Domain\' "' in server_push
+    assert '"ND_CERTBOT_EMAIL=\'$CertbotEmail\'' in server_push
+    assert '"$deployEnv bash $Incoming/preflight.sh"' in server_push
+    assert '"$deployEnv bash $Incoming/bootstrap.sh"' in server_push
+
+    assert "%*" in deploy_bat
+    assert "deploy\\deploy-all.ps1\" %*" in deploy_bat
+    assert "--interactive" not in deploy_bat.lower()
+
+    assert installer.index("for required_name in") < installer.index(
+        'api="https://api.github.com'
+    )
+    assert 'OWNER_REPO="${ND_OWNER}/news-digest"' in installer
+    for script in (installer, preflight, bootstrap):
+        assert "ND_OWNER ND_APP_DIR ND_DOMAIN ND_CERTBOT_EMAIL" in script
+    assert 'OWNER="$ND_OWNER"' in bootstrap
+    assert 'APP_DIR="$ND_APP_DIR"' in bootstrap
+    assert 'DOMAIN="$ND_DOMAIN"' in bootstrap
+    assert 'CERTBOT_EMAIL="$ND_CERTBOT_EMAIL"' in bootstrap
+    assert 'WEB_PORT="${ND_WEB_PORT:-8618}"' in preflight
+    assert 'ADMIN_PORT="${ND_ADMIN_PORT:-8619}"' in preflight
+    assert "existing_service_owns_port()" in preflight
+    assert 'docker compose -f "${APP_DIR}/compose.yaml" ps -q "$role"' in preflight
+    assert 'existing_service_owns_port "$role" "$port"' in preflight
+    assert 's|--port 8619|--port ${ADMIN_PORT}|g' in bootstrap
+
+    release_artifacts = "\n".join(
+        (
+            deploy_all,
+            server_push,
+            deploy_bat,
+            installer,
+            preflight,
+            bootstrap,
+            deploy_docs,
+        )
+    ).lower()
+    for personal_value in (
+        "root@cheapcoding.top",
+        r"c:\users\admin\.ssh",
+        "1481835649@qq.com",
+    ):
+        assert personal_value not in release_artifacts
+    assert "仓库外的本地 powershell wrapper" in deploy_docs.lower()
+
+
 def test_bootstrap_requires_exact_release_version_and_both_digests():
     bootstrap = _read("deploy/bootstrap.sh")
 
@@ -94,26 +169,29 @@ def test_release_installer_binds_latest_metadata_to_bundle_digests():
     assert "缺少 GH_TOKEN" not in installer
 
 
-def test_first_install_requires_smtp_only_when_delivery_is_enabled():
+def test_first_install_defers_api_and_smtp_configuration_to_admin():
     deploy_all = _read("deploy/deploy-all.ps1")
+    server_push = _read("deploy/server-push.ps1")
+    bootstrap = _read("deploy/bootstrap.sh")
 
-    assert '$pairs["EMAIL_DELIVERY_ENABLED"] -notin @("true", "false")' in deploy_all
-    assert '$pairs["SMTP_USE_TLS"] -notin @("true", "false")' in deploy_all
-    assert 'if ($pairs["EMAIL_DELIVERY_ENABLED"] -eq "true")' in deploy_all
-    assert '$required += @("SMTP_HOST", "SMTP_PORT", "SMTP_FROM")' in deploy_all
-    legacy_required = (
-        '$required += @("SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "SMTP_RECIPIENTS")'
-    )
-    assert legacy_required not in deploy_all
-    assert '"SMTP_RECIPIENTS" = ""' in deploy_all
-    assert "function ConvertFrom-SmtpPasswordEnvValue" in deploy_all
-    assert "function ConvertTo-SmtpPasswordEnvValue" in deploy_all
-    assert "catch {\n        return $Value\n    }" in deploy_all
-    assert 'if ($k -eq "SMTP_PASSWORD")' in deploy_all
-    assert (
-        '$pairs["SMTP_PASSWORD"] = ConvertTo-SmtpPasswordEnvValue '
-        '$pairs["SMTP_PASSWORD"]'
-    ) in deploy_all
+    assert ".env.local" not in deploy_all
+    assert ".env.incoming" not in deploy_all
+    assert "TRANSLATION_API_KEY" not in deploy_all
+    assert "SMTP_PASSWORD" not in deploy_all
+    assert "Admin" in deploy_all
+
+    assert "TRANSLATION_API_BASE_URL=" in bootstrap
+    assert "TRANSLATION_API_KEY=" in bootstrap
+    assert "TRANSLATION_MODEL=" in bootstrap
+    assert "EMAIL_DELIVERY_ENABLED=false" in bootstrap
+    assert "SMTP_HOST=" in bootstrap
+    assert "SMTP_USERNAME=" in bootstrap
+    assert "SMTP_PASSWORD=" in bootstrap
+    assert "SMTP_FROM=" in bootstrap
+    assert "PUBLIC_SUBSCRIPTION_ENABLED=false" in bootstrap
+    assert "exit 2" not in bootstrap
+    assert "exit 2" not in server_push
+    assert "请在 Admin" in bootstrap
 
 
 def test_public_subscription_docs_match_runtime_reload_behavior():
@@ -139,9 +217,8 @@ def test_bootstrap_backs_up_sqlite_before_starting_database_consumers():
     )
     record = bootstrap.index('\nrecord_deployed\n', call)
     admin = bootstrap.index(dq + '${COMPOSE[@]}' + dq + ' up -d web admin')
-    worker = bootstrap.index(dq + '${COMPOSE[@]}' + dq + ' run --rm worker run --yes')
 
-    assert max(worker_pull, web_pull) < call < compose_install < record < admin < worker
+    assert max(worker_pull, web_pull) < call < compose_install < record < admin
     assert 'DATA_VOLUME=' + dq + 'news-digest_news-data' + dq in function_body
     assert "docker volume ls --format '{{.Name}}'" in function_body
     assert 'docker volume inspect ' + dq + '$DATA_VOLUME' + dq in function_body
@@ -167,23 +244,25 @@ def test_bootstrap_backs_up_sqlite_before_starting_database_consumers():
     assert 'news_digest' not in function_body
 
 
-def test_bootstrap_skips_first_run_when_current_release_is_today():
+def test_deployment_never_runs_the_content_pipeline():
     bootstrap = _read("deploy/bootstrap.sh")
+    deploy_all = _read("deploy/deploy-all.ps1")
 
-    guard = bootstrap.index("current_release_is_today()")
-    worker = bootstrap.index('"${COMPOSE[@]}" run --rm worker run --yes')
-    assert guard < worker
-    assert (
-        '"${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python worker -'
-        in bootstrap[guard:worker]
+    assert 'run --rm worker run --yes' not in bootstrap
+    assert 'run --rm worker run --yes' not in deploy_all
+    assert "current_release_is_today" not in bootstrap
+    assert bootstrap.index('"${COMPOSE[@]}" up -d web admin') < bootstrap.index(
+        "systemctl enable --now news-digest.timer"
     )
-    assert (
-        "from news_digest.delivery.publisher import resolve_published_release"
-        in bootstrap[guard:worker]
+    stamp = "touch /var/lib/systemd/timers/stamp-news-digest.timer"
+    assert bootstrap.index(stamp) < bootstrap.index(
+        "systemctl enable --now news-digest.timer"
     )
-    assert 'resolve_published_release(Path("/site"))' in bootstrap[guard:worker]
-    assert 'ZoneInfo("Asia/Shanghai")' in bootstrap[guard:worker]
-    assert "if current_release_is_today; then" in bootstrap[guard:worker]
+    assert "https://$Domain/healthz" in deploy_all
+    assert "https://$Domain/);" not in deploy_all
+    assert 'if [ "$HEALTH_CODE" != "200" ]' in bootstrap
+    assert 'if [ "$ADMIN_CODE" != "200" ]' in bootstrap
+    assert '"${COMPOSE[@]}" logs --no-color --tail 100 admin' in bootstrap
 
 
 def test_bootstrap_inline_python_creates_a_consistent_wal_snapshot(tmp_path):

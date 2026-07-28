@@ -1,21 +1,27 @@
 # deploy-all.ps1 -- one-click stage 7 deployment orchestrator (run via deploy.bat).
 # PowerShell 5.1 compatible; ASCII-only source.
 # Flow: ssh-agent (passphrase once) -> tag preflight (never move a published tag) ->
-#       git push (triggers CI on tag) -> wait for GitHub Actions build -> initialize
-#       config/.env only when the server has no runtime config yet ->
+#       git push (triggers CI on tag) -> wait for GitHub Actions build -> leave
+#       API/SMTP runtime configuration server-side for Admin ->
 #       server GHCR login with a READ-ONLY read:packages PAT ->
 #       server-push.ps1 -AutoYes -Version (upload + preflight + bootstrap) -> smoke check.
 
 param(
     [switch]$Elevated,   # internal: set after the interactive UAC relaunch
-    [switch]$Interactive # opt in to prompts; direct deploy-all/Hermes defaults to automation
+    [switch]$Interactive, # opt in to prompts; direct deploy-all/Hermes defaults to automation
+    [string]$Server = $env:ND_SERVER,
+    [string]$KeyPath = $env:ND_KEY_PATH,
+    [string]$Owner = $env:ND_OWNER,
+    [string]$AppDir = $env:ND_APP_DIR,
+    [string]$Domain = $env:ND_DOMAIN,
+    [string]$CertbotEmail = $env:ND_CERTBOT_EMAIL,
+    [string]$WebPort = $env:ND_WEB_PORT,
+    [string]$AdminPort = $env:ND_ADMIN_PORT
 )
 $NoPrompt = -not $Interactive
 
-$KeyPath = "C:\Users\Admin\.ssh\id_ed25519"
-$Server  = "root@cheapcoding.top"
-$Owner   = "yi-lings"
-$AppDir  = "/srv/news-digest"
+if (-not $WebPort) { $WebPort = "8618" }
+if (-not $AdminPort) { $AdminPort = "8619" }
 # $Version is single-sourced from the package below (not hardcoded), so a release
 # version only ever changes in src/news_digest/__init__.py.
 
@@ -23,6 +29,53 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 $RepoDir = Split-Path $PSScriptRoot -Parent
 Set-Location $RepoDir
+
+# Deployment targets are operator-owned. Refuse missing or unsafe values before any
+# SSH, GitHub, tag, config or server operation can run.
+$requiredTargets = [ordered]@{
+    Server = $Server; KeyPath = $KeyPath; Owner = $Owner; AppDir = $AppDir;
+    Domain = $Domain; CertbotEmail = $CertbotEmail
+}
+$missingTargets = @($requiredTargets.Keys | Where-Object { -not "$($requiredTargets[$_])".Trim() })
+if ($missingTargets.Count -gt 0) {
+    Write-Host "[FAIL] Missing deployment targets: $($missingTargets -join ', ')." -ForegroundColor Red
+    Write-Host "       Pass parameters or set ND_SERVER, ND_KEY_PATH, ND_OWNER, ND_APP_DIR, ND_DOMAIN and ND_CERTBOT_EMAIL." -ForegroundColor Red
+    exit 1
+}
+if ($Server -notmatch '^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$') {
+    Write-Host "[FAIL] Invalid SSH target: $Server" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
+    Write-Host "[FAIL] SSH key not found: $KeyPath" -ForegroundColor Red
+    exit 1
+}
+if ($Owner -notmatch '^[a-z0-9][a-z0-9-]*$') {
+    Write-Host "[FAIL] Invalid GHCR owner: $Owner" -ForegroundColor Red
+    exit 1
+}
+if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or $AppDir -match '(^|/)\.\.?(?:/|$)' -or $AppDir -match '//') {
+    Write-Host "[FAIL] Invalid absolute server app directory: $AppDir" -ForegroundColor Red
+    exit 1
+}
+if ($Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$') {
+    Write-Host "[FAIL] Invalid site domain: $Domain" -ForegroundColor Red
+    exit 1
+}
+if ($CertbotEmail -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$') {
+    Write-Host "[FAIL] Invalid certificate email." -ForegroundColor Red
+    exit 1
+}
+foreach ($port in @($WebPort, $AdminPort)) {
+    if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
+        Write-Host "[FAIL] Invalid deploy port: $port" -ForegroundColor Red
+        exit 1
+    }
+}
+if ($WebPort -eq $AdminPort) {
+    Write-Host "[FAIL] WebPort and AdminPort must differ." -ForegroundColor Red
+    exit 1
+}
 
 # In automation, native tools must never open credential/confirmation prompts. PowerShell's
 # -NonInteractive flag does not constrain git/gh/ssh themselves, so disable their prompts too.
@@ -47,10 +100,6 @@ if ($Version -notmatch '^v[A-Za-z0-9_][A-Za-z0-9_.-]{0,126}$') {
     Write-Host "[FAIL] Invalid Docker tag derived from __version__: $Version" -ForegroundColor Red
     exit 1
 }
-if ($Owner -notmatch '^[A-Za-z0-9][A-Za-z0-9-]*$') {
-    Write-Host "[FAIL] Invalid GHCR owner: $Owner" -ForegroundColor Red
-    exit 1
-}
 Write-Host "[i] release version (from __init__.py): $Version"
 
 function Stop-OnError {
@@ -61,43 +110,6 @@ function Stop-OnError {
         if ($Elevated -and -not $NoPrompt) { Read-Host "Press Enter to close" | Out-Null }
         exit $Code
     }
-}
-
-function ConvertFrom-ProjectDotEnvValue {
-    param([string]$Value)
-    $trimmed = $Value.Trim()
-    if ($trimmed.Length -ge 2 -and $trimmed[0] -eq '"' -and $trimmed[$trimmed.Length - 1] -eq '"') {
-        try {
-            $parsed = $trimmed | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed -is [string]) { return $parsed }
-        } catch { }
-    }
-    if ($trimmed.Length -ge 2 -and $trimmed[0] -eq "'" -and $trimmed[$trimmed.Length - 1] -eq "'") {
-        return $trimmed.Substring(1, $trimmed.Length - 2)
-    }
-    return $trimmed
-}
-
-function ConvertFrom-SmtpPasswordEnvValue {
-    param([string]$Value)
-    $prefix = "nd-b64-v1:"
-    if (-not $Value.StartsWith($prefix)) { return $Value }
-    $encoded = $Value.Substring($prefix.Length)
-    if (-not $encoded) { return $Value }
-    try {
-        $decoded = [Convert]::FromBase64String($encoded)
-        if ([Convert]::ToBase64String($decoded) -cne $encoded) { return $Value }
-        $strictUtf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false, $true
-        return $strictUtf8.GetString($decoded)
-    } catch {
-        return $Value
-    }
-}
-
-function ConvertTo-SmtpPasswordEnvValue {
-    param([string]$Value)
-    if (-not $Value) { return "" }
-    return "nd-b64-v1:" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
 }
 
 foreach ($tool in @("ssh", "scp", "git", "gh")) {
@@ -164,6 +176,14 @@ if ($svc) {
                 exit 1
             }
             Write-Host "Enabling ssh-agent needs admin once; relaunching elevated - accept the UAC prompt." -ForegroundColor Yellow
+            $env:ND_SERVER = $Server
+            $env:ND_KEY_PATH = $KeyPath
+            $env:ND_OWNER = $Owner
+            $env:ND_APP_DIR = $AppDir
+            $env:ND_DOMAIN = $Domain
+            $env:ND_CERTBOT_EMAIL = $CertbotEmail
+            $env:ND_WEB_PORT = $WebPort
+            $env:ND_ADMIN_PORT = $AdminPort
             Start-Process powershell -Verb RunAs -ArgumentList @(
                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated", "-Interactive"
             )
@@ -347,107 +367,16 @@ try {
     Remove-Item $digestDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Automation must prove it has the dedicated read:packages PAT BEFORE staging the
-# temporary secret file. Previous timed-out runs may have left .env.incoming behind;
-# remove that deploy-all-owned staging file when the prerequisite is missing.
+# Automation must prove it has the dedicated read:packages PAT before server deployment.
 if ($NoPrompt -and -not $env:ND_GHCR_TOKEN) {
-    & ssh @SshArgs $Server "rm -f '$AppDir/config/.env.incoming'" *> $null
-    Write-Host "[FAIL] ND_GHCR_TOKEN is not set; deployment stopped before staging secrets." -ForegroundColor Red
+    Write-Host "[FAIL] ND_GHCR_TOKEN is not set; deployment stopped before server changes." -ForegroundColor Red
     Write-Host "       Set it to a dedicated read:packages PAT in this process, then retry." -ForegroundColor Red
     exit 1
 }
 
-# ---- [3/6] initialize runtime config once; Admin owns it after installation ----
-Write-Host "[3/6] Checking runtime config ownership..."
-& ssh @SshArgs $Server "test -f '$AppDir/config/.env'"
-$remoteConfigStatus = $LASTEXITCODE
-if ($remoteConfigStatus -eq 0) {
-    & ssh @SshArgs $Server "rm -f '$AppDir/config/.env.incoming'"
-    Stop-OnError $LASTEXITCODE "remove stale incoming runtime config"
-    Write-Host "[i] Existing server config is Admin/operator-owned; deployment will not overwrite it."
-} elseif ($remoteConfigStatus -eq 1) {
-    Write-Host "[i] First installation: staging initial runtime keys from local .env.local..."
-    $envLocal = Join-Path $RepoDir ".env.local"
-    if (-not (Test-Path $envLocal)) {
-        Write-Host "[FAIL] .env.local not found for first-install initialization." -ForegroundColor Red
-        exit 1
-    }
-    $pairs = @{}
-    foreach ($line in Get-Content $envLocal) {
-        $t = "$line".Trim()
-        if (-not $t -or $t.StartsWith("#") -or -not $t.Contains("=")) { continue }
-        $parts = $t.Split("=", 2)
-        $k = $parts[0].Trim()
-        $v = ConvertFrom-ProjectDotEnvValue $parts[1]
-        if ($k -eq "SMTP_PASSWORD") { $v = ConvertFrom-SmtpPasswordEnvValue $v }
-        if ($k) { $pairs[$k] = $v }
-    }
-    $defaults = @{
-        "TRANSLATION_API_TYPE" = "openai_chat"; "TRANSLATION_STREAM" = "true";
-        "EMAIL_DELIVERY_ENABLED" = "false"; "SMTP_USERNAME" = ""; "SMTP_PASSWORD" = "";
-        "SMTP_HOST" = ""; "SMTP_PORT" = "465"; "SMTP_FROM" = ""; "SMTP_RECIPIENTS" = "";
-        "EMAIL_MAINS_ENABLED" = "true"; "EMAIL_BRIEFS_ENABLED" = "true";
-        "EMAIL_MAIN_LIMIT" = "6"; "EMAIL_BRIEF_LIMIT" = "5"; "EMAIL_LANGUAGE" = "bi";
-        "EMAIL_SOURCE_FILTERS" = ""; "EMAIL_LAYOUT" = "digest";
-        "EMAIL_SUMMARY_LENGTH" = "standard"; "EMAIL_CATCHUP_WINDOW_HOURS" = "6";
-        "PUBLIC_SUBSCRIPTION_ENABLED" = "false"
-    }
-    foreach ($key in $defaults.Keys) {
-        if (-not $pairs.ContainsKey($key)) { $pairs[$key] = $defaults[$key] }
-    }
-    if ($pairs["EMAIL_DELIVERY_ENABLED"] -notin @("true", "false")) {
-        Write-Host "[FAIL] EMAIL_DELIVERY_ENABLED must be true or false." -ForegroundColor Red
-        exit 1
-    }
-    if (-not $pairs.ContainsKey("SMTP_SECURITY")) {
-        if ($pairs.ContainsKey("SMTP_USE_TLS") -and $pairs["SMTP_USE_TLS"] -notin @("true", "false")) {
-            Write-Host "[FAIL] legacy SMTP_USE_TLS must be true or false." -ForegroundColor Red
-            exit 1
-        }
-        $pairs["SMTP_SECURITY"] = if ($pairs["SMTP_USE_TLS"] -eq "false") { "starttls" } else { "implicit_tls" }
-    }
-    if ($pairs["SMTP_SECURITY"] -notin @("implicit_tls", "starttls")) {
-        Write-Host "[FAIL] SMTP_SECURITY must be implicit_tls or starttls." -ForegroundColor Red
-        exit 1
-    }
-    $required = @("TRANSLATION_API_BASE_URL", "TRANSLATION_API_KEY", "TRANSLATION_MODEL")
-    if ($pairs["EMAIL_DELIVERY_ENABLED"] -eq "true") {
-        $required += @("SMTP_HOST", "SMTP_PORT", "SMTP_FROM")
-    }
-    $missing = @($required | Where-Object { -not $pairs.ContainsKey($_) -or -not $pairs[$_] })
-    if ($missing.Count -gt 0) {
-        Write-Host "[FAIL] .env.local is missing first-install values: $($missing -join ', ')" -ForegroundColor Red
-        exit 1
-    }
-    $keys = @(
-        "TRANSLATION_API_BASE_URL", "TRANSLATION_API_KEY", "TRANSLATION_MODEL",
-        "TRANSLATION_API_TYPE", "TRANSLATION_STREAM", "EMAIL_DELIVERY_ENABLED",
-        "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_SECURITY",
-        "SMTP_FROM", "SMTP_RECIPIENTS", "EMAIL_MAINS_ENABLED", "EMAIL_BRIEFS_ENABLED",
-        "EMAIL_MAIN_LIMIT", "EMAIL_BRIEF_LIMIT", "EMAIL_LANGUAGE", "EMAIL_SOURCE_FILTERS",
-        "EMAIL_LAYOUT", "EMAIL_SUMMARY_LENGTH", "EMAIL_CATCHUP_WINDOW_HOURS",
-        "PUBLIC_SUBSCRIPTION_ENABLED"
-    )
-    $lines = @("# first-install runtime keys; Admin/operator owns config/.env after bootstrap")
-    $lines += "NEWS_SITE_URL=https://news.cheapcoding.top"
-    $pairs["SMTP_PASSWORD"] = ConvertTo-SmtpPasswordEnvValue $pairs["SMTP_PASSWORD"]
-    foreach ($key in $keys) { $lines += "$key=$($pairs[$key])" }
-    $tmp = [IO.Path]::GetTempFileName()
-    try {
-        [IO.File]::WriteAllText($tmp, (($lines -join "`n") + "`n"))
-        & ssh @SshArgs $Server "mkdir -p $AppDir/config && chmod 750 $AppDir/config"
-        Stop-OnError $LASTEXITCODE "ssh mkdir config dir"
-        & scp @ScpArgs $tmp "${Server}:$AppDir/config/.env.incoming"
-        Stop-OnError $LASTEXITCODE "scp .env.incoming"
-        & ssh @SshArgs $Server "chmod 600 $AppDir/config/.env.incoming"
-        Stop-OnError $LASTEXITCODE "chmod .env.incoming"
-    } finally {
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host "[i] Initial runtime config staged; later deployments preserve server values."
-} else {
-    Stop-OnError $remoteConfigStatus "check server runtime config"
-}
+# ---- [3/6] runtime settings remain on the server and are managed through Admin ----
+Write-Host "[3/6] Runtime configuration will remain server-side."
+Write-Host "[i] Bootstrap creates disabled API/SMTP defaults on first install; deploy-all never reads or transfers local runtime secrets."
 
 # ---- [4/6] install and verify a dedicated READ-ONLY server credential ----
 # P0-3 deliberately forbids reusing an unknown old Docker credential: registry access
@@ -496,13 +425,15 @@ Write-Host "[i] GHCR credential can read both exact $Version images."
 # built/pushed, instead of server-push falling back to its own hardcoded default.
 Write-Host "[5/6] Running server-push (upload + preflight + bootstrap)..."
 & (Join-Path $PSScriptRoot "server-push.ps1") -AutoYes -NoPrompt:$NoPrompt `
-    -Version $Version -WorkerDigest $WorkerDigest -WebDigest $WebDigest
+    -Version $Version -WorkerDigest $WorkerDigest -WebDigest $WebDigest `
+    -Server $Server -KeyPath $KeyPath -Owner $Owner -AppDir $AppDir `
+    -Domain $Domain -CertbotEmail $CertbotEmail -WebPort $WebPort -AdminPort $AdminPort
 Stop-OnError $LASTEXITCODE "server-push"
 
 # ---- [6/6] smoke check: every failure is fatal; print DONE only after all checks ----
 Write-Host "[6/6] Final smoke check..."
 $smokeCommand = "set -e; " +
-    "code=`$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' https://news.cheapcoding.top/); " +
+    "code=`$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' https://$Domain/healthz); " +
     "test `"`$code`" = 200; echo `"https status: `$code`"; " +
     "systemctl is-enabled --quiet news-digest.timer; " +
     "systemctl is-active --quiet news-digest.timer; " +
@@ -511,6 +442,6 @@ $smokeCommand = "set -e; " +
 Stop-OnError $LASTEXITCODE "final smoke check"
 
 Write-Host ""
-Write-Host "[DONE] https://news.cheapcoding.top/  (daily rebuild: 08:00 Asia/Shanghai)"
+Write-Host "[DONE] https://$Domain/admin/  (configure API/SMTP in Admin; automatic email remains disabled by default)"
 if ($Elevated -and -not $NoPrompt) { Read-Host "Press Enter to close" | Out-Null }
 exit 0
