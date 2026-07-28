@@ -712,9 +712,9 @@ Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停�
 
 ### 阶段 8：v1.2.0 全自动逐篇翻译、增量上线与翻译监控
 
-状态：`v1.2.2 已于 2026-07-28 完成服务器部署与人工验收；等待 2026-07-29 08:00 自动刷新、逐篇翻译、增量上线和自动投递实证。`
+状态：`v1.2.2 已于 2026-07-28 完成服务器部署与人工验收；v1.2.3 为部署链开源修复版本，生产服务器仍保持 v1.2.2，等待 2026-07-29 08:00 自动刷新、逐篇翻译、增量上线和自动投递实证。`
 
-版本目标：`v1.2.0` 功能线；生产补丁版本为 `v1.2.2`。
+版本目标：`v1.2.0` 功能线；当前开源补丁版本为 `v1.2.3`。
 
 主流程固定为：
 
@@ -920,7 +920,7 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 - 每个阶段使用独立分支，例如 `phase/1-ui`、`phase/2-sources`。
 - 阶段验收通过后合并到 `main` 并创建 `phase-N-accepted` 标签。
 - 仓库不得提交 `.env.local`、API Key、SMTP 密码、数据库、生成站点、邮件、缓存或日志。
-- 发布后部署链开源整治于 2026-07-28 完成：`deploy-all.ps1`、`server-push.ps1` 与 `deploy.bat` 已移除个人服务器、SSH key、GHCR owner、目录、域名和证书邮箱默认值；公开入口通过参数或 `ND_*` 环境变量接收部署目标，缺参在外部操作前失败，个人生产值改由仓库外 wrapper/config 持有。`install.sh`、`preflight.sh`、`bootstrap.sh` 同步使用同一目标和端口；静态测试验证发布工件不含个人 SSH 目标、本机用户路径或个人邮箱，且批处理参数完整透传。本项纳入本次 `main` 开源迭代，不改动已发布的 `v1.2.2` tag、Release、digest 或服务器。
+- 发布后部署链开源整治于 2026-07-28 完成：`deploy-all.ps1`、`server-push.ps1` 与 `deploy.bat` 已移除个人服务器、SSH key、GHCR owner、目录、域名和证书邮箱默认值；公开入口通过参数或 `ND_*` 环境变量接收部署目标，缺参在外部操作前失败，个人生产值改由仓库外 wrapper/config 持有。`install.sh`、`preflight.sh`、`bootstrap.sh` 同步使用同一目标和端口；静态测试验证发布工件不含个人 SSH 目标、本机用户路径或个人邮箱，且批处理参数完整透传。本项通过新补丁版本 `v1.2.3` 发布，不移动已发布的 `v1.2.2` tag、Release、digest，也不自动升级生产服务器。
 - 数据库 schema 变更必须有版本记录和向前迁移；生产回滚不得盲目回退数据库文件。
 - 本地原子发布保留上一完整站点目录；生产部署保留上一镜像 digest 和站点版本。
 - 生产 Compose 固定不可变镜像 digest，不使用 `latest` 或可被覆盖的 tag 作为唯一标识。
@@ -1000,4 +1000,5 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 | 2026-07-28 | 阶段 8 | v1.2.2 部署验收通过，等待自动链路实证 | 用户确认服务器部署和当日人工验收成功；不再改动已发布 tag/digest 或服务器。下一门禁是 2026-07-29 08:00 定时任务实际完成刷新、逐篇翻译、增量上线及单次自动投递。 |
 | 2026-07-28 | 发布后整治 | 部署链开源参数化完成 | 以 v1.2.2 `main` 为基线移除 Windows 部署入口的个人生产默认值，并贯通 install/preflight/bootstrap 目标与端口；缺参和非法值均在联网或服务器写操作前失败，`deploy.bat` 实测完整透传。最终离线全量 `573 passed, 1 skipped, 7 deselected(network)`，Ruff、PowerShell AST、Git Bash `-n` 与 diff check 通过；相关改动纳入本次 `main` 开源迭代，不创建新 tag、Release 或生产部署。 |
 | 2026-07-28 | 发布后整治 | WSL 全新部署与幂等复跑通过 | 在隔离的 Ubuntu 24.04 + Docker 29.1.3 + Compose 2.40.3 + Nginx 1.24 环境，以 v1.2.2 公开 digest 从空目录真实执行 bootstrap 并原样复跑，再由 Windows `server-push.ps1` 经真实 SSH/SCP 完整部署并原样复跑，所有完整执行均返回 0；Web `/healthz` 与 Admin `/admin/` 均为 HTTP 200，容器 restart count 为 0，timer 仅排到次日 08:00，`news-digest.service` 无部署期运行记录。实测修复三项一键阻断：共享 SQLite volume 统一为 GID 10001、setgid、组可写，Admin 非默认端口正确渲染 `--port`，以及 preflight 在幂等复跑时精确放行由现有 Compose Web/Admin service 占用的端口；首次 `.env` 的 API/SMTP 为空，自动投递与公开订阅关闭，不生成 `providers.json` 或 `.env.incoming`，部署不执行抓取、翻译、构建或投递。certbot 因本地无公网 DNS 无法完成真实签发，其余 SSH/SCP、Docker/systemd/Nginx/镜像流程均真实执行；测试 timer 已禁用，相关部署资产与回归随本次开源迭代纳入 `main`，不改动已发布的 v1.2.2 tag/digest 或生产部署。 |
+| 2026-07-28 | 发布后整治 | v1.2.3 开源部署修复发布 | 保留 v1.2.2 tag、Release 与生产 digest 不可变；以新补丁版本发布参数化部署链、通用 README/运维文档、新版产品截图和部署回归，使 GitHub Latest Release 的部署包包含本次全部修复。生产服务器不随本次 GitHub Release 自动升级。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前正式版：`v1.2.2`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
+当前正式版：`v1.2.3`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
 
 ## 产品能力
 
