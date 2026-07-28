@@ -192,6 +192,49 @@ def test_isolated_automation_retries_only_failed_article_and_delivers_once(tmp_p
     assert all(task.status == "succeeded" and task.build_status == "online" for task in tasks)
 
 
+def test_delivery_callback_exception_releases_claim_for_retry(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    build = BuildHarness(database, tmp_path / "site")
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=build,
+        delivery_callback=lambda date, key: (_ for _ in ()).throw(
+            RuntimeError("fixture delivery failure")
+        ),
+    )
+    runner.seed_edition(
+        DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at()
+    )
+    assert runner.run_ready(now=_at(1), owner="worker-a").succeeded == 1
+    assert runner.flush_build(now=_at(2), owner="builder-a", force=True)
+
+    assert not runner.flush_delivery(now=_at(3))
+    conn = db.connect(database)
+    try:
+        failed = db.automation_edition(conn, "2026-07-28")
+    finally:
+        conn.close()
+    assert failed is not None
+    assert failed.status == "complete"
+    assert failed.delivery_key is None
+    assert failed.last_error_code == "DELIVERY_FAILED"
+
+    calls: list[tuple[str, str]] = []
+    restarted = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=build,
+        delivery_callback=lambda date, key: calls.append((date, key)) or True,
+    )
+    assert restarted.flush_delivery(now=_at(4))
+    assert len(calls) == 1
+
+
 def test_provider_circuit_uses_one_real_task_for_automatic_half_open(tmp_path):
     database = tmp_path / "data" / "news.db"
     calls = Counter()

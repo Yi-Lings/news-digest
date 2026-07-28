@@ -518,7 +518,7 @@ class TranslationAutomationRunner:
         try:
             delivered = self.delivery_callback(edition_date, delivery_key)
         except Exception:
-            return False
+            delivered = False
         completed_at = self._completion_timestamp(now)
         conn = db.connect(self.database)
         try:
