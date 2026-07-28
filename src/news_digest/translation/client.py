@@ -7,6 +7,7 @@ import queue
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -24,6 +25,8 @@ _MAX_RETRY_AFTER_SECONDS = 5.0
 _PROBE_MAX_TOKENS = 8
 _CONNECT_TIMEOUT_SECONDS = 10.0
 _READ_TIMEOUT_SECONDS = 30.0
+_TERMINATION_GRACE_SECONDS = 1.0
+_CANCEL_POLL_SECONDS = 0.1
 
 
 class TranslationError(RuntimeError):
@@ -37,6 +40,7 @@ class TranslationError(RuntimeError):
         status: int | None = None,
         response_started: bool = False,
         retry_after: float | None = None,
+        termination_confirmed: bool = True,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -44,6 +48,7 @@ class TranslationError(RuntimeError):
         self.status_code = status  # 保留既有调用方兼容性
         self.response_started = response_started
         self.retry_after = retry_after
+        self.termination_confirmed = termination_confirmed
 
 
 @dataclass(frozen=True)
@@ -454,6 +459,7 @@ class ApiTranslator:
         self._resolver = resolver
         self._state_lock = threading.Lock()
         self._active_clients: set[httpx.Client] = set()
+        self._unresolved_workers: set[threading.Thread] = set()
         self._closed = False
 
     def _new_client(self) -> httpx.Client:
@@ -505,6 +511,20 @@ class ApiTranslator:
             timeout_seconds=timeout_seconds,
         )
 
+    def translate_with_cancel(
+        self,
+        article: Article,
+        *,
+        cancel_requested: Callable[[], bool],
+    ) -> str:
+        """Translate while polling the durable task cancellation flag."""
+        return self._request_text(
+            SYSTEM_PROMPT,
+            build_user_prompt(article),
+            max_tokens=self._config.max_tokens,
+            cancel_requested=cancel_requested,
+        )
+
     def probe(self) -> str:
         """恰好执行一次固定 ``Hi`` 的小输出协议探测，不重试。"""
         return self._request_text(
@@ -520,6 +540,7 @@ class ApiTranslator:
         *,
         max_tokens: int,
         timeout_seconds: float | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> str:
         total_timeout = self._config.timeout_seconds
         if timeout_seconds is not None:
@@ -529,6 +550,15 @@ class ApiTranslator:
         with self._state_lock:
             if self._closed:
                 raise TranslationError("翻译客户端已关闭", category="configuration")
+            self._unresolved_workers = {
+                worker for worker in self._unresolved_workers if worker.is_alive()
+            }
+            if self._unresolved_workers:
+                raise TranslationError(
+                    "上一次翻译请求尚未确认终止",
+                    category="termination_unconfirmed",
+                    termination_confirmed=False,
+                )
 
         outcome: queue.SimpleQueue[tuple[bool, str | BaseException]] = queue.SimpleQueue()
         response_started = threading.Event()
@@ -573,22 +603,73 @@ class ApiTranslator:
 
         worker = threading.Thread(target=request, daemon=True)
         worker.start()
-        try:
-            succeeded, value = outcome.get(timeout=total_timeout)
-        except queue.Empty:
-            cancelled.set()
-            with holder_lock:
-                client = holder.get("client")
-            if client is not None:
-                threading.Thread(target=client.close, daemon=True).start()
-            raise TranslationError(
-                "翻译接口请求超过硬总时限",
-                category="total_timeout",
-                response_started=response_started.is_set(),
-            ) from None
+        deadline = time.monotonic() + total_timeout
+        while True:
+            if cancel_requested is not None:
+                try:
+                    should_cancel = bool(cancel_requested())
+                except Exception:
+                    should_cancel = False
+                if should_cancel:
+                    confirmed = self._terminate_request(
+                        worker, cancelled, holder, holder_lock
+                    )
+                    raise TranslationError(
+                        "翻译请求已取消" if confirmed else "翻译请求终止状态无法确认",
+                        category=(
+                            "request_cancelled" if confirmed else "termination_unconfirmed"
+                        ),
+                        response_started=response_started.is_set(),
+                        termination_confirmed=confirmed,
+                    ) from None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    succeeded, value = outcome.get_nowait()
+                    break
+                except queue.Empty:
+                    confirmed = self._terminate_request(
+                        worker, cancelled, holder, holder_lock
+                    )
+                    raise TranslationError(
+                        (
+                            "翻译接口请求超过硬总时限"
+                            if confirmed
+                            else "翻译请求终止状态无法确认"
+                        ),
+                        category=("total_timeout" if confirmed else "termination_unconfirmed"),
+                        response_started=response_started.is_set(),
+                        termination_confirmed=confirmed,
+                    ) from None
+            try:
+                succeeded, value = outcome.get(
+                    timeout=min(remaining, _CANCEL_POLL_SECONDS)
+                )
+                break
+            except queue.Empty:
+                continue
         if succeeded:
             return str(value)
         raise value
+
+    def _terminate_request(
+        self,
+        worker: threading.Thread,
+        cancelled: threading.Event,
+        holder: dict[str, httpx.Client],
+        holder_lock: threading.Lock,
+    ) -> bool:
+        cancelled.set()
+        with holder_lock:
+            client = holder.get("client")
+        if client is not None:
+            threading.Thread(target=client.close, daemon=True).start()
+        worker.join(_TERMINATION_GRACE_SECONDS)
+        if worker.is_alive():
+            with self._state_lock:
+                self._unresolved_workers.add(worker)
+            return False
+        return True
 
     def _request_text_blocking(
         self,

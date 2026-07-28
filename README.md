@@ -76,6 +76,38 @@ cat /srv/news-digest/config/admin-password.initial
 - **管理订阅**：查看脱敏订阅状态；公开表单采用 double opt-in，一键退订后不能在面板直接复活
 - **改面板口令**：需要输入当前口令；改完所有已登录的浏览器都会下线，重新登录即可
 
+### Admin 翻译监控与错误处理（v1.2.0）
+
+“翻译状态”固定在“订阅管理”和“投递状态”之间。顶部显示刊期、最后更新时间、provider 并发与队列、连续失败次数及熔断状态；摘要和筛选可分别查看全部、运行中、待重试、失败和已上线任务。任务行显示当前阶段、尝试次数、HTTP 状态、内部错误代码、失败阶段、下一次重试时间和脱敏诊断 ID，不显示文章正文、API 地址、密钥或完整 provider 响应。
+
+- **立即重试**：只把当前失败文章加入队列并跳过剩余等待时间；任务仍需取得原子 lease，重复点击和多管理员并发不会创建第二个请求。
+- **终止请求**：仅对运行中任务可用。确认后先请求执行体停止，确认旧请求已经结束后才记录 `REQUEST_CANCELLED` 并安排该篇重试。
+- **立即探测**：同一 provider 连续 5 次基础设施失败后熔断；自动探测依次等待 60 秒、2 分钟、5 分钟，管理员也可选择一篇失败文章执行一次受控正式 schema 探测。同一 provider 同时只允许一个探测 lease。
+- **配置恢复**：遇到 `AUTH_401`、`AUTH_403` 或 `CONFIGURATION_INVALID` 时，按“修正并保存 provider 配置 → 执行小型正式 schema 测试 → 在翻译状态中手动恢复”的顺序处理，不要用重复重试代替配置验证。
+
+| 内部错误代码 | 含义 | 系统动作 | 管理员处置 |
+|---|---|---|---|
+| `AUTH_401` | API 凭据无效 | 配置阻断，不自动重试 | 修正凭据并完成受控测试 |
+| `AUTH_403` | 接口或模型无权限 | 配置阻断，不自动重试 | 检查账号与模型权限 |
+| `RATE_LIMIT_429` | provider 限流 | 单篇退避并计入熔断 | 等待恢复或受控探测 |
+| `PROVIDER_5XX` | provider 服务异常 | 单篇退避并计入熔断 | 等待恢复或受控探测 |
+| `NETWORK_CONNECT_FAILED` | 网络连接失败 | 单篇退避并计入熔断 | 检查网络、代理与 DNS |
+| `REQUEST_TIMEOUT` | 请求超时 | 旧请求终止后单篇退避并计入熔断 | 确认旧请求已结束，再等待或探测 |
+| `EMPTY_RESPONSE` | 响应为空 | 只重试当前文章 | 等待或立即重试该篇 |
+| `UNPARSEABLE_RESPONSE` | 响应无法解析 | 只重试当前文章 | 检查协议与模型兼容性 |
+| `SCHEMA_VALIDATION_FAILED` | 正式翻译 schema 不合格 | 只重试当前文章，不计入熔断 | 立即重试该篇或检查模型兼容性 |
+| `CONFIGURATION_INVALID` | 配置缺失或冲突 | 配置阻断，不自动探测 | 修正、保存并测试配置 |
+| `REQUEST_CANCELLED` | 管理员终止请求 | 确认执行体停止后进入待重试 | 确认原因后恢复该篇 |
+| `CIRCUIT_OPEN` | provider 已熔断 | 暂停新翻译，不影响站点和 Admin | 等待冷却或立即探测 |
+
+本地验收必须显式使用隔离 fake demo；该模式使用独立 SQLite 和固定 fixture，不调用 provider 或 SMTP：
+
+```powershell
+uv run news-digest preview --port 8618 --automation-demo
+```
+
+禁止连续点击重试、直接修改任务数据库、绕过任务 lease，或在日志、截图和工单中暴露秘密、文章正文及完整 provider 响应。
+
 公开订阅默认关闭。确认生产 HTTPS、SMTP、发件人和全局邮件投递均可用后，在服务器 `config/.env` 设置 `PUBLIC_SUBSCRIPTION_ENABLED=true` 并重新构建站点；Admin 逐请求读取该开关，无需重启。隐私说明位于 `/privacy/`。
 
 正式刊物邮件仅发送 UTF-8 纯文本，Admin 中的 HTML 只用于页面预览，不进入 SMTP；邮件仍含标准一键退订头。SMTP 部分拒收会逐收件人记录；连接在 DATA 后中断时标为 `unknown`，系统不会自动重发，避免可能已经送达的邮件重复出现。

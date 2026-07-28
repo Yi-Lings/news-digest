@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
         "preview", help="本地预览站点并提供模型供应商切换面板（仅 127.0.0.1）"
     )
     preview.add_argument("--port", type=int, default=8618)
+    preview.add_argument(
+        "--automation-demo",
+        action="store_true",
+        help="启用隔离的阶段 8 fake automation 状态（不调用 provider 或 SMTP）",
+    )
 
     preview_email = subparsers.add_parser(
         "preview-email", help="生成当日简报邮件预览（.eml + .html 到 var/mail，不联网）"
@@ -122,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _run_daily(args.window_hours, args.yes)
     if args.command == "preview":
-        return _run_preview(args.port)
+        return _run_preview(args.port, automation_demo=args.automation_demo)
     if args.command == "preview-email":
         return _run_preview_email(args.date)
     if args.command == "admin":
@@ -500,6 +505,9 @@ def _run_daily(window_hours: int | None, yes: bool) -> int:
     if edition is None:
         print("抓取无结果；继续用数据库既有内容构建。")
 
+    if yes:
+        return _run_automation_daily(fetch_config, edition)
+
     print("[2/4] 翻译")
     exit_code = 0
     if not yes:
@@ -583,6 +591,141 @@ def _run_daily(window_hours: int | None, yes: bool) -> int:
     )
     print("本地预览：双击 preview.bat")
     return exit_code if delivery.succeeded else 1
+
+
+def _run_automation_daily(
+    fetch_config,
+    fetched_edition,
+    *,
+    clock=None,
+    sleep=None,
+) -> int:
+    import datetime as dt
+    import time
+
+    from news_digest.config import (
+        build_config_from_env,
+        email_delivery_enabled_from_env,
+        smtp_config_from_env,
+    )
+    from news_digest.delivery.delivery_service import (
+        DeliveryServiceError,
+        deliver_published,
+    )
+    from news_digest.models import DailyEdition
+    from news_digest.pipeline import (
+        build_editions,
+        latest_db_date,
+        load_db_editions,
+        selected_mains_for_translation,
+    )
+    from news_digest.storage import db
+    from news_digest.translation.automation import TranslationAutomationRunner
+    from news_digest.translation.client import ApiTranslator, TranslationError
+
+    date = getattr(fetched_edition, "date", None) or latest_db_date(fetch_config)
+    if date is None:
+        print("数据库无内容；无法创建逐篇翻译任务。")
+        return 1
+    edition = selected_mains_for_translation(fetch_config, date)
+    if edition is None or not edition.articles:
+        print(f"{date} 没有可翻译的主文章")
+        return 1
+    try:
+        translation_config = _runtime_translation_config()
+        translator = ApiTranslator(translation_config)
+        delivery_enabled = email_delivery_enabled_from_env()
+        smtp = smtp_config_from_env() if delivery_enabled else None
+    except (TranslationError, ValueError) as error:
+        print(f"自动化配置错误：{error}")
+        return 1
+
+    build_config = build_config_from_env()
+
+    def build_callback(edition_date: str) -> str:
+        editions = load_db_editions(fetch_config)
+        visible_editions = []
+        for current in editions:
+            if current.date != edition_date:
+                visible_editions.append(current)
+                continue
+            visible = [article for article in current.articles if article.translated_by]
+            visible_editions.append(
+                DailyEdition(
+                    date=current.date,
+                    articles=visible,
+                    briefs=current.briefs,
+                )
+            )
+        release = build_editions(visible_editions, build_config)
+        print(f"增量构建完成：{release.name}")
+        return release.name
+
+    def delivery_callback(edition_date: str, delivery_key: str) -> bool:
+        del delivery_key
+        report = deliver_published(
+            "auto",
+            output_root=build_config.output_root,
+            database=fetch_config.database,
+            site_url=build_config.site_url,
+            timezone=fetch_config.timezone,
+            smtp_config=smtp,
+            edition_date=edition_date,
+        )
+        print(
+            f"自动投递：成功 {report.sent_count}，失败 {report.failed_count}，"
+            f"unknown {report.unknown_count}，跳过 {report.skipped_count}"
+        )
+        return report.succeeded or (not delivery_enabled and report.status == "skipped")
+
+    clock = clock or (lambda: dt.datetime.now(dt.UTC))
+    sleep = sleep or time.sleep
+    runner = TranslationAutomationRunner(
+        database=fetch_config.database,
+        provider_id=f"default-{translator.cache_identity[:64]}",
+        translator=translator,
+        cache_dir=translation_config.cache_dir,
+        build_callback=build_callback,
+        delivery_callback=delivery_callback,
+        clock=clock,
+    )
+    owner = f"daily-{os.getpid()}"
+    runner.seed_edition(edition, now=clock())
+    print(f"[2/4] 逐篇翻译自动化：{date}，任务 {len(edition.articles)} 篇")
+    try:
+        while True:
+            now = clock()
+            result = runner.run_ready(now=now, owner=owner, max_tasks=1)
+            built = runner.flush_build(now=clock(), owner=owner)
+            delivered = runner.flush_delivery(now=clock())
+            conn = db.connect(fetch_config.database)
+            try:
+                state = db.automation_edition(conn, date)
+                tasks = db.list_translation_tasks(conn, date)
+            finally:
+                conn.close()
+            if state is not None and state.status == "delivered":
+                return 0
+            if any(
+                task.status == "configuration_blocked"
+                or (task.status == "failed" and not task.auto_retry)
+                for task in tasks
+            ):
+                print("自动化已安全停止：存在需要人工处理的翻译任务。")
+                return 1
+            if state is not None and state.status == "complete" and not delivered:
+                print("自动投递失败；保留持久状态，未重复投递。")
+                return 1
+            if state is not None and state.status == "build_failed" and not built:
+                print("增量构建失败；旧站点保持不变。")
+                return 1
+            if not (result.claimed or built or delivered):
+                sleep(1.0)
+    except (DeliveryServiceError, KeyboardInterrupt, ValueError) as error:
+        print(f"自动化已停止：{error}")
+        return 130 if isinstance(error, KeyboardInterrupt) else 1
+    finally:
+        translator.close()
 
 
 def _run_import(file: Path) -> int:
@@ -686,7 +829,7 @@ def _run_admin(port: int, config_dir: Path) -> int:
     return 0
 
 
-def _run_preview(port: int) -> int:
+def _run_preview(port: int, *, automation_demo: bool = False) -> int:
     from news_digest.config import (
         build_config_from_env,
         fetch_config_from_env,
@@ -699,10 +842,25 @@ def _run_preview(port: int) -> int:
     build_config = build_config_from_env()
     fetch_config = fetch_config_from_env()
     site_dir = build_config.output_root / "current"
+    demo = None
+    if automation_demo:
+        from news_digest.translation.demo import (
+            TranslationAutomationDemo,
+            build_demo_edition,
+        )
+
+        demo_root = root / "var" / "data"
+        demo = TranslationAutomationDemo(
+            demo_root / f"automation-demo-{port}.db",
+            build_demo_edition(),
+            demo_root / f"automation-demo-{port}-cache",
+        )
     if not (site_dir / "index.html").is_file():
         print(f"提示：{site_dir} 尚无站点，先运行 build（或双击 daily.bat）")
     print(f"站点预览：http://127.0.0.1:{port}/")
     print(f"模型设置：http://127.0.0.1:{port}/admin/")
+    if demo is not None:
+        print("翻译自动化：已启用隔离 fake demo（不会调用 provider 或 SMTP）。")
     print("按 Ctrl+C 停止。")
     server = create_server(
         root,
@@ -714,7 +872,11 @@ def _run_preview(port: int) -> int:
         timezone=fetch_config.timezone,
         public_subscription_enabled=build_config.public_subscription_enabled,
         loopback_public_subscription=build_config.public_subscription_enabled,
+        translation_db_path=demo.database if demo is not None else None,
+        translation_wakeup_callback=demo.wakeup if demo is not None else None,
     )
+    if demo is not None:
+        demo.wakeup()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

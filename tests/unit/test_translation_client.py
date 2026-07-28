@@ -212,7 +212,7 @@ def test_missing_config_raises():
         ApiTranslator(_config(api_key=""))
 
 
-def test_request_has_hard_total_deadline():
+def test_request_timeout_waits_until_worker_termination_is_confirmed():
     def slow(request):
         time.sleep(0.05)
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
@@ -222,11 +222,13 @@ def test_request_has_hard_total_deadline():
     with pytest.raises(TranslationError) as excinfo:
         translator.probe()
     assert excinfo.value.category == "total_timeout"
-    assert time.monotonic() - started < 0.04
+    assert excinfo.value.termination_confirmed is True
+    assert 0.04 <= time.monotonic() - started < 0.2
 
 
-def test_hard_total_deadline_does_not_wait_for_blocking_client_close(monkeypatch):
+def test_unconfirmed_timeout_blocks_follow_up_request(monkeypatch):
     release = threading.Event()
+    calls = 0
 
     class BlockingClient:
         def close(self):
@@ -238,18 +240,24 @@ def test_hard_total_deadline_does_not_wait_for_blocking_client_close(monkeypatch
         timeout_seconds=0.01,
     )
     monkeypatch.setattr(translator, "_new_client", BlockingClient)
-    monkeypatch.setattr(
-        translator,
-        "_request_text_blocking",
-        lambda *args, **kwargs: release.wait(1.0),
-    )
+    def request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        release.wait(1.0)
+        return "ok"
 
-    started = time.monotonic()
+    monkeypatch.setattr(translator, "_request_text_blocking", request)
+    monkeypatch.setattr("news_digest.translation.client._TERMINATION_GRACE_SECONDS", 0.01)
+
     try:
         with pytest.raises(TranslationError) as excinfo:
             translator.probe()
-        assert excinfo.value.category == "total_timeout"
-        assert time.monotonic() - started < 0.05
+        assert excinfo.value.category == "termination_unconfirmed"
+        assert excinfo.value.termination_confirmed is False
+        with pytest.raises(TranslationError) as blocked:
+            translator.probe()
+        assert blocked.value.category == "termination_unconfirmed"
+        assert calls == 1
     finally:
         release.set()
 
@@ -301,7 +309,7 @@ def test_close_does_not_wait_for_blocking_active_client():
         release.set()
 
 
-def test_hard_total_deadline_includes_dns_resolution():
+def test_dns_timeout_waits_until_worker_termination_is_confirmed():
     def slow_resolver(hostname, port):
         time.sleep(0.05)
         return ["93.184.216.34"]
@@ -311,25 +319,61 @@ def test_hard_total_deadline_includes_dns_resolution():
     with pytest.raises(TranslationError) as excinfo:
         translator.probe()
     assert excinfo.value.category == "total_timeout"
-    assert time.monotonic() - started < 0.04
+    assert excinfo.value.termination_confirmed is True
+    assert 0.04 <= time.monotonic() - started < 0.2
 
 
-def test_hard_timeout_does_not_break_the_next_request():
+def test_confirmed_hard_timeout_allows_next_request(monkeypatch):
     calls = 0
+    release = threading.Event()
 
     def handler(request):
         nonlocal calls
         calls += 1
         if calls == 1:
-            time.sleep(0.05)
+            release.wait(1.0)
         return httpx.Response(200, json=_openai_non_stream("ok"))
 
     translator = _translator(handler, stream=False, timeout_seconds=0.01)
+    original_new_client = translator._new_client
+
+    class ClosingClient:
+        def __init__(self):
+            self.inner = original_new_client()
+
+        def close(self):
+            release.set()
+            self.inner.close()
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    monkeypatch.setattr(translator, "_new_client", ClosingClient)
     with pytest.raises(TranslationError, match="硬总时限") as excinfo:
         translator.probe()
     assert excinfo.value.category == "total_timeout"
+    assert excinfo.value.termination_confirmed is True
     assert translator.probe() == "ok"
     assert calls == 2
+
+
+def test_cancelled_request_must_confirm_worker_termination(monkeypatch):
+    release = threading.Event()
+
+    def blocking(request):
+        release.wait(1.0)
+        return httpx.Response(200, json=_openai_non_stream("ok"))
+
+    translator = _translator(blocking, stream=False, timeout_seconds=1.0)
+    monkeypatch.setattr("news_digest.translation.client._TERMINATION_GRACE_SECONDS", 0.01)
+
+    try:
+        with pytest.raises(TranslationError) as excinfo:
+            translator.translate_with_cancel(_article(), cancel_requested=lambda: True)
+        assert excinfo.value.category == "termination_unconfirmed"
+        assert excinfo.value.termination_confirmed is False
+    finally:
+        release.set()
 
 
 def test_stream_hard_total_deadline_preserves_response_started():

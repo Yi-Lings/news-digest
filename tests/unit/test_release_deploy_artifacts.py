@@ -2,7 +2,13 @@ import re
 import sqlite3
 from pathlib import Path
 
+from news_digest import __version__
+
 ROOT = Path(__file__).parents[2]
+
+
+def test_phase_8_release_version_is_v1_2_0():
+    assert __version__ == "1.2.0"
 
 
 def _read(path: str) -> str:

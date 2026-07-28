@@ -2615,7 +2615,7 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
         "data.next_schedule",
     ):
         assert field_name in ADMIN_HTML
-    for label in ("模型接口", "邮件设置", "订阅管理", "投递状态"):
+    for label in ("模型接口", "邮件设置", "订阅管理", "翻译状态", "投递状态"):
         assert label in ADMIN_HTML
     for action in (
         "测试连接",
@@ -2630,11 +2630,12 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert "prefers-reduced-motion: no-preference" in lowered
     assert "aria-selected" in lowered
     assert 'role="tablist"' in lowered
-    assert lowered.count('role="tab"') == 4
-    assert lowered.count('role="tabpanel"') == 4
+    assert lowered.count('role="tab"') == 5
+    assert lowered.count('role="tabpanel"') == 5
     assert 'aria-controls="models"' in lowered
     assert 'aria-controls="mail"' in lowered
     assert 'aria-controls="subscriptions"' in lowered
+    assert 'aria-controls="translations"' in lowered
     assert 'aria-controls="delivery"' in lowered
     assert 'node.classname = "data-table"' in lowered
     assert "cell.dataset.label = headers[index]" in ADMIN_HTML

@@ -119,6 +119,8 @@ a:hover { text-decoration-color: var(--cinnabar); }
   font-size: 0.8125rem; color: var(--gloss); text-align: center;
 }
 .dateline-sep { margin: 0 0.4rem; color: var(--rule); }
+.issue-meta, .issue-meta-line { display: flex; align-items: center; justify-content: center; }
+.issue-meta-unit { white-space: nowrap; }
 
 .topnav {
   display: flex; align-items: center; justify-content: space-between; gap: 1rem;
@@ -201,6 +203,7 @@ html[data-mode="zh"] .card-title a:hover .lang-zh { color: var(--cinnabar); }
   display: grid; grid-template-columns: 1.8fr 1fr; gap: 2rem;
   padding-bottom: 1.8rem; border-bottom: 1px solid var(--rule);
 }
+.front > * { min-width: 0; }
 
 .front-side {
   display: flex; flex-direction: column; gap: 1.5rem;
@@ -610,6 +613,9 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   .demo-stamp { font-size: 0.8125rem; right: 0.5rem; top: 0.5rem; }
   .page { padding: 1.2rem 1rem 2.4rem; }
   .kicker-rule { width: 2rem; }
+  .issue-meta { display: grid; justify-items: center; gap: 0.15rem; line-height: 1.45; letter-spacing: 0; }
+  .issue-meta-divider { display: none; }
+  .issue-meta-line { min-width: 0; }
   .subscribe { padding: 1.3rem 1rem; }
   .subscribe-fields { display: grid; gap: 0.5rem; }
 }

@@ -7,6 +7,7 @@
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,43 @@ class TranslateReport:
 
 def _result_from_dict(data: dict, paragraph_count: int) -> TranslationResult:
     return parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count)
+
+
+def translate_article_once(
+    article: Article,
+    translator: Translator,
+    cache_dir: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> tuple[Article, bool]:
+    """Translate one article once, returning the persisted-schema result or raising safely."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    identity = getattr(translator, "cache_identity", translator.model)
+    cache_file = cache_dir / f"{cache_key(article, identity)}.json"
+    if cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            result = _result_from_dict(cached, len(article.paragraphs))
+            return apply_translation(article, result, translator.label), True
+        except (InvalidTranslation, json.JSONDecodeError):
+            pass
+
+    translate_with_cancel = getattr(translator, "translate_with_cancel", None)
+    if cancel_requested is not None and callable(translate_with_cancel):
+        raw = translate_with_cancel(article, cancel_requested=cancel_requested)
+    else:
+        raw = translator.translate(article)
+    result = parse_translation(raw, len(article.paragraphs))
+    temporary = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(result_to_dict(result), ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        temporary.replace(cache_file)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return apply_translation(article, result, translator.label), False
 
 
 _RETRYABLE_TIMEOUT_CATEGORIES = {

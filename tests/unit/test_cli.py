@@ -1,5 +1,7 @@
 """Minimal toolchain-verification tests for the CLI."""
 
+import datetime as dt
+import json
 import os
 import types
 from pathlib import Path
@@ -9,6 +11,7 @@ import pytest
 from news_digest import __version__
 from news_digest.admin_providers import AdminConfigError, save_profiles
 from news_digest.cli import (
+    _run_automation_daily,
     _run_daily,
     _run_preview,
     _run_preview_email,
@@ -17,6 +20,9 @@ from news_digest.cli import (
     main,
 )
 from news_digest.config import BuildConfig, FetchConfig, SmtpConfig
+from news_digest.models import Article, DailyEdition, Paragraph
+from news_digest.storage import db
+from news_digest.translation.client import TranslationError
 
 
 def test_version_option_reports_package_version(capsys):
@@ -190,6 +196,161 @@ def test_daily_translation_failure_still_builds_and_delivers(tmp_path, monkeypat
     assert _run_daily(None, True) == 1
 
 
+def test_daily_yes_uses_persistent_article_automation_not_bulk_translation(
+    tmp_path, monkeypatch
+):
+    _daily_mocks(monkeypatch, tmp_path, enabled=False)
+    fetched = object()
+    monkeypatch.setattr(
+        "news_digest.pipeline.fetch_daily",
+        lambda config: (fetched, types.SimpleNamespace(per_source={})),
+    )
+    captured = []
+    monkeypatch.setattr(
+        "news_digest.cli._run_automation_daily",
+        lambda fetch_config, edition: captured.append((fetch_config, edition)) or 0,
+    )
+    monkeypatch.setattr(
+        "news_digest.cli._translate_edition_for",
+        lambda *args: (_ for _ in ()).throw(AssertionError("legacy bulk translation called")),
+    )
+
+    assert _run_daily(None, True) == 0
+    assert captured and captured[0][1] is fetched
+
+
+def test_production_automation_waits_and_retries_only_failed_article(
+    tmp_path, monkeypatch
+):
+    now = [dt.datetime(2026, 7, 28, tzinfo=dt.UTC)]
+    calls = 0
+    build_counts = []
+    delivery_calls = []
+    fetch_config = FetchConfig(None, 24, "Asia/Shanghai", tmp_path / "data")
+    article = Article(
+        slug="article-1",
+        source="Fixture",
+        title_en="Fixture article",
+        summary_en="Fixture summary.",
+        author="Fixture",
+        published_at=now[0].isoformat(),
+        url="https://example.com/article-1",
+        reading_minutes=1,
+        paragraphs=[Paragraph(en="Fixture paragraph.")],
+    )
+    edition = DailyEdition(date="2026-07-28", articles=[article])
+
+    class FakeTranslator:
+        label = "fake@automation"
+        model = "fake"
+        cache_identity = "production-automation-fake"
+
+        def __init__(self, config):
+            pass
+
+        def translate(self, current):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TranslationError("redacted", category="network")
+            return json.dumps(
+                {
+                    "title_zh": "测试标题",
+                    "summary_zh": "测试摘要。",
+                    "paragraphs_zh": ["测试段落。"],
+                    "vocabulary": [
+                        {
+                            "word": word,
+                            "phonetic": "/test/",
+                            "meaning_zh": "测试",
+                            "example_en": f"{word} is used in a fixture.",
+                        }
+                        for word in ("first", "second", "third")
+                    ],
+                    "collocations": [
+                        {
+                            "phrase": "test fixture",
+                            "meaning_zh": "测试夹具",
+                            "example_en": "This is a test fixture.",
+                        }
+                    ],
+                    "sentence_notes": [
+                        {
+                            "sentence_en": "Fixture paragraph.",
+                            "translation_zh": "测试段落。",
+                            "analysis_zh": "测试句。",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        def close(self):
+            pass
+
+    def load_editions(config):
+        conn = db.connect(config.database)
+        try:
+            return [db.get_edition(conn, edition.date)]
+        finally:
+            conn.close()
+
+    release = tmp_path / "site" / "releases" / "2026-07-28-01"
+
+    def build_editions(editions, config):
+        build_counts.append(len(editions[0].articles))
+        release.mkdir(parents=True, exist_ok=True)
+        return release
+
+    report = types.SimpleNamespace(
+        status="skipped",
+        sent_count=0,
+        failed_count=0,
+        unknown_count=0,
+        skipped_count=0,
+        succeeded=False,
+    )
+    monkeypatch.setattr("news_digest.translation.client.ApiTranslator", FakeTranslator)
+    monkeypatch.setattr(
+        "news_digest.cli._runtime_translation_config",
+        lambda: types.SimpleNamespace(cache_dir=tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        "news_digest.config.build_config_from_env",
+        lambda: BuildConfig(tmp_path / "site", "https://news.example.com"),
+    )
+    monkeypatch.setattr(
+        "news_digest.config.email_delivery_enabled_from_env", lambda: False
+    )
+    monkeypatch.setattr(
+        "news_digest.pipeline.selected_mains_for_translation",
+        lambda config, date: edition,
+    )
+    monkeypatch.setattr("news_digest.pipeline.load_db_editions", load_editions)
+    monkeypatch.setattr("news_digest.pipeline.build_editions", build_editions)
+    monkeypatch.setattr(
+        "news_digest.delivery.delivery_service.deliver_published",
+        lambda *args, **kwargs: delivery_calls.append(kwargs["edition_date"]) or report,
+    )
+
+    def sleep(seconds):
+        now[0] += dt.timedelta(seconds=seconds)
+
+    assert (
+        _run_automation_daily(
+            fetch_config,
+            edition,
+            clock=lambda: now[0],
+            sleep=sleep,
+        )
+        == 0
+    )
+    assert calls == 2
+    assert build_counts == [1]
+    assert delivery_calls == [edition.date]
+    assert now[0] == dt.datetime(2026, 7, 28, 0, 0, 17, tzinfo=dt.UTC)
+
+
 def test_daily_partial_or_archive_failure_returns_nonzero(tmp_path, monkeypatch):
     result = types.SimpleNamespace(
         sent_count=1,
@@ -306,8 +467,77 @@ def test_preview_loads_local_runtime_and_wires_mail_admin(tmp_path, monkeypatch)
         "timezone": "Asia/Hong_Kong",
         "public_subscription_enabled": True,
         "loopback_public_subscription": True,
+        "translation_db_path": None,
+        "translation_wakeup_callback": None,
     }
     assert captured["closed"] is True
+
+
+def test_preview_automation_demo_uses_isolated_database_and_fake_wakeup(
+    tmp_path, monkeypatch
+):
+    site_root = tmp_path / "site"
+    (site_root / "current").mkdir(parents=True)
+    (site_root / "current/index.html").write_text("ok", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("news_digest.config.load_env_file", lambda: None)
+    monkeypatch.setattr(
+        "news_digest.config.build_config_from_env",
+        lambda: BuildConfig(output_root=site_root, site_url="http://127.0.0.1:8765"),
+    )
+    monkeypatch.setattr(
+        "news_digest.config.fetch_config_from_env",
+        lambda: FetchConfig(
+            proxy=None,
+            window_hours=24,
+            timezone="Asia/Shanghai",
+            data_dir=tmp_path / "business-data",
+        ),
+    )
+    captured = {}
+    edition = object()
+
+    class FakeDemo:
+        def __init__(self, database, given_edition, cache_dir):
+            self.database = database
+            self.wakeups = 0
+            captured["demo"] = (database, given_edition, cache_dir)
+            captured["demo_instance"] = self
+
+        def wakeup(self):
+            self.wakeups += 1
+
+    class FakeServer:
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    def create_server(*args, **kwargs):
+        captured["server"] = (args, kwargs)
+        return FakeServer()
+
+    monkeypatch.setattr(
+        "news_digest.translation.demo.build_demo_edition", lambda: edition
+    )
+    monkeypatch.setattr(
+        "news_digest.translation.demo.TranslationAutomationDemo", FakeDemo
+    )
+    monkeypatch.setattr("news_digest.preview_server.create_server", create_server)
+
+    assert _run_preview(8765, automation_demo=True) == 0
+    expected_db = tmp_path / "var/data/automation-demo-8765.db"
+    assert captured["demo"] == (
+        expected_db,
+        edition,
+        tmp_path / "var/data/automation-demo-8765-cache",
+    )
+    _, kwargs = captured["server"]
+    assert kwargs["db_path"] == tmp_path / "business-data/news.db"
+    assert kwargs["translation_db_path"] == expected_db
+    assert callable(kwargs["translation_wakeup_callback"])
+    assert captured["demo_instance"].wakeups == 1
 
 
 def test_subcommands_parse():
@@ -324,6 +554,8 @@ def test_subcommands_parse():
     assert args.command == "translate"
     assert args.limit == 3
     assert args.yes is True
+    args = parser.parse_args(["preview", "--automation-demo"])
+    assert args.command == "preview" and args.automation_demo is True
     args = parser.parse_args(["translate"])
     assert args.yes is False
     assert args.redo == []

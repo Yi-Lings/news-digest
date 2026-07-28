@@ -11,12 +11,18 @@
 {% endmacro %}
 
 {% block dateline %}
-<p class="dateline">
-  <span>{{ edition.date | date_zh }}</span>
-  <span class="dateline-sep" aria-hidden="true">·</span>
-  <span>{{ edition.date | weekday_zh }}</span>
-  <span class="dateline-sep" aria-hidden="true">·</span>
-  <span>主文章 {{ edition.articles | length }} 篇，简讯 {{ edition.briefs | length }} 条</span>
+<p class="dateline issue-meta">
+  <span class="issue-meta-line">
+    <span class="issue-meta-unit">{{ edition.date | date_zh }}</span>
+    <span class="dateline-sep" aria-hidden="true">·</span>
+    <span class="issue-meta-unit">{{ edition.date | weekday_zh }}</span>
+  </span>
+  <span class="dateline-sep issue-meta-divider" aria-hidden="true">·</span>
+  <span class="issue-meta-line">
+    <span class="issue-meta-unit">主文章 {{ edition.articles | length }} 篇</span>
+    <span class="dateline-sep" aria-hidden="true">·</span>
+    <span class="issue-meta-unit">简讯 {{ edition.briefs | length }} 条</span>
+  </span>
 </p>
 {% endblock %}
 

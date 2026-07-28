@@ -500,7 +500,7 @@ def test_retry_total_time_limit_stops_before_sleep(tmp_path, monkeypatch):
     assert sleeps == []
 
 
-def test_retry_request_is_capped_by_remaining_total_budget(tmp_path, monkeypatch):
+def test_retry_deadline_waits_for_request_termination_confirmation(tmp_path, monkeypatch):
     raw = _valid_raw()
     calls = 0
 
@@ -536,4 +536,4 @@ def test_retry_request_is_capped_by_remaining_total_budget(tmp_path, monkeypatch
 
     assert calls == 2
     assert report.api_calls == 2 and report.failed == 1
-    assert elapsed < 0.25
+    assert 0.28 <= elapsed < 0.5

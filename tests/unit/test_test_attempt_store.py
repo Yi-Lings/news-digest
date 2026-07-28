@@ -29,7 +29,7 @@ def test_schema_v3_migrates_to_redacted_test_attempt_store(tmp_path):
     conn = db.connect(path)
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()[0] == "4"
+    ).fetchone()[0] == str(db.SCHEMA_VERSION)
     columns = {
         row[1] for row in conn.execute("PRAGMA table_info(email_test_attempts)").fetchall()
     }

@@ -74,6 +74,19 @@ def test_home_shows_lead_and_demo_stamp(site):
     assert 'href="#support"' in html
 
 
+def test_home_dateline_uses_two_semantic_mobile_rows(site):
+    output_root, _ = site
+    html = (output_root / "current" / "index.html").read_text(encoding="utf-8")
+    css = (output_root / "current" / "assets" / "style.css").read_text(encoding="utf-8")
+    assert 'class="dateline issue-meta"' in html
+    assert html.count('class="issue-meta-line"') >= 2
+    assert html.count('class="issue-meta-unit"') >= 4
+    assert "篇，简讯" not in html
+    assert ".issue-meta-unit { white-space: nowrap; }" in css
+    assert ".issue-meta-divider { display: none; }" in css
+    assert ".front > * { min-width: 0; }" in css
+
+
 def test_subscription_form_is_limited_to_the_current_root_homepage(tmp_path):
     output_root = tmp_path / "site"
     build_site(

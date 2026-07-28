@@ -257,6 +257,7 @@ class _AdminServer(ThreadingHTTPServer):
     loopback_public_subscription: bool
     htpasswd_file: Path | None
     db_path: Path | None
+    translation_db_path: Path | None
     site_url: str
     output_root: Path | None
     timezone: str
@@ -267,6 +268,7 @@ class _AdminServer(ThreadingHTTPServer):
     smtp_test_callback: Callable[[SmtpConfig, Any], None]
     smtp_smoke_callback: Callable[[SmtpConfig, Any], DeliveryReport]
     delivery_callback: Callable[..., DeliveryServiceReport]
+    translation_wakeup_callback: Callable[[], None]
     clock: Callable[[], float]
     sensitive_limit: int
     sensitive_window: float
@@ -348,6 +350,14 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         secret_file = self.server.htpasswd_file.parent / "session-secret"
         return _csrf_token(_session_secret(secret_file), token)
 
+    def _admin_actor(self) -> str:
+        token = self._session_token()
+        if token:
+            username = token.partition("|")[0]
+            if username:
+                return username[:128]
+        return "local-admin"
+
     def _valid_public_csrf(self, token: str) -> bool:
         return _verify_public_csrf(
             self.server.public_secret,
@@ -428,6 +438,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         if path == "/admin/api/subscriptions":
             self._handle_subscriptions_get()
+            return
+        if path == "/admin/api/translations":
+            self._handle_translations_get()
+            return
+        if path == "/admin/api/translations/events":
+            self._handle_translation_events()
             return
         if path == "/admin/api/delivery":
             self._handle_delivery_get()
@@ -517,6 +533,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._limited("subscription-enable", lambda: self._handle_subscription_enable(body))
         elif path == "/admin/api/subscriptions/delete":
             self._limited("subscription-delete", lambda: self._handle_subscription_delete(body))
+        elif path == "/admin/api/translations/retry":
+            self._limited("translation-retry", lambda: self._handle_translation_retry(body))
+        elif path == "/admin/api/translations/cancel":
+            self._limited("translation-cancel", lambda: self._handle_translation_cancel(body))
+        elif path == "/admin/api/translations/probe":
+            self._limited("translation-probe", lambda: self._handle_translation_probe(body))
         elif path == "/admin/api/delivery/retry-failed":
             self._limited("delivery", lambda: self._handle_retry_failed(body))
         elif path == "/admin/api/delivery/retry-unknown":
@@ -1438,6 +1460,327 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         self._json(200, {"ok": True})
 
+    def _translation_payload(self) -> dict[str, Any]:
+        if self.server.translation_db_path is None:
+            raise RuntimeError("翻译任务数据库未配置")
+        conn = db.connect(self.server.translation_db_path)
+        try:
+            edition = db.latest_automation_edition(conn)
+            if edition is None:
+                return {
+                    "edition": None,
+                    "summary": {
+                        "total": 0,
+                        "online": 0,
+                        "running": 0,
+                        "retry_wait": 0,
+                        "failed": 0,
+                    },
+                    "provider": {
+                        "id": "",
+                        "state": "closed",
+                        "consecutive_failures": 0,
+                        "current_concurrency": 0,
+                        "queue_count": 0,
+                        "waiting_dispatch_count": 0,
+                        "waiting_backoff_count": 0,
+                        "waiting_cancel_count": 0,
+                        "waiting_probe_count": 0,
+                        "next_executable_at": None,
+                        "next_probe_at": None,
+                        "recovery_mode": False,
+                    },
+                    "items": [],
+                    "probe_task_id": None,
+                    "csrf_token": self._csrf_for_response(),
+                }
+            tasks = db.list_translation_tasks(conn, edition.edition_date)
+            provider_id = tasks[0].provider_id if tasks else ""
+            circuit = db.get_provider_circuit(conn, provider_id) if provider_id else None
+            circuit_state = circuit.state if circuit else "closed"
+            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
+
+            def parsed(value: str | None) -> dt.datetime | None:
+                return dt.datetime.fromisoformat(value) if value else None
+
+            def next_executable(task: db.TranslationTask) -> str | None:
+                if task.status not in {"pending", "retry_wait"}:
+                    return None
+                if task.manual_retry_requested_at or task.manual_probe_requested_at:
+                    return task.next_retry_at or now.isoformat()
+                candidates = [parsed(task.next_retry_at)]
+                if circuit_state == "open" and circuit is not None:
+                    candidates.append(parsed(circuit.next_probe_at))
+                available = [value for value in candidates if value is not None]
+                return max(available).isoformat() if available else now.isoformat()
+
+            def queue_state(task: db.TranslationTask) -> str:
+                if task.status == "running":
+                    return (
+                        "waiting_cancel_confirmation"
+                        if task.cancel_requested_at is not None
+                        else "executing"
+                    )
+                if task.status in {"pending", "retry_wait"}:
+                    if circuit_state == "configuration_blocked":
+                        return "blocked"
+                    if task.manual_retry_requested_at or task.manual_probe_requested_at:
+                        return "waiting_dispatch"
+                    available = parsed(next_executable(task))
+                    if circuit_state == "open" and (
+                        available is None or available <= now
+                    ):
+                        return "waiting_probe"
+                    return (
+                        "waiting_backoff"
+                        if available is not None and available > now
+                        else "waiting_dispatch"
+                    )
+                if task.status == "succeeded":
+                    return "complete" if task.build_status == "online" else "waiting_build"
+                return "blocked"
+
+            task_queue_states = {task.task_id: queue_state(task) for task in tasks}
+            executing_count = sum(
+                state == "executing" for state in task_queue_states.values()
+            )
+            waiting_dispatch_count = sum(
+                state == "waiting_dispatch" for state in task_queue_states.values()
+            )
+            waiting_backoff_count = sum(
+                state == "waiting_backoff" for state in task_queue_states.values()
+            )
+            waiting_cancel_count = sum(
+                state == "waiting_cancel_confirmation"
+                for state in task_queue_states.values()
+            )
+            waiting_probe_count = sum(
+                state == "waiting_probe" for state in task_queue_states.values()
+            )
+            executable_times = [
+                parsed(next_executable(task))
+                for task in tasks
+                if task_queue_states[task.task_id]
+                in {"waiting_dispatch", "waiting_backoff"}
+            ]
+            executable_times = [value for value in executable_times if value is not None]
+            probe_candidates = sorted(
+                (
+                    task
+                    for task in tasks
+                    if task.status in {"failed", "retry_wait", "cancelled", "pending"}
+                ),
+                key=lambda task: task.status == "pending",
+            )
+            summary = {
+                "total": len(tasks),
+                "online": sum(task.build_status == "online" for task in tasks),
+                "running": sum(task.status == "running" for task in tasks),
+                "retry_wait": sum(task.status == "retry_wait" for task in tasks),
+                "failed": sum(
+                    task.status in {"failed", "configuration_blocked", "cancelled"}
+                    for task in tasks
+                ),
+            }
+            queue_count = sum(
+                state
+                in {
+                    "waiting_dispatch",
+                    "waiting_backoff",
+                    "waiting_cancel_confirmation",
+                    "waiting_probe",
+                }
+                for state in task_queue_states.values()
+            )
+            last_updated = max(
+                [edition.updated_at]
+                + [task.updated_at for task in tasks]
+                + ([circuit.updated_at] if circuit else [])
+            )
+            return {
+                "edition": {
+                    "date": edition.edition_date,
+                    "status": edition.status,
+                    "last_updated": last_updated,
+                },
+                "summary": summary,
+                "provider": {
+                    "id": provider_id,
+                    "state": circuit_state,
+                    "consecutive_failures": circuit.consecutive_failures if circuit else 0,
+                    "current_concurrency": executing_count,
+                    "queue_count": queue_count,
+                    "waiting_dispatch_count": waiting_dispatch_count,
+                    "waiting_backoff_count": waiting_backoff_count,
+                    "waiting_cancel_count": waiting_cancel_count,
+                    "waiting_probe_count": waiting_probe_count,
+                    "next_executable_at": (
+                        min(executable_times).isoformat() if executable_times else None
+                    ),
+                    "next_probe_at": circuit.next_probe_at if circuit else None,
+                    "recovery_mode": circuit.recovery_mode if circuit else False,
+                },
+                "items": [
+                    {
+                        "task_id": task.task_id,
+                        "title": task.article_title,
+                        "status": task.status,
+                        "stage": task.current_stage,
+                        "build_status": task.build_status,
+                        "attempt_count": task.attempt_count,
+                        "error_code": task.error_code,
+                        "error_category": task.error_category,
+                        "http_status": task.http_status,
+                        "failure_stage": task.failure_stage,
+                        "diagnostic_id": task.diagnostic_id,
+                        "failed_at": task.failed_at,
+                        "next_retry_at": task.next_retry_at,
+                        "started_at": task.started_at,
+                        "finished_at": task.finished_at,
+                        "last_activity_at": task.last_activity_at,
+                        "hard_timeout_at": task.hard_timeout_at,
+                        "received_chunks": task.received_chunks,
+                        "cancel_requested": task.cancel_requested_at is not None,
+                        "queue_state": task_queue_states[task.task_id],
+                        "next_executable_at": next_executable(task),
+                        "retry_allowed": (
+                            task.status in {"failed", "retry_wait", "cancelled"}
+                            and circuit_state == "closed"
+                        ),
+                        "cancel_allowed": (
+                            task.status == "running" and task.cancel_requested_at is None
+                        ),
+                    }
+                    for task in tasks
+                ],
+                "probe_task_id": (
+                    probe_candidates[0].task_id
+                    if circuit_state == "open" and probe_candidates
+                    else None
+                ),
+                "csrf_token": self._csrf_for_response(),
+            }
+        finally:
+            conn.close()
+
+    def _handle_translations_get(self) -> None:
+        if not self._authed():
+            self._json(401, {"error": "未登录"})
+            return
+        try:
+            payload = self._translation_payload()
+        except RuntimeError as error:
+            self._json(503, {"error": str(error), "category": "configuration"})
+            return
+        self._json(200, payload)
+
+    def _handle_translation_events(self) -> None:
+        if not self._authed():
+            self._json(401, {"error": "未登录"})
+            return
+        try:
+            payload = self._translation_payload()
+            event = (
+                "retry: 2000\n"
+                "event: translation-state\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Connection", "close")
+            self._security_headers()
+            self.end_headers()
+            self.wfile.write(event)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+        except RuntimeError as error:
+            self._json(503, {"error": str(error), "category": "configuration"})
+
+    @staticmethod
+    def _translation_task_body(body: dict[str, Any], *, confirm: bool = False) -> str:
+        expected = {"task_id", "confirm"} if confirm else {"task_id"}
+        if set(body) != expected or (confirm and body.get("confirm") is not True):
+            raise ValueError("翻译任务操作字段无效")
+        task_id = body.get("task_id")
+        if (
+            not isinstance(task_id, str)
+            or len(task_id) != 64
+            or any(character not in "0123456789abcdef" for character in task_id)
+        ):
+            raise ValueError("翻译任务 ID 无效")
+        return task_id
+
+    def _handle_translation_retry(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                task = db.queue_translation_task_retry(
+                    conn,
+                    task_id,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(202, {"ok": True, "status": task.status})
+
+    def _handle_translation_cancel(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body, confirm=True)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                task = db.request_translation_task_cancel(
+                    conn,
+                    task_id,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(202, {"ok": True, "cancel_requested": task.cancel_requested_at is not None})
+
+    def _handle_translation_probe(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body, confirm=True)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                task = db.translation_task(conn, task_id)
+                if task is None:
+                    raise RuntimeError("translation task does not exist")
+                queued = db.queue_provider_probe(
+                    conn,
+                    task.provider_id,
+                    task_id,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(202, {"ok": True, "status": queued.status})
+
     def _delivery_status_payload(self, edition_date: str) -> dict[str, Any]:
         if self.server.db_path is None:
             return {"summary": {}, "states": []}
@@ -2063,6 +2406,7 @@ def create_server(
     serve_static: bool = True,
     htpasswd_file: Path | None = None,
     db_path: Path | None = None,
+    translation_db_path: Path | None = None,
     site_url: str = "",
     output_root: Path | None = None,
     timezone: str = "Asia/Shanghai",
@@ -2072,6 +2416,7 @@ def create_server(
     smtp_test_callback: Callable[[SmtpConfig, Any], None] | None = None,
     smtp_smoke_callback: Callable[[SmtpConfig, Any], DeliveryReport] | None = None,
     delivery_callback: Callable[..., DeliveryServiceReport] | None = None,
+    translation_wakeup_callback: Callable[[], None] | None = None,
     clock: Callable[[], float] = time.time,
     sensitive_limit: int = 4,
     sensitive_window: float = 60.0,
@@ -2089,6 +2434,9 @@ def create_server(
     server.loopback_public_subscription = loopback_public_subscription
     server.htpasswd_file = Path(htpasswd_file) if htpasswd_file is not None else None
     server.db_path = Path(db_path) if db_path is not None else None
+    server.translation_db_path = (
+        Path(translation_db_path) if translation_db_path is not None else server.db_path
+    )
     server.site_url = site_url
     server.output_root = Path(output_root) if output_root is not None else None
     server.timezone = timezone
@@ -2099,6 +2447,7 @@ def create_server(
     server.smtp_test_callback = smtp_test_callback or _default_smtp_test
     server.smtp_smoke_callback = smtp_smoke_callback or _default_smtp_smoke
     server.delivery_callback = delivery_callback or _default_delivery
+    server.translation_wakeup_callback = translation_wakeup_callback or (lambda: None)
     server.clock = clock
     server.sensitive_limit = sensitive_limit
     server.sensitive_window = sensitive_window
@@ -2339,6 +2688,28 @@ button[aria-busy="true"]::after {
 .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
 .stat { min-width: 0; border-top: 3px solid var(--cinnabar); background: var(--panel); padding: .65rem; overflow-wrap: anywhere; }
 .stat strong { display: block; font: 700 1.35rem/1.2 var(--font-display); }
+.translation-head { display: flex; align-items: end; justify-content: space-between; gap: .8rem; margin-bottom: .75rem; }
+.translation-provider {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .8rem;
+  border-block: 1px solid var(--line); padding: .7rem 0; margin-bottom: .8rem;
+}
+.translation-provider > div { min-width: 0; }
+.translation-provider strong, .translation-provider .meta { display: block; overflow-wrap: anywhere; }
+.translation-provider button { align-self: center; min-width: 7.5rem; }
+.translation-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: .8rem; }
+.segmented { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .7rem; }
+.segmented button { min-height: 2.15rem; padding: .35rem .65rem; background: transparent; }
+.segmented button[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+#translation-list { max-width: 100%; overflow-x: auto; min-height: 10rem; }
+.translation-title {
+  display: block; max-width: 24rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600;
+}
+.translation-stage { display: grid; gap: .08rem; min-width: 9rem; }
+.translation-stage small, .translation-error small { color: var(--muted); }
+.translation-error { display: grid; gap: .08rem; min-width: 8.5rem; }
+.translation-actions { display: flex; flex-wrap: wrap; gap: .35rem; min-width: 7.5rem; }
+.translation-actions button { min-height: 2.15rem; padding: .35rem .5rem; white-space: nowrap; }
 #delivery-summary { min-width: 0; }
 #delivery-summary strong { display: block; overflow-wrap: anywhere; word-break: break-word; }
 #subscription-list, #delivery-list { max-width: 100%; overflow-x: auto; }
@@ -2363,7 +2734,9 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .data-table td { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
   .data-table td[data-label="标识"],
   .data-table td[data-label="收件人标识"],
-  .data-table td[data-label="错误分类"] {
+  .data-table td[data-label="错误分类"],
+  .data-table td[data-label="错误代码"],
+  .data-table td[data-label="下一次重试"] {
     white-space: normal; overflow-wrap: anywhere; word-break: break-word;
   }
 }
@@ -2385,6 +2758,15 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .fields { grid-template-columns: 1fr; }
   .span2 { grid-column: auto; }
   .stats { grid-template-columns: repeat(2, 1fr); }
+  .translation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .translation-head { align-items: start; }
+  .translation-provider { grid-template-columns: 1fr; }
+  .translation-provider button { width: 100%; }
+  .translation-title {
+    max-width: none; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2; line-clamp: 2;
+  }
+  .translation-actions { justify-content: flex-end; }
   .wrap { padding-inline: .9rem; }
 }
 @media (max-width: 520px) {
@@ -2426,6 +2808,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
     <button class="tab" id="tab-models" role="tab" data-tab="models" aria-controls="models" aria-selected="true">模型接口</button>
     <button class="tab" id="tab-mail" role="tab" data-tab="mail" aria-controls="mail" aria-selected="false">邮件设置</button>
     <button class="tab" id="tab-subscriptions" role="tab" data-tab="subscriptions" aria-controls="subscriptions" aria-selected="false">订阅管理</button>
+    <button class="tab" id="tab-translations" role="tab" data-tab="translations" aria-controls="translations" aria-selected="false">翻译状态</button>
     <button class="tab" id="tab-delivery" role="tab" data-tab="delivery" aria-controls="delivery" aria-selected="false">投递状态</button>
   </nav>
   <section class="workspace" id="models" role="tabpanel" aria-labelledby="tab-models">
@@ -2513,6 +2896,28 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <input id="subscription-email" type="email">
       <div class="actions"><button id="subscription-add">新增账号</button><button id="subscriptions-refresh">刷新名单</button></div>
       <div id="subscription-list"></div>
+    </section>
+  </section>
+
+  <section class="workspace" id="translations" role="tabpanel" aria-labelledby="tab-translations" hidden>
+    <div class="translation-head">
+      <div>
+        <h2 id="translations-heading">翻译状态</h2>
+        <p id="translation-edition" class="note">暂无自动化刊期</p>
+      </div>
+      <button id="translation-refresh" type="button">刷新</button>
+    </div>
+    <div id="translation-provider" class="translation-provider"></div>
+    <div id="translation-stats" class="stats translation-stats"></div>
+    <div class="segmented" role="group" aria-label="翻译任务筛选">
+      <button type="button" data-translation-filter="all" aria-pressed="true">全部</button>
+      <button type="button" data-translation-filter="running" aria-pressed="false">运行中</button>
+      <button type="button" data-translation-filter="retry_wait" aria-pressed="false">待重试</button>
+      <button type="button" data-translation-filter="failed" aria-pressed="false">失败</button>
+      <button type="button" data-translation-filter="online" aria-pressed="false">已上线</button>
+    </div>
+    <section class="panel">
+      <div id="translation-list" aria-live="polite"></div>
     </section>
   </section>
 
@@ -2657,6 +3062,8 @@ document.querySelectorAll(".tab").forEach(function (tab) {
     });
     if (tab.dataset.tab === "mail") { loadMail(); }
     if (tab.dataset.tab === "subscriptions") { loadSubscriptions(); }
+    if (tab.dataset.tab === "translations") { startTranslationUpdates(); }
+    else { stopTranslationUpdates(); }
     if (tab.dataset.tab === "delivery") { loadDelivery(); }
   });
 });
@@ -3000,6 +3407,210 @@ field("subscription-add").addEventListener("click", function () {
   api("/admin/api/subscriptions/add", {email: field("subscription-email").value}).then(function () { field("subscription-email").value = ""; say("订阅账号已新增并自动进入统一名单。", true); loadSubscriptions(); }).catch(function (error) { say(error.message, false); });
 });
 field("subscriptions-refresh").addEventListener("click", loadSubscriptions);
+
+var translationFilter = "all";
+var translationState = null;
+var translationSource = null;
+var translationPoll = null;
+var translationStatusLabels = {
+  pending: "等待中", running: "翻译中", failed: "失败", retry_wait: "待重试",
+  succeeded: "已翻译", configuration_blocked: "配置阻断", cancelled: "已取消"
+};
+var translationStageLabels = {
+  waiting: "等待中", connect_provider: "连接 provider", waiting_model: "等待模型生成",
+  receiving_response: "接收响应", schema_validation: "schema 校验",
+  saving_translation: "保存翻译", waiting_build: "等待 build", building: "build 中",
+  online: "已上线"
+};
+var translationQueueLabels = {
+  executing: "正在执行", waiting_dispatch: "等待调度", waiting_backoff: "失败退避",
+  waiting_cancel_confirmation: "等待终止确认", waiting_build: "等待 build",
+  waiting_probe: "等待熔断探测", blocked: "已阻断", complete: "已完成"
+};
+function timeText(value) {
+  if (!value) { return "—"; }
+  var parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
+}
+function secondsBetween(start, end) {
+  if (!start) { return 0; }
+  return Math.max(0, Math.round((new Date(end || Date.now()).getTime() - new Date(start).getTime()) / 1000));
+}
+function secondsUntil(value) {
+  if (!value) { return 0; }
+  return Math.max(0, Math.ceil((new Date(value).getTime() - Date.now()) / 1000));
+}
+function translationStageNode(item) {
+  var node = document.createElement("div"); node.className = "translation-stage";
+  addText(node, "strong", translationStageLabels[item.stage] || item.stage);
+  if (item.status === "running") {
+    addText(node, "small", "已用时 " + secondsBetween(item.started_at) + " 秒");
+    addText(node, "small", "硬超时剩余 " + Math.max(0, secondsBetween(new Date(), item.hard_timeout_at)) + " 秒");
+    addText(node, "small", "最后活动 " + timeText(item.last_activity_at));
+    if (item.received_chunks) { addText(node, "small", "已接收 " + item.received_chunks + " 个分块"); }
+  }
+  if (item.queue_state && item.queue_state !== "executing" && item.queue_state !== "complete") {
+    addText(node, "small", translationQueueLabels[item.queue_state] || item.queue_state);
+  }
+  if (item.queue_state === "waiting_backoff" && item.next_executable_at) {
+    addText(node, "small", secondsUntil(item.next_executable_at) + " 秒后可执行");
+  }
+  return node;
+}
+function translationNextNode(item) {
+  var node = document.createElement("div"); node.className = "translation-stage";
+  if (item.queue_state === "executing") { addText(node, "strong", "正在执行"); return node; }
+  if (item.queue_state === "waiting_dispatch") { addText(node, "strong", "可立即调度"); return node; }
+  if (item.queue_state === "waiting_cancel_confirmation") {
+    addText(node, "strong", "等待终止确认"); return node;
+  }
+  if (item.queue_state === "waiting_probe") {
+    addText(node, "strong", "可立即探测"); return node;
+  }
+  if (item.queue_state === "waiting_backoff" && item.next_executable_at) {
+    addText(node, "strong", timeText(item.next_executable_at));
+    addText(node, "small", secondsUntil(item.next_executable_at) + " 秒后");
+    return node;
+  }
+  addText(node, "strong", "—");
+  return node;
+}
+function translationErrorNode(item) {
+  var node = document.createElement("div"); node.className = "translation-error";
+  addText(node, "strong", item.error_code || "—");
+  if (item.http_status) { addText(node, "small", "HTTP " + item.http_status); }
+  if (item.failure_stage) { addText(node, "small", translationStageLabels[item.failure_stage] || item.failure_stage); }
+  if (item.diagnostic_id) { addText(node, "small", "诊断 " + item.diagnostic_id); }
+  return node;
+}
+function translationMatches(item) {
+  if (translationFilter === "all") { return true; }
+  if (translationFilter === "online") { return item.build_status === "online"; }
+  if (translationFilter === "failed") {
+    return ["failed", "configuration_blocked", "cancelled"].includes(item.status);
+  }
+  return item.status === translationFilter;
+}
+function queueTranslationRetry(item, action) {
+  setBusy(action, true);
+  api("/admin/api/translations/retry", {task_id: item.task_id})
+    .then(function () { say("单篇重试已排队，等待 worker 调度。", true); return loadTranslations(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
+function queueTranslationCancel(item, action) {
+  if (!confirm("确认终止这一个运行请求？系统会先关闭执行体，再从确认时间安排重试。")) { return; }
+  setBusy(action, true);
+  api("/admin/api/translations/cancel", {task_id: item.task_id, confirm: true})
+    .then(function () { say("终止请求已提交，等待 worker 确认执行体关闭。", true); return loadTranslations(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
+function renderTranslations(data) {
+  translationState = data;
+  if (data.csrf_token) { csrf = data.csrf_token; }
+  var edition = data.edition;
+  field("translation-edition").textContent = edition ?
+    "刊期 " + edition.date + " · " + edition.status + " · 更新 " + timeText(edition.last_updated) :
+    "暂无自动化刊期";
+  var provider = field("translation-provider"); provider.replaceChildren();
+  var providerCopy = document.createElement("div");
+  addText(providerCopy, "strong", data.provider.id ? data.provider.id + " · " + data.provider.state : "provider 未建立任务");
+  addText(
+    providerCopy,
+    "span",
+    "执行 " + data.provider.current_concurrency +
+      " · 待调度 " + data.provider.waiting_dispatch_count +
+      " · 退避 " + data.provider.waiting_backoff_count +
+      " · 待终止 " + data.provider.waiting_cancel_count +
+      " · 待探测 " + data.provider.waiting_probe_count +
+      " · 连续失败 " + data.provider.consecutive_failures +
+      (data.provider.waiting_backoff_count && data.provider.next_executable_at ?
+        " · 最近可执行 " + timeText(data.provider.next_executable_at) : "") +
+      (data.provider.next_probe_at ? " · 下次探测 " + timeText(data.provider.next_probe_at) : "") +
+      (data.provider.recovery_mode ? " · 恢复限流" : ""),
+    "meta"
+  );
+  provider.appendChild(providerCopy);
+  var probeButton = button("立即探测", function (event) {
+    if (!data.probe_task_id || !confirm("确认跳过冷却并用一篇失败文章执行正式 schema 探测？")) { return; }
+    var action = event.currentTarget; setBusy(action, true);
+    api("/admin/api/translations/probe", {task_id: data.probe_task_id, confirm: true})
+      .then(function () { say("受控探测已排队。", true); return loadTranslations(); })
+      .catch(function (error) { say(error.message, false); })
+      .finally(function () { setBusy(action, false); });
+  });
+  probeButton.disabled = !data.probe_task_id;
+  probeButton.title = data.probe_task_id ? "执行一次正式单篇探测" : "当前无需探测";
+  provider.appendChild(probeButton);
+
+  var stats = field("translation-stats"); stats.replaceChildren();
+  [["总任务", "total"], ["已上线", "online"], ["翻译中", "running"], ["待重试", "retry_wait"], ["失败", "failed"]]
+    .forEach(function (entry) { statCard(stats, entry[0], data.summary[entry[1]]); });
+  var items = data.items.filter(translationMatches);
+  var rows = items.map(function (item) {
+    var title = document.createElement("span"); title.className = "translation-title";
+    title.textContent = item.title; title.title = item.title; title.tabIndex = 0;
+    var actions = document.createElement("div"); actions.className = "translation-actions";
+    if (item.retry_allowed) {
+      actions.appendChild(button("立即重试", function (event) { queueTranslationRetry(item, event.currentTarget); }));
+    }
+    if (item.cancel_allowed) {
+      actions.appendChild(button("终止", function (event) { queueTranslationCancel(item, event.currentTarget); }, "danger"));
+    } else if (item.cancel_requested) {
+      addText(actions, "span", "终止中", "meta");
+    }
+    if (!actions.childNodes.length) { addText(actions, "span", "—", "meta"); }
+    return [
+      title,
+      translationStatusLabels[item.status] || item.status,
+      translationStageNode(item),
+      item.attempt_count,
+      translationErrorNode(item),
+      translationNextNode(item),
+      item.build_status,
+      actions
+    ];
+  });
+  var list = field("translation-list"); list.replaceChildren();
+  if (!rows.length) { addText(list, "p", "当前筛选无任务。", "meta"); return; }
+  list.appendChild(table(["文章", "状态", "阶段", "尝试", "错误代码", "下一次执行", "上线", "操作"], rows));
+}
+function loadTranslations() {
+  return api("/admin/api/translations")
+    .then(renderTranslations)
+    .catch(function (error) { say(error.message, false); });
+}
+function stopTranslationUpdates() {
+  if (translationSource) { translationSource.close(); translationSource = null; }
+  if (translationPoll) { clearInterval(translationPoll); translationPoll = null; }
+}
+function startTranslationUpdates() {
+  stopTranslationUpdates();
+  loadTranslations();
+  if (!("EventSource" in window)) {
+    translationPoll = setInterval(loadTranslations, 3000);
+    return;
+  }
+  translationSource = new EventSource("/admin/api/translations/events");
+  translationSource.addEventListener("translation-state", function (event) {
+    renderTranslations(JSON.parse(event.data));
+  });
+  translationSource.onerror = function () {
+    if (translationSource) { translationSource.close(); translationSource = null; }
+    if (!translationPoll) { translationPoll = setInterval(loadTranslations, 3000); }
+  };
+}
+document.querySelectorAll("[data-translation-filter]").forEach(function (control) {
+  control.addEventListener("click", function () {
+    translationFilter = control.dataset.translationFilter;
+    document.querySelectorAll("[data-translation-filter]").forEach(function (item) {
+      item.setAttribute("aria-pressed", String(item === control));
+    });
+    if (translationState) { renderTranslations(translationState); }
+  });
+});
+field("translation-refresh").addEventListener("click", loadTranslations);
 
 var currentEdition = ""; var manualPreview = null;
 function loadDelivery() {
