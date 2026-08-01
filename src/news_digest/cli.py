@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import time
+import types
 from pathlib import Path
 
 from news_digest import __version__
@@ -57,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="完整每日流水线：抓取→选题→翻译（需 --yes）→构建→投递")
     run.add_argument("--window-hours", type=int, default=None, metavar="N")
     run.add_argument("--yes", action="store_true", help="包含真实翻译调用；缺省只做抓取+选题+构建")
+
+    resume = subparsers.add_parser(
+        "resume-automation", help="恢复数据库中未完成的自动化刊期（不重新抓取；需 --yes）"
+    )
+    resume.add_argument("--yes", action="store_true", help="确认执行真实翻译与后续构建/投递")
 
     import_edition = subparsers.add_parser(
         "import-edition", help="把一期版次 JSON 併入数据库（翻译成果原样保留，幂等）"
@@ -126,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_translate(args.date, args.limit, args.yes, frozenset(args.redo))
     if args.command == "run":
         return _run_daily(args.window_hours, args.yes)
+    if args.command == "resume-automation":
+        return _run_automation_resume(args.yes)
     if args.command == "preview":
         return _run_preview(args.port, automation_demo=args.automation_demo)
     if args.command == "preview-email":
@@ -728,6 +737,32 @@ def _run_automation_daily(
         translator.close()
 
 
+def _run_automation_resume(yes: bool) -> int:
+    if not yes:
+        print("未加 --yes：未恢复自动化任务，也未调用 provider 或 SMTP。")
+        return 0
+
+    fetch_config = _fetch_config(None)
+    from news_digest.storage import db
+
+    conn = db.connect(fetch_config.database)
+    try:
+        unfinished = db.unfinished_automation_edition_dates(conn)
+    finally:
+        conn.close()
+    if not unfinished:
+        print("没有未完成的自动化刊期；无需恢复。")
+        return 0
+    return _run_automation_daily(
+        fetch_config,
+        types.SimpleNamespace(date=unfinished[0]),
+    )
+
+
+def _signal_translation_worker(path: Path) -> None:
+    path.write_text(f"{time.time_ns()}\n", encoding="ascii")
+
+
 def _run_import(file: Path) -> int:
     import json
 
@@ -819,6 +854,9 @@ def _run_admin(port: int, config_dir: Path) -> int:
         output_root=output_root,
         timezone=timezone,
         public_subscription_enabled=public_subscription_enabled,
+        translation_wakeup_callback=lambda: _signal_translation_worker(
+            config_dir / "automation.wake"
+        ),
     )
     try:
         server.serve_forever()

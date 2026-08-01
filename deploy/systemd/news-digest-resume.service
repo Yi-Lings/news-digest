@@ -1,0 +1,12 @@
+# Resume queued translation actions without fetching a new edition.
+[Unit]
+Description=Resume queued news-digest translation automation
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
+TimeoutStartSec=45min
+Restart=on-failure
+RestartSec=15s

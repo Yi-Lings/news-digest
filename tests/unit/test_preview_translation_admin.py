@@ -167,7 +167,15 @@ def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
     finally:
         conn.close()
 
-    server = create_server(tmp_path, tmp_path, 0, serve_static=False, db_path=database)
+    wakeups = []
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        db_path=database,
+        translation_wakeup_callback=lambda: wakeups.append("wake"),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -178,8 +186,24 @@ def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
         assert payload["probe_task_id"] == failed.task_id
 
         body = {"task_id": failed.task_id, "confirm": True}
-        assert _request(port, "POST", "/admin/api/translations/probe", body)[0] == 202
-        assert _request(port, "POST", "/admin/api/translations/probe", body)[0] == 409
+        first_status, first = _request(
+            port, "POST", "/admin/api/translations/probe", body
+        )
+        second_status, second = _request(
+            port, "POST", "/admin/api/translations/probe", body
+        )
+        assert first_status == second_status == 202
+        assert first["already_queued"] is False
+        assert second["already_queued"] is True
+        assert wakeups == ["wake", "wake"]
+        conn = db.connect(database)
+        try:
+            action_count = conn.execute(
+                "SELECT COUNT(*) FROM translation_admin_actions WHERE action = 'probe'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert action_count == 1
 
         status, event = _request(port, "GET", "/admin/api/translations/events")
         assert status == 200
@@ -206,6 +230,7 @@ def test_translation_admin_dom_contract_and_reduced_motion():
         '"/admin/api/translations/retry"',
         '"/admin/api/translations/cancel"',
         '"/admin/api/translations/probe"',
+        "探测已在队列，已重新唤醒 worker。",
         'new EventSource("/admin/api/translations/events")',
         "translationPoll = setInterval(loadTranslations, 3000)",
         "prefers-reduced-motion: reduce",

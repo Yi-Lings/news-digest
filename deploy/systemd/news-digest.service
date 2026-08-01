@@ -9,12 +9,13 @@ Description=news-digest daily pipeline (one-shot container via docker compose)
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
+OnFailure=news-digest-resume.service
 
 [Service]
 # oneshot：进程退出即任务结束，退出码非 0 记为失败，journal 中可直接看到
 Type=oneshot
 # 复用 compose 中 worker 的完整定义（digest、只读、内存上限、env_file 都只在 compose 维护一处）
-ExecStart=/usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker
+ExecStart=/usr/bin/flock /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker
 # 兜底时限：抓取+翻译+构建正常在几分钟内完成；超时按失败处理并回收容器，
 # 防止卡死的任务悬挂到下一次 timer 触发
 TimeoutStartSec=45min

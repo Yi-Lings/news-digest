@@ -3,6 +3,14 @@
 版本纪律:tag = `v` + `__version__`(CI 强校验二者一致);**已推送的 tag 永不移动**,重打即升号。
 部署脚本运行时从 `src/news_digest/__init__.py` 派生版本,该文件是唯一真源。
 
+## [1.2.4] - 2026-08-01
+
+- 修复生产 Admin 将翻译探测或单篇操作写入持久队列后没有 worker 消费，界面长期显示
+  `provider probe is already queued` 的问题。
+- Admin 入队后通过 systemd path 唤醒独立恢复 worker；恢复过程不重新抓取，只续接最新未完成刊期。
+- 每日 worker 与恢复 worker 通过同一宿主锁串行；重复探测保持幂等，只重新唤醒 worker，
+  不新增探测审计或第二次 provider 请求。
+
 ## [1.2.3] - 2026-07-28
 
 - 将 Linux、WSL 与 Windows 自托管流程统一改为显式 `ND_*` 部署目标，移除仓库中的个人服务器、

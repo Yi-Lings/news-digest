@@ -7,8 +7,8 @@ from news_digest import __version__
 ROOT = Path(__file__).parents[2]
 
 
-def test_phase_8_release_version_is_v1_2_3():
-    assert __version__ == "1.2.3"
+def test_phase_8_release_version_is_v1_2_4():
+    assert __version__ == "1.2.4"
 
 
 def _read(path: str) -> str:
@@ -263,6 +263,28 @@ def test_deployment_never_runs_the_content_pipeline():
     assert 'if [ "$HEALTH_CODE" != "200" ]' in bootstrap
     assert 'if [ "$ADMIN_CODE" != "200" ]' in bootstrap
     assert '"${COMPOSE[@]}" logs --no-color --tail 100 admin' in bootstrap
+
+
+def test_admin_translation_actions_activate_a_resume_worker():
+    daily_service = _read("deploy/systemd/news-digest.service")
+    resume_service = _read("deploy/systemd/news-digest-resume.service")
+    wake_path = _read("deploy/systemd/news-digest-wakeup.path")
+    bootstrap = _read("deploy/bootstrap.sh")
+    server_push = _read("deploy/server-push.ps1")
+
+    assert "OnFailure=news-digest-resume.service" in daily_service
+    assert "/usr/bin/flock /run/news-digest-worker.lock" in daily_service
+    assert "resume-automation --yes" in resume_service
+    assert "Restart=on-failure" in resume_service
+    assert "/usr/bin/flock -n /run/news-digest-worker.lock" in resume_service
+    assert "PathChanged=/srv/news-digest/config/automation.wake" in wake_path
+    assert "Unit=news-digest-resume.service" in wake_path
+    assert "WantedBy=multi-user.target" in wake_path
+    assert "news-digest-resume.service" in bootstrap
+    assert "news-digest-wakeup.path" in bootstrap
+    assert "systemctl enable --now news-digest-wakeup.path" in bootstrap
+    assert "news-digest-resume.service" in server_push
+    assert "news-digest-wakeup.path" in server_push
 
 
 def test_bootstrap_inline_python_creates_a_consistent_wal_snapshot(tmp_path):

@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前正式版：`v1.2.3`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
+当前正式版：`v1.2.4`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
 
 ## 产品能力
 
@@ -80,6 +80,7 @@ flowchart TD
 - 同一 provider 连续 5 次基础设施失败后打开熔断器，不影响网站、归档、Admin 或已上线内容。
 - 熔断后自动探测依次等待 `60 秒 → 2 分钟 → 5 分钟`；同一时间最多一个 half-open 探测。
 - “立即重试”只调度当前失败文章；“终止”先确认旧执行体结束；“立即探测”仍竞争持久 lease，重复点击不会创建第二个请求。
+- 生产 Admin 成功入队后会通过受限 systemd path 唤醒独立恢复 worker；HTTP 请求本身不调用 provider，每日 worker 与恢复 worker 使用同一宿主锁串行。
 - 任务、lease、下一次重试、熔断、build 和投递幂等状态均保存在 SQLite，进程重启后继续恢复。
 
 ![Admin 翻译状态：队列、阶段、错误代码、熔断和单篇操作](docs/screenshots/admin-automation.png)

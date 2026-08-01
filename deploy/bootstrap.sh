@@ -112,9 +112,10 @@ section "1/10 前置校验（root、Docker、上传工件）"
 [ "$(id -u)" -eq 0 ] || die "必须以 root 执行（当前 uid=$(id -u)）"
 docker info >/dev/null 2>&1 || die "Docker 守护进程不可用——先安装/启动 Docker 再重跑"
 docker compose version >/dev/null 2>&1 || die "缺少 Compose v2（docker compose 子命令）"
-for f in compose.yaml news-digest.service news-digest.timer news.conf; do
+for f in compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news.conf; do
   [ -f "${SRC_DIR}/${f}" ] || die "缺少上传工件：${SRC_DIR}/${f}（应由 server-push.ps1 一并上传）"
 done
+command -v flock >/dev/null 2>&1 || die "缺少 flock（util-linux）；无法保证每日与恢复 worker 串行"
 echo "校验通过：root、Docker、Compose 与上传工件齐备"
 
 # ---------------------------------------------------------------
@@ -143,6 +144,12 @@ fi
 sed -e "s|/srv/news-digest|${APP_DIR}|g" \
     "${SRC_DIR}/news-digest.service" > "${TMP_DIR}/news-digest.service"
 install_file "${TMP_DIR}/news-digest.service" /etc/systemd/system/news-digest.service 644
+sed -e "s|/srv/news-digest|${APP_DIR}|g" \
+    "${SRC_DIR}/news-digest-resume.service" > "${TMP_DIR}/news-digest-resume.service"
+install_file "${TMP_DIR}/news-digest-resume.service" /etc/systemd/system/news-digest-resume.service 644
+sed -e "s|/srv/news-digest|${APP_DIR}|g" \
+    "${SRC_DIR}/news-digest-wakeup.path" > "${TMP_DIR}/news-digest-wakeup.path"
+install_file "${TMP_DIR}/news-digest-wakeup.path" /etc/systemd/system/news-digest-wakeup.path 644
 # nginx 的 news.conf 留到第 9 步按证书状态选版本就位：证书未签发时提前放完整版
 # 会让全局 nginx -t 失败，殃及主站与 SUB2API 的后续 reload。
 
@@ -159,6 +166,9 @@ section "3/10 服务器运行配置 .env"
 mkdir -p "$CONFIG_DIR"
 chown root:10001 "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
+touch "${CONFIG_DIR}/automation.wake"
+chown root:10001 "${CONFIG_DIR}/automation.wake"
+chmod 660 "${CONFIG_DIR}/automation.wake"
 # 幂等迁移：旧位置存在且新位置尚无同名文件才 mv（mv 保留属主与权限）；重跑自动跳过
 migrate_cfg() {  # $1=旧路径 $2=新路径
   if [ -e "$1" ] && [ ! -e "$2" ]; then
@@ -466,6 +476,7 @@ touch /var/lib/systemd/timers/stamp-news-digest.timer
 # 只 enable timer，不 enable service（service 无 [Install] 段，单元内注释已说明）。
 # 后续真正因服务器停机错过的任务仍由 Persistent=true 补跑。
 systemctl enable --now news-digest.timer
+systemctl enable --now news-digest-wakeup.path
 echo "下次触发（NEXT 列）："
 systemctl list-timers news-digest.timer --no-pager || true
 
@@ -645,6 +656,10 @@ if [ "$ADMIN_CODE" != "200" ]; then
   "${COMPOSE[@]}" logs --no-color --tail 100 admin >&2 || true
   die "Admin 健康检查失败，拒绝报告部署完成"
 fi
+systemctl is-enabled --quiet news-digest-wakeup.path ||
+  die "翻译操作 wakeup path 未启用"
+systemctl is-active --quiet news-digest-wakeup.path ||
+  die "翻译操作 wakeup path 未运行"
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
 # 版本自检：核对实际拉到的 worker 镜像 OCI version label 是否等于本次部署 TAG（CI 用

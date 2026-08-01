@@ -437,6 +437,8 @@ $smokeCommand = "set -e; " +
     "test `"`$code`" = 200; echo `"https status: `$code`"; " +
     "systemctl is-enabled --quiet news-digest.timer; " +
     "systemctl is-active --quiet news-digest.timer; " +
+    "systemctl is-enabled --quiet news-digest-wakeup.path; " +
+    "systemctl is-active --quiet news-digest-wakeup.path; " +
     "systemctl list-timers news-digest.timer --no-pager | head -3"
 & ssh @SshArgs $Server $smokeCommand
 Stop-OnError $LASTEXITCODE "final smoke check"

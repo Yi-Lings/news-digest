@@ -177,9 +177,13 @@ Compose `env_file` 对 `$`、引号、空格和 `#` 不做破坏性解释；这�
 
 ```bash
 cd /srv/news-digest
-sudo systemctl stop news-digest.timer
+sudo systemctl stop news-digest.timer news-digest-wakeup.path
 if sudo systemctl is-active --quiet news-digest.service; then
   echo 'worker 仍在运行；等待其结束后重新执行本步骤' >&2
+  exit 1
+fi
+if sudo systemctl is-active --quiet news-digest-resume.service; then
+  echo '恢复 worker 仍在运行；等待其结束后重新执行本步骤' >&2
   exit 1
 fi
 sudo docker compose stop admin
@@ -236,7 +240,7 @@ sudo docker compose up -d web admin            # admin 为配置与投递面板�
 curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web 应为 healthy，admin 应为 running
-sudo systemctl start news-digest.timer         # 已有实例手工升级：恢复先前暂停的 timer
+sudo systemctl start news-digest.timer news-digest-wakeup.path
 ```
 
 登录 Admin 新增并测试翻译档案、设为唯一默认后，可等待 08:00 timer，或由操作员另行执行
@@ -255,10 +259,10 @@ sudo docker inspect --format '{{index .Config.Labels "org.opencontainers.image.r
 ## 7. 安装 systemd 定时任务
 
 ```bash
-sudo cp news-digest.service news-digest.timer /etc/systemd/system/
+sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer /etc/systemd/system/
 command -v docker    # 若不是 /usr/bin/docker，同步修改 service 中 ExecStart 的绝对路径
 sudo systemctl daemon-reload
-sudo systemctl enable --now news-digest.timer
+sudo systemctl enable --now news-digest.timer news-digest-wakeup.path
 systemctl list-timers news-digest.timer        # 核对下次触发时间为 08:00（Asia/Shanghai）
 sudo systemctl start news-digest.service       # 手动触发一次，验证 timer→service→容器链路
 journalctl -u news-digest.service -n 50        # 查看运行日志

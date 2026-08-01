@@ -1766,20 +1766,36 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 task = db.translation_task(conn, task_id)
                 if task is None:
                     raise RuntimeError("translation task does not exist")
-                queued = db.queue_provider_probe(
-                    conn,
-                    task.provider_id,
-                    task_id,
-                    now=dt.datetime.now(dt.UTC).isoformat(),
-                    actor=self._admin_actor(),
-                )
+                already_queued = False
+                try:
+                    queued = db.queue_provider_probe(
+                        conn,
+                        task.provider_id,
+                        task_id,
+                        now=dt.datetime.now(dt.UTC).isoformat(),
+                        actor=self._admin_actor(),
+                    )
+                except RuntimeError as error:
+                    if str(error) != "provider probe is already queued":
+                        raise
+                    queued = db.queued_provider_probe(conn, task.provider_id)
+                    if queued is None:
+                        raise
+                    already_queued = True
             finally:
                 conn.close()
         except (RuntimeError, ValueError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
         self.server.translation_wakeup_callback()
-        self._json(202, {"ok": True, "status": queued.status})
+        self._json(
+            202,
+            {
+                "ok": True,
+                "status": queued.status,
+                "already_queued": already_queued,
+            },
+        )
 
     def _delivery_status_payload(self, edition_date: str) -> dict[str, Any]:
         if self.server.db_path is None:
@@ -3536,7 +3552,10 @@ function renderTranslations(data) {
     if (!data.probe_task_id || !confirm("确认跳过冷却并用一篇失败文章执行正式 schema 探测？")) { return; }
     var action = event.currentTarget; setBusy(action, true);
     api("/admin/api/translations/probe", {task_id: data.probe_task_id, confirm: true})
-      .then(function () { say("受控探测已排队。", true); return loadTranslations(); })
+      .then(function (result) {
+        say(result.already_queued ? "探测已在队列，已重新唤醒 worker。" : "受控探测已排队。", true);
+        return loadTranslations();
+      })
       .catch(function (error) { say(error.message, false); })
       .finally(function () { setBusy(action, false); });
   });

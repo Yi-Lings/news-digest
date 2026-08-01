@@ -1,0 +1,10 @@
+# Wake the recovery worker when Admin queues a translation action.
+[Unit]
+Description=Watch for queued news-digest translation actions
+
+[Path]
+PathChanged=/srv/news-digest/config/automation.wake
+Unit=news-digest-resume.service
+
+[Install]
+WantedBy=multi-user.target

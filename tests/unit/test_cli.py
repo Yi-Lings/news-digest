@@ -11,7 +11,9 @@ import pytest
 from news_digest import __version__
 from news_digest.admin_providers import AdminConfigError, save_profiles
 from news_digest.cli import (
+    _run_admin,
     _run_automation_daily,
+    _run_automation_resume,
     _run_daily,
     _run_preview,
     _run_preview_email,
@@ -473,6 +475,95 @@ def test_preview_loads_local_runtime_and_wires_mail_admin(tmp_path, monkeypatch)
     assert captured["closed"] is True
 
 
+def test_production_admin_wires_translation_wakeup_file(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "NEWS_SITE_URL=https://news.example.com\n"
+        f"NEWS_DATABASE_PATH={tmp_path / 'news.db'}\n"
+        f"NEWS_OUTPUT_PATH={tmp_path / 'site'}\n"
+        "PUBLIC_SUBSCRIPTION_ENABLED=false\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "NEWS_SITE_URL",
+        "NEWS_DATABASE_PATH",
+        "NEWS_OUTPUT_PATH",
+        "PUBLIC_SUBSCRIPTION_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    captured = {}
+
+    class FakeServer:
+        def serve_forever(self):
+            callback = captured["kwargs"]["translation_wakeup_callback"]
+            assert callable(callback)
+            callback()
+            captured["wake_value"] = (config_dir / "automation.wake").read_text(
+                encoding="ascii"
+            )
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            captured["closed"] = True
+
+    def create_server(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeServer()
+
+    monkeypatch.setattr("news_digest.preview_server.create_server", create_server)
+
+    assert _run_admin(8619, config_dir) == 0
+    assert captured["args"] == (config_dir, config_dir, 8619)
+    assert captured["wake_value"].strip().isdigit()
+    assert captured["closed"] is True
+
+
+def test_resume_automation_is_a_noop_without_unfinished_editions(tmp_path, monkeypatch):
+    database = tmp_path / "news.db"
+    monkeypatch.setattr(
+        "news_digest.cli._fetch_config",
+        lambda _window: types.SimpleNamespace(database=database),
+    )
+    called = []
+    monkeypatch.setattr(
+        "news_digest.cli._run_automation_daily",
+        lambda *_args, **_kwargs: called.append("run") or 1,
+    )
+
+    assert _run_automation_resume(True) == 0
+    assert called == []
+
+
+def test_resume_automation_selects_latest_unfinished_edition(tmp_path, monkeypatch):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        db.ensure_automation_edition(
+            conn,
+            "2026-08-01",
+            target_count=1,
+            now="2026-08-01T00:00:00+00:00",
+        )
+    finally:
+        conn.close()
+    fetch_config = types.SimpleNamespace(database=database)
+    monkeypatch.setattr("news_digest.cli._fetch_config", lambda _window: fetch_config)
+    captured = {}
+
+    def run_daily(config, edition):
+        captured["config"] = config
+        captured["date"] = edition.date
+        return 7
+
+    monkeypatch.setattr("news_digest.cli._run_automation_daily", run_daily)
+
+    assert _run_automation_resume(True) == 7
+    assert captured == {"config": fetch_config, "date": "2026-08-01"}
+
+
 def test_preview_automation_demo_uses_isolated_database_and_fake_wakeup(
     tmp_path, monkeypatch
 ):
@@ -556,6 +647,8 @@ def test_subcommands_parse():
     assert args.yes is True
     args = parser.parse_args(["preview", "--automation-demo"])
     assert args.command == "preview" and args.automation_demo is True
+    args = parser.parse_args(["resume-automation", "--yes"])
+    assert args.command == "resume-automation" and args.yes is True
     args = parser.parse_args(["translate"])
     assert args.yes is False
     assert args.redo == []

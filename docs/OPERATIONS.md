@@ -94,6 +94,8 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 **翻译中断（Ctrl+C 或断网）。** 直接重跑同一条命令：已成功篇目在 `var/data/translations/` 请求级缓存中，续接瞬时完成、不重复计费。daily 流程里中断则以当前状态成刊，之后单独 `translate --yes` 补齐再 `build`。
 
+**Admin 显示 `provider probe is already queued`。** 先检查 `systemctl status news-digest-wakeup.path news-digest-resume.service`。Admin 的“立即探测/重试/终止”只写持久队列和 `${APP_DIR}/config/automation.wake`，由 path 单元启动 `resume-automation --yes`；HTTP 进程不直接调用 provider。恢复 worker 与每日 worker 由 `/run/news-digest-worker.lock` 串行。path 正常但历史请求仍在排队时，执行 `sudo systemctl start news-digest-resume.service`，不要删除数据库记录或重复点击。
+
 **单篇翻译质量差。** `uv run news-digest translate --redo SLUG --yes`（SLUG 即文章页地址 `/issues/日期/SLUG.html` 的末段，也出现在翻译进度输出里；可多次 `--redo`），完成后 `build`。重翻跳过缓存读取并覆盖旧结果，产生一次真实调用。
 
 **构建失败。** 无需清理：`var/site/current` 是指向 `releases/<日期-序号>` 的链接（Windows 为 junction），只在新版本完整生成后才切换；失败时仍指向上一完整版本，修好后重跑 `build` 即可。

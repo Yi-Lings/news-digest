@@ -1029,6 +1029,19 @@ def translation_task(conn: sqlite3.Connection, task_id: str) -> TranslationTask 
     return _translation_task(row) if row else None
 
 
+def queued_provider_probe(
+    conn: sqlite3.Connection, provider_id: str
+) -> TranslationTask | None:
+    provider_id = _non_empty(provider_id, "provider_id", maximum=128)
+    row = conn.execute(
+        _translation_task_select()
+        + " WHERE provider_id = ? AND manual_probe_requested_at IS NOT NULL"
+        " ORDER BY manual_probe_requested_at LIMIT 1",
+        (provider_id,),
+    ).fetchone()
+    return _translation_task(row) if row else None
+
+
 def list_translation_tasks(
     conn: sqlite3.Connection,
     edition_date: str,
