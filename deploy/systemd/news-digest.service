@@ -14,6 +14,7 @@ OnFailure=news-digest-resume.service
 [Service]
 # oneshot：进程退出即任务结束，退出码非 0 记为失败，journal 中可直接看到
 Type=oneshot
+SuccessExitStatus=10
 # 复用 compose 中 worker 的完整定义（digest、只读、内存上限、env_file 都只在 compose 维护一处）
 ExecStart=/usr/bin/flock /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker
 # 兜底时限：抓取+翻译+构建正常在几分钟内完成；超时按失败处理并回收容器，

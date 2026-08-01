@@ -102,6 +102,9 @@ _IDEMPOTENCY_WARNING = (
 _PUBLIC_SUBMISSION_MESSAGE = "如果该地址可以订阅，我们会发送一封确认邮件。"
 _PUBLIC_CONFIRM_MESSAGE = "确认请求已处理；如链接有效，订阅将生效。"
 _PUBLIC_UNSUBSCRIBE_MESSAGE = "退订请求已处理；如链接有效，后续邮件将停止。"
+_AUTOMATION_EDITION_ERROR_CODES = frozenset(
+    {"BUILD_FAILED", "DELIVERY_FAILED", "DELIVERY_EXPIRED"}
+)
 
 
 def _to64(value: int, length: int) -> str:
@@ -1601,6 +1604,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "edition": {
                     "date": edition.edition_date,
                     "status": edition.status,
+                    "error_code": (
+                        edition.last_error_code
+                        if edition.last_error_code in _AUTOMATION_EDITION_ERROR_CODES
+                        else "UNKNOWN" if edition.last_error_code else None
+                    ),
                     "last_updated": last_updated,
                 },
                 "summary": summary,
@@ -3527,7 +3535,9 @@ function renderTranslations(data) {
   if (data.csrf_token) { csrf = data.csrf_token; }
   var edition = data.edition;
   field("translation-edition").textContent = edition ?
-    "刊期 " + edition.date + " · " + edition.status + " · 更新 " + timeText(edition.last_updated) :
+    "刊期 " + edition.date + " · " + edition.status +
+      (edition.error_code ? " · 错误 " + edition.error_code : "") +
+      " · 更新 " + timeText(edition.last_updated) :
     "暂无自动化刊期";
   var provider = field("translation-provider"); provider.replaceChildren();
   var providerCopy = document.createElement("div");

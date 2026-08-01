@@ -178,9 +178,9 @@ def test_isolated_automation_retries_only_failed_article_and_delivers_once(tmp_p
     assert restarted.flush_build(now=_at(18), owner="builder-b")
     assert build.translated_counts == [2, 3]
 
-    assert restarted.flush_delivery(now=_at(19))
+    assert restarted.flush_delivery(edition_date="2026-07-28", now=_at(19))
     assert len(smtp_calls) == 1
-    assert not restarted.flush_delivery(now=_at(20))
+    assert not restarted.flush_delivery(edition_date="2026-07-28", now=_at(20))
 
     final = db.connect(database)
     try:
@@ -211,7 +211,7 @@ def test_delivery_callback_exception_releases_claim_for_retry(tmp_path):
     assert runner.run_ready(now=_at(1), owner="worker-a").succeeded == 1
     assert runner.flush_build(now=_at(2), owner="builder-a", force=True)
 
-    assert not runner.flush_delivery(now=_at(3))
+    assert not runner.flush_delivery(edition_date="2026-07-28", now=_at(3))
     conn = db.connect(database)
     try:
         failed = db.automation_edition(conn, "2026-07-28")
@@ -231,8 +231,52 @@ def test_delivery_callback_exception_releases_claim_for_retry(tmp_path):
         build_callback=build,
         delivery_callback=lambda date, key: calls.append((date, key)) or True,
     )
-    assert restarted.flush_delivery(now=_at(4))
+    assert restarted.flush_delivery(edition_date="2026-07-28", now=_at(4))
     assert len(calls) == 1
+
+
+def test_delivery_targets_current_edition_and_expires_older_failure(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    build = BuildHarness(database, tmp_path / "site")
+    calls = Counter()
+    deliveries: list[str] = []
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), calls),
+        cache_dir=tmp_path / "cache",
+        build_callback=build,
+        delivery_callback=lambda date, key: deliveries.append(date) or True,
+    )
+
+    for offset, edition_date in enumerate(("2026-07-28", "2026-07-29"), start=1):
+        runner.seed_edition(
+            DailyEdition(date=edition_date, articles=[_article(offset)]),
+            now=_at(offset),
+        )
+        assert runner.run_ready(
+            now=_at(offset + 2), owner=f"worker-{offset}"
+        ).succeeded == 1
+        assert runner.flush_build(
+            now=_at(offset + 4), owner=f"builder-{offset}", force=True
+        )
+
+    assert runner.flush_delivery(edition_date="2026-07-29", now=_at(10))
+    assert deliveries == ["2026-07-29"]
+
+    conn = db.connect(database)
+    try:
+        older = db.automation_edition(conn, "2026-07-28")
+        current = db.automation_edition(conn, "2026-07-29")
+        unfinished = db.unfinished_automation_edition_dates(conn)
+    finally:
+        conn.close()
+    assert older is not None
+    assert older.status == "complete"
+    assert older.last_error_code == "DELIVERY_EXPIRED"
+    assert older.delivery_finished_at == _at(10).isoformat()
+    assert current is not None and current.status == "delivered"
+    assert unfinished == []
 
 
 def test_provider_circuit_uses_one_real_task_for_automatic_half_open(tmp_path):

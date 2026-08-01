@@ -7,8 +7,8 @@ from news_digest import __version__
 ROOT = Path(__file__).parents[2]
 
 
-def test_phase_8_release_version_is_v1_2_4():
-    assert __version__ == "1.2.4"
+def test_phase_8_release_version_is_v1_2_5():
+    assert __version__ == "1.2.5"
 
 
 def _read(path: str) -> str:
@@ -276,7 +276,10 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert "/usr/bin/flock /run/news-digest-worker.lock" in daily_service
     assert "resume-automation --yes" in resume_service
     assert "Restart=on-failure" in resume_service
-    assert "/usr/bin/flock -n /run/news-digest-worker.lock" in resume_service
+    assert "SuccessExitStatus=10" in daily_service
+    assert "SuccessExitStatus=10" in resume_service
+    assert "RestartPreventExitStatus=10" in resume_service
+    assert "/usr/bin/flock -E 75 -n /run/news-digest-worker.lock" in resume_service
     assert "PathChanged=/srv/news-digest/config/automation.wake" in wake_path
     assert "Unit=news-digest-resume.service" in wake_path
     assert "WantedBy=multi-user.target" in wake_path

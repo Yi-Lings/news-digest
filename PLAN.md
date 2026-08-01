@@ -712,9 +712,9 @@ Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停�
 
 ### 阶段 8：v1.2.0 全自动逐篇翻译、增量上线与翻译监控
 
-状态：`v1.2.3 为当前服务器基线；v1.2.4 修复生产 Admin 翻译操作入队后未唤醒 worker 的问题。本次授权范围仅发布 GHCR 镜像与 Release，服务器部署和真实队列恢复另行执行。`
+状态：`v1.2.4 为事故发生时的服务器基线；v1.2.5 修复旧刊投递失败阻塞后续新刊和恢复 worker 无限重启。本次热修先发布 GHCR 镜像与 Release；部署后历史刊期不得自动补发，当日是否补投须单独人工决定。`
 
-版本目标：`v1.2.0` 功能线；当前开源补丁版本为 `v1.2.4`。
+版本目标：`v1.2.0` 功能线；当前开源补丁版本为 `v1.2.5`。
 
 主流程固定为：
 
@@ -1001,4 +1001,5 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 | 2026-07-28 | 发布后整治 | 部署链开源参数化完成 | 以 v1.2.2 `main` 为基线移除 Windows 部署入口的个人生产默认值，并贯通 install/preflight/bootstrap 目标与端口；缺参和非法值均在联网或服务器写操作前失败，`deploy.bat` 实测完整透传。最终离线全量 `573 passed, 1 skipped, 7 deselected(network)`，Ruff、PowerShell AST、Git Bash `-n` 与 diff check 通过；相关改动纳入本次 `main` 开源迭代，不创建新 tag、Release 或生产部署。 |
 | 2026-07-28 | 发布后整治 | WSL 全新部署与幂等复跑通过 | 在隔离的 Ubuntu 24.04 + Docker 29.1.3 + Compose 2.40.3 + Nginx 1.24 环境，以 v1.2.2 公开 digest 从空目录真实执行 bootstrap 并原样复跑，再由 Windows `server-push.ps1` 经真实 SSH/SCP 完整部署并原样复跑，所有完整执行均返回 0；Web `/healthz` 与 Admin `/admin/` 均为 HTTP 200，容器 restart count 为 0，timer 仅排到次日 08:00，`news-digest.service` 无部署期运行记录。实测修复三项一键阻断：共享 SQLite volume 统一为 GID 10001、setgid、组可写，Admin 非默认端口正确渲染 `--port`，以及 preflight 在幂等复跑时精确放行由现有 Compose Web/Admin service 占用的端口；首次 `.env` 的 API/SMTP 为空，自动投递与公开订阅关闭，不生成 `providers.json` 或 `.env.incoming`，部署不执行抓取、翻译、构建或投递。certbot 因本地无公网 DNS 无法完成真实签发，其余 SSH/SCP、Docker/systemd/Nginx/镜像流程均真实执行；测试 timer 已禁用，相关部署资产与回归随本次开源迭代纳入 `main`，不改动已发布的 v1.2.2 tag/digest 或生产部署。 |
 | 2026-07-28 | 发布后整治 | v1.2.3 开源部署修复发布 | 保留 v1.2.2 tag、Release 与生产 digest 不可变；以新补丁版本发布参数化部署链、通用 README/运维文档、新版产品截图和部署回归，使 GitHub Latest Release 的部署包包含本次全部修复。生产服务器不随本次 GitHub Release 自动升级。 |
+| 2026-08-01 | 阶段 8 | v1.2.5 自动投递阻塞热修 | 生产证据显示 07-28 投递失败后刊期仍为 `complete`，07-29 至 08-01 虽全部翻译和上线但没有正式投递；恢复 worker 始终先领取旧刊，再被时间门禁拒绝并每 15 秒重启。修复为自动投递只领取当前 worker 刊期，新刊投递前把更早未投递刊期标记 `DELIVERY_EXPIRED` 并排除恢复队列；历史刊物与审计保留但不自动补发。应用确定性终态使用退出码 10，systemd 不再为其循环重启；锁竞争独立使用 75。定向回归 `243 passed, 1 skipped`；隔离临时目录后的最终离线全量 `578 passed, 1 skipped, 7 deselected(network)`，Ruff、PowerShell AST、Shell 语法和 diff check 通过，未调用真实 provider/SMTP；待不可变 `v1.2.5` 发布与用户侧部署核验。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

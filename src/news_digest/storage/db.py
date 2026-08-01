@@ -1784,6 +1784,7 @@ def unfinished_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         "SELECT edition_date FROM automation_editions"
         " WHERE status NOT IN ('delivered', 'delivery_pending')"
+        " AND NOT (status = 'complete' AND last_error_code = 'DELIVERY_EXPIRED')"
         " ORDER BY edition_date DESC"
     ).fetchall()
     return [row["edition_date"] for row in rows]
@@ -1797,12 +1798,23 @@ def pending_automation_build_dates(conn: sqlite3.Connection) -> list[str]:
     return [row["edition_date"] for row in rows]
 
 
-def complete_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        "SELECT edition_date FROM automation_editions"
-        " WHERE status = 'complete' ORDER BY edition_date"
-    ).fetchall()
-    return [row["edition_date"] for row in rows]
+def expire_automation_deliveries_before(
+    conn: sqlite3.Connection,
+    edition_date: str,
+    *,
+    now: str,
+) -> int:
+    _validate_test_attempt_date(edition_date)
+    now = _automation_timestamp(now)
+    with conn:
+        cursor = conn.execute(
+            "UPDATE automation_editions SET last_error_code = 'DELIVERY_EXPIRED',"
+            " delivery_finished_at = ?, updated_at = ?"
+            " WHERE edition_date < ? AND status = 'complete' AND delivery_key IS NULL"
+            " AND COALESCE(last_error_code, '') != 'DELIVERY_EXPIRED'",
+            (now, now, edition_date),
+        )
+    return cursor.rowcount
 
 
 def mark_translation_ready_for_build(

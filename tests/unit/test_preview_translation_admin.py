@@ -52,6 +52,11 @@ def _seed(database):
         db.ensure_automation_edition(
             conn, "2026-07-28", target_count=2, now=_at()
         )
+        conn.execute(
+            "UPDATE automation_editions SET last_error_code = 'DELIVERY_EXPIRED'"
+            " WHERE edition_date = '2026-07-28'"
+        )
+        conn.commit()
         db.claim_translation_task(
             conn, failed.task_id, owner="worker-f", now=_at(), lease_seconds=60
         )
@@ -94,6 +99,7 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         status, payload = _request(port, "GET", "/admin/api/translations")
         assert status == 200
         assert payload["edition"]["date"] == "2026-07-28"
+        assert payload["edition"]["error_code"] == "DELIVERY_EXPIRED"
         assert payload["summary"] == {
             "total": 2,
             "online": 0,
@@ -113,6 +119,21 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         encoded = json.dumps(payload, ensure_ascii=False)
         assert "safe-diagnostic" in encoded
         assert "provider raw response" not in encoded
+
+        conn = db.connect(database)
+        try:
+            conn.execute(
+                "UPDATE automation_editions SET last_error_code = ?"
+                " WHERE edition_date = '2026-07-28'",
+                ("provider raw response",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, redacted = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert redacted["edition"]["error_code"] == "UNKNOWN"
+        assert "provider raw response" not in json.dumps(redacted, ensure_ascii=False)
 
         status, queued = _request(
             port,
@@ -240,5 +261,6 @@ def test_translation_admin_dom_contract_and_reduced_motion():
         "waiting_cancel_confirmation: \"等待终止确认\"",
         "waiting_probe: \"等待熔断探测\"",
         "下一次执行",
+        'edition.error_code ? " · 错误 " + edition.error_code : ""',
     ]:
         assert token in ADMIN_HTML

@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前正式版：`v1.2.4`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
+当前正式版：`v1.2.5`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
 
 ## 产品能力
 
@@ -319,6 +319,43 @@ ssh -i C:\keys\deploy_ed25519 root@server.example.com "journalctl -fu news-diges
 - 不得把 API Key、SMTP 密码或完整 PAT 写入命令、日志或截图。
 
 完整参数、私有仓库认证、手工部署、升级和回滚见[部署手册](deploy/README.md)。
+
+### 生产热更新：v1.2.5
+
+`v1.2.5` 修复旧刊投递失败后持续阻塞新刊的问题。正确顺序为：当日目标文章全部翻译成功、
+全部上线且最终 build 完成后，只投递当日刊物一次；更早刊期不会自动补发，也不会继续进入
+恢复 worker。被关闭自动投递资格的旧刊保留全部审计记录，并在 Admin 显示
+`DELIVERY_EXPIRED`。
+
+升级前先冻结每日和恢复入口，确认没有 worker 正在运行：
+
+```bash
+systemctl stop news-digest.timer news-digest-wakeup.path news-digest-resume.service
+systemctl reset-failed news-digest-resume.service
+systemctl is-active news-digest.service news-digest-resume.service
+```
+
+两个 service 都应为 `inactive`。然后按“Linux 服务器部署”的同一条安装命令升级到最新
+Release；安装器会做 SQLite online backup、按不可变 digest 更新镜像、重装 systemd unit，
+并恢复 timer 与 wakeup path，但不会在部署过程中抓取、翻译、构建或投递。
+
+升级后只做无副作用核对：
+
+```bash
+docker compose -f /srv/news-digest/compose.yaml run --rm worker --version
+systemctl is-enabled news-digest.timer news-digest-wakeup.path
+systemctl is-active news-digest-wakeup.path news-digest-resume.service
+systemctl cat news-digest.service | grep SuccessExitStatus
+systemctl cat news-digest-resume.service | grep -E 'SuccessExitStatus|RestartPreventExitStatus|flock -E 75'
+```
+
+期望版本为 `v1.2.5`，timer/path 为 `enabled`，wakeup path 为 `active`，resume service 为
+`inactive`；两个 service 都把应用终态 `10` 视为已处理，恢复 worker 不再每 15 秒重启。
+
+不要直接启动恢复 worker 来“补齐”历史邮件。`DELIVERY_EXPIRED` 表示刊物内容仍保留在线，
+但其自动投递资格已过期。只有当天刊期需要补投时，才在核对订阅者逐账号投递状态、SMTP
+服务端队列以及所有 `unknown` 后，由管理员明确决定是否执行一次当日恢复；任何历史刊期都
+不得自动补发，`unknown` 也不得盲目重发。
 
 ## 常见问题
 

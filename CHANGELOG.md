@@ -3,6 +3,17 @@
 版本纪律:tag = `v` + `__version__`(CI 强校验二者一致);**已推送的 tag 永不移动**,重打即升号。
 部署脚本运行时从 `src/news_digest/__init__.py` 派生版本,该文件是唯一真源。
 
+## [1.2.5] - 2026-08-01
+
+- 修复旧刊投递失败后始终被恢复 worker 优先领取、随后又被投递时间门禁拒绝，导致新刊永远
+  无法进入 SMTP 且 `news-digest-resume.service` 每 15 秒重启的问题。
+- 自动投递只领取当前 worker 的刊期；开始处理新刊时，更早的未投递 `complete` 刊期标记为
+  `DELIVERY_EXPIRED`，保留刊物、订阅与投递审计，但不再自动补发或进入恢复队列。
+- 当日目标文章仍须满足 `target_count = succeeded_count = online_count` 并完成最终 build 后
+  才投递；Admin 刊期摘要增加封闭错误码，不回显 SMTP/provider 原始内容。
+- systemd 将确定性人工处理终态 `10` 与临时锁竞争 `75` 分离；前者停止恢复重启，后者仍可
+  稍后重试。
+
 ## [1.2.4] - 2026-08-01
 
 - 修复生产 Admin 将翻译探测或单篇操作写入持久队列后没有 worker 消费，界面长期显示

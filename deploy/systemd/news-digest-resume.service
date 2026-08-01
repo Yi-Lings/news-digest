@@ -6,7 +6,9 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/flock -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
+ExecStart=/usr/bin/flock -E 75 -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
 TimeoutStartSec=45min
+SuccessExitStatus=10
 Restart=on-failure
+RestartPreventExitStatus=10
 RestartSec=15s

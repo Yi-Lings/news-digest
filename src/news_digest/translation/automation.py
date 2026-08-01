@@ -497,22 +497,19 @@ class TranslationAutomationRunner:
             conn.close()
         return True
 
-    def flush_delivery(self, *, now) -> bool:
+    def flush_delivery(self, *, edition_date: str, now) -> bool:
         timestamp = self._iso(now)
         conn = db.connect(self.database)
         try:
-            edition_date = None
-            delivery_key = None
-            for candidate_date in db.complete_automation_edition_dates(conn):
-                delivery_key = db.claim_automation_delivery(
-                    conn, candidate_date, now=timestamp
-                )
-                if delivery_key is not None:
-                    edition_date = candidate_date
-                    break
+            db.expire_automation_deliveries_before(
+                conn, edition_date, now=timestamp
+            )
+            delivery_key = db.claim_automation_delivery(
+                conn, edition_date, now=timestamp
+            )
         finally:
             conn.close()
-        if delivery_key is None or edition_date is None:
+        if delivery_key is None:
             return False
 
         try:

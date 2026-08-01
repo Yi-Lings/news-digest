@@ -8,6 +8,8 @@ from pathlib import Path
 
 from news_digest import __version__
 
+_AUTOMATION_ACTION_REQUIRED = 10
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -647,7 +649,7 @@ def _run_automation_daily(
         smtp = smtp_config_from_env() if delivery_enabled else None
     except (TranslationError, ValueError) as error:
         print(f"自动化配置错误：{error}")
-        return 1
+        return _AUTOMATION_ACTION_REQUIRED
 
     build_config = build_config_from_env()
 
@@ -685,7 +687,10 @@ def _run_automation_daily(
             f"自动投递：成功 {report.sent_count}，失败 {report.failed_count}，"
             f"unknown {report.unknown_count}，跳过 {report.skipped_count}"
         )
-        return report.succeeded or (not delivery_enabled and report.status == "skipped")
+        error_category = getattr(report, "error_category", None)
+        if error_category:
+            print(f"自动投递错误分类：{error_category}")
+        return report.succeeded or report.status == "skipped"
 
     clock = clock or (lambda: dt.datetime.now(dt.UTC))
     sleep = sleep or time.sleep
@@ -706,7 +711,7 @@ def _run_automation_daily(
             now = clock()
             result = runner.run_ready(now=now, owner=owner, max_tasks=1)
             built = runner.flush_build(now=clock(), owner=owner)
-            delivered = runner.flush_delivery(now=clock())
+            delivered = runner.flush_delivery(edition_date=date, now=clock())
             conn = db.connect(fetch_config.database)
             try:
                 state = db.automation_edition(conn, date)
@@ -721,18 +726,23 @@ def _run_automation_daily(
                 for task in tasks
             ):
                 print("自动化已安全停止：存在需要人工处理的翻译任务。")
-                return 1
-            if state is not None and state.status == "complete" and not delivered:
+                return _AUTOMATION_ACTION_REQUIRED
+            if (
+                delivery_enabled
+                and state is not None
+                and state.status == "complete"
+                and not delivered
+            ):
                 print("自动投递失败；保留持久状态，未重复投递。")
-                return 1
+                return _AUTOMATION_ACTION_REQUIRED
             if state is not None and state.status == "build_failed" and not built:
                 print("增量构建失败；旧站点保持不变。")
-                return 1
+                return _AUTOMATION_ACTION_REQUIRED
             if not (result.claimed or built or delivered):
                 sleep(1.0)
     except (DeliveryServiceError, KeyboardInterrupt, ValueError) as error:
         print(f"自动化已停止：{error}")
-        return 130 if isinstance(error, KeyboardInterrupt) else 1
+        return 130 if isinstance(error, KeyboardInterrupt) else _AUTOMATION_ACTION_REQUIRED
     finally:
         translator.close()
 

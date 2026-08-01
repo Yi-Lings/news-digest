@@ -330,5 +330,5 @@ class TranslationAutomationDemo:
             if run_ready:
                 self.runner.run_ready(now=now, owner="demo-worker", max_tasks=1)
             self.runner.flush_build(now=now, owner="demo-builder", force=True)
-            self.runner.flush_delivery(now=now)
+            self.runner.flush_delivery(edition_date=self.edition.date, now=now)
             self._schedule_next_wakeup()
