@@ -158,16 +158,28 @@ def translate_edition(
 
     for article in edition.articles:
         force = article.slug in redo
+        identity = getattr(translator, "cache_identity", translator.model)
+        cache_file = cache_dir / f"{cache_key(article, identity)}.json"
         if article.translated_by and not force:
-            report.already_done += 1
-            articles.append(article)
-            continue
+            # A prompt-version bump must invalidate previously persisted translations.
+            # Current-version cache is the only safe signal that the article already
+            # passed the current translation contract.
+            if cache_file.is_file():
+                try:
+                    _result_from_dict(
+                        json.loads(cache_file.read_text(encoding="utf-8")),
+                        len(article.paragraphs),
+                    )
+                except (InvalidTranslation, json.JSONDecodeError):
+                    pass
+                else:
+                    report.already_done += 1
+                    articles.append(article)
+                    continue
         if not force and limit is not None and translated_count >= limit:
             articles.append(article)
             continue
 
-        identity = getattr(translator, "cache_identity", translator.model)
-        cache_file = cache_dir / f"{cache_key(article, identity)}.json"
         result: TranslationResult | None = None
 
         if not force and cache_file.is_file():

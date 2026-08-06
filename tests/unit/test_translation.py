@@ -102,9 +102,17 @@ def test_parse_rejects_ambiguous_fenced_objects():
 
 
 def test_formal_prompt_uses_versioned_explicit_json_contract():
-    assert PROMPT_VERSION == "p3"
+    assert PROMPT_VERSION == "p4"
     assert '"paragraphs_zh": ["逐段中文译文"]' in SYSTEM_PROMPT
     assert '"phonetic": "非空字符串"' in SYSTEM_PROMPT
+
+
+def test_formal_prompt_requires_complete_non_summary_translation():
+    assert "不是摘要、改写或评论" in SYSTEM_PROMPT
+    assert "不得合并段落、跳过句子、删减事实" in SYSTEM_PROMPT
+    assert "人物、机构、地点、时间、数字、比例、金额" in SYSTEM_PROMPT
+    assert "summary_zh 只是补充摘要" in SYSTEM_PROMPT
+    assert "逐段对照输入正文自检" in SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -212,6 +220,19 @@ def test_already_translated_articles_skipped(tmp_path):
 
     updated2, report2 = translate_edition(updated, translator, tmp_path)
     assert report2.already_done == 1 and report2.api_calls == 0
+
+
+def test_translated_article_without_current_prompt_cache_is_retranslated(tmp_path):
+    edition = DailyEdition(date="2026-07-26", articles=[_article()])
+    translator = FakeTranslator(_valid_raw())
+    translated = replace(_article(), translated_by="old-model@p3")
+
+    updated, report = translate_edition(
+        DailyEdition(date=edition.date, articles=[translated]), translator, tmp_path
+    )
+
+    assert report.already_done == 0 and report.api_calls == 1
+    assert updated.articles[0].translated_by == "fake-model@p1"
 
 
 def test_invalid_response_not_cached_and_not_fatal(tmp_path):
