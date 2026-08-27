@@ -454,7 +454,7 @@ def test_provider_modes_switch_path_headers_payload_and_parser(api_type, stream,
     [
         (400, "request"),
         (401, "authentication"),
-        (403, "authentication"),
+            (403, "upstream"),
         (404, "endpoint"),
         (429, "rate_limit"),
         (503, "provider"),

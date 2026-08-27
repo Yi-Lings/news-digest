@@ -422,8 +422,8 @@ def test_configuration_failure_blocks_until_controlled_test_succeeds(tmp_path):
         ),
         (
             TranslationError("redacted", category="authentication", status=403),
-            "AUTH_403",
-            "configuration_failure",
+                "UPSTREAM_ERROR",
+                "provider_failure",
             False,
         ),
         (

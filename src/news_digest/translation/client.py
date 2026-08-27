@@ -219,8 +219,10 @@ def _retry_after_seconds(value: str | None) -> float | None:
 
 def _status_error(response: httpx.Response) -> TranslationError:
     status = response.status_code
-    if status in {401, 403}:
+    if status == 401:
         category, message = "authentication", "翻译接口鉴权失败"
+    elif status == 403:
+        category, message = "upstream", "翻译接口上游拒绝请求"
     elif status == 404:
         category, message = "endpoint", "翻译接口路径或模型不存在"
     elif status == 429:

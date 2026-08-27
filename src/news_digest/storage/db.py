@@ -909,6 +909,7 @@ _TRANSLATION_ERROR_CODES = frozenset(
     {
         "AUTH_401",
         "AUTH_403",
+        "UPSTREAM_ERROR",
         "RATE_LIMIT_429",
         "PROVIDER_5XX",
         "NETWORK_CONNECT_FAILED",
@@ -925,6 +926,7 @@ _TRANSLATION_ERROR_CODES = frozenset(
 _TRANSLATION_ERROR_CATEGORIES = frozenset(
     {
         "authentication",
+        "upstream",
         "configuration",
         "provider_infrastructure",
         "response_format",
@@ -1366,8 +1368,8 @@ def queue_provider_probe(
         circuit = conn.execute(
             "SELECT state FROM provider_circuits WHERE provider_id = ?", (provider_id,)
         ).fetchone()
-        if circuit is None or circuit["state"] != "open":
-            raise RuntimeError("provider circuit is not open")
+        if circuit is None or circuit["state"] not in {"open", "configuration_blocked"}:
+            raise RuntimeError("provider circuit is not probeable")
         queued_probe = conn.execute(
             "SELECT 1 FROM translation_tasks WHERE provider_id = ?"
             " AND manual_probe_requested_at IS NOT NULL LIMIT 1",
@@ -1385,6 +1387,7 @@ def queue_provider_probe(
             "failed",
             "retry_wait",
             "cancelled",
+            "configuration_blocked",
         }:
             raise RuntimeError("translation task cannot be used as a probe")
         if task_row["manual_probe_requested_at"] is not None:
@@ -1512,7 +1515,7 @@ def finish_translation_task_failure(
         error_code, error_category, failure_stage, diagnostic_id, http_status
     )
     now = _automation_timestamp(now)
-    configuration_blocked = error_code in {"AUTH_401", "AUTH_403", "CONFIGURATION_INVALID"}
+    configuration_blocked = error_code in {"AUTH_401", "CONFIGURATION_INVALID"}
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -2225,7 +2228,7 @@ def claim_provider_probe(
         conn.execute("BEGIN IMMEDIATE")
         circuit = _ensure_provider_circuit(conn, provider_id, now)
         due = circuit.next_probe_at is not None and circuit.next_probe_at <= now
-        if circuit.state != "open" or not (manual or due):
+        if circuit.state not in {"open", "configuration_blocked"} or not (manual or due):
             conn.commit()
             return False
         task_exists = conn.execute(
@@ -2237,7 +2240,7 @@ def claim_provider_probe(
         cursor = conn.execute(
             "UPDATE provider_circuits SET state = 'half_open', probe_task_id = ?,"
             " probe_owner = ?, probe_lease_expires_at = ?, last_outcome = NULL, updated_at = ?"
-            " WHERE provider_id = ? AND state = 'open'",
+            " WHERE provider_id = ? AND state IN ('open', 'configuration_blocked')",
             (task_id, owner, _future_timestamp(now, lease_seconds), now, provider_id),
         )
         conn.commit()
@@ -2311,6 +2314,14 @@ def finish_provider_probe(
                 provider_id,
             ),
         )
+        if outcome in {"success", "content_failure"}:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'pending', auto_retry = 1,"
+                " next_retry_at = NULL, error_code = NULL, error_category = NULL,"
+                " failure_stage = NULL, finished_at = NULL, updated_at = ?"
+                " WHERE provider_id = ? AND status = 'configuration_blocked'",
+                (now, provider_id),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2360,7 +2371,16 @@ def clear_provider_configuration_block(
             " WHERE provider_id = ? AND state = 'configuration_blocked'",
             (now, provider_id),
         )
-    return cursor.rowcount == 1
+        circuit_changed = cursor.rowcount == 1
+        if circuit_changed:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'pending', auto_retry = 1,"
+                " next_retry_at = NULL, error_code = NULL, error_category = NULL,"
+                " failure_stage = NULL, finished_at = NULL, updated_at = ?"
+                " WHERE provider_id = ? AND status = 'configuration_blocked'",
+                (now, provider_id),
+            )
+    return circuit_changed
 
 
 def upsert_articles(conn: sqlite3.Connection, date: str, articles: list[Article]) -> None:

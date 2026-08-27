@@ -1571,7 +1571,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 (
                     task
                     for task in tasks
-                    if task.status in {"failed", "retry_wait", "cancelled", "pending"}
+                    if task.status in {"failed", "retry_wait", "cancelled", "pending", "configuration_blocked"}
                 ),
                 key=lambda task: task.status == "pending",
             )
@@ -1663,7 +1663,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 ],
                 "probe_task_id": (
                     probe_candidates[0].task_id
-                    if circuit_state == "open" and probe_candidates
+                    if circuit_state in {"open", "configuration_blocked"} and probe_candidates
                     else None
                 ),
                 "csrf_token": self._csrf_for_response(),

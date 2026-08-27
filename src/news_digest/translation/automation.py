@@ -76,7 +76,9 @@ def classify_translation_failure(
     if status == 401:
         return TranslationFailure("AUTH_401", "authentication", "configuration_failure", False, 401)
     if status == 403:
-        return TranslationFailure("AUTH_403", "authentication", "configuration_failure", False, 403)
+        return TranslationFailure(
+            "UPSTREAM_ERROR", "provider_infrastructure", "provider_failure", False, 403
+        )
     if error.category in {"configuration", "endpoint", "request"}:
         return TranslationFailure(
             "CONFIGURATION_INVALID", "configuration", "configuration_failure", False, status
@@ -158,7 +160,7 @@ def claim_translation_work(
             manual=manual_retry,
         )
         return TranslationWorkClaim(claimed)
-    if circuit.state == "configuration_blocked":
+    if circuit.state == "configuration_blocked" and not manual_probe:
         return TranslationWorkClaim(None, blocked_reason="CONFIGURATION_INVALID")
     if circuit.state == "half_open":
         return TranslationWorkClaim(None, blocked_reason="CIRCUIT_OPEN")
