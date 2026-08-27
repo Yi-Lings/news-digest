@@ -259,7 +259,7 @@ def test_production_automation_waits_and_retries_only_failed_article(
                 {
                     "title_zh": "测试标题",
                     "summary_zh": "测试摘要。",
-                    "paragraphs_zh": ["测试段落。"],
+                    "sentences_zh": [["测试段落。"]],
                     "vocabulary": [
                         {
                             "word": word,
@@ -628,7 +628,7 @@ def test_preview_automation_demo_uses_isolated_database_and_fake_wakeup(
     assert kwargs["db_path"] == tmp_path / "business-data/news.db"
     assert kwargs["translation_db_path"] == expected_db
     assert callable(kwargs["translation_wakeup_callback"])
-    assert captured["demo_instance"].wakeups == 1
+    assert captured["demo_instance"].wakeups == 0
 
 
 def test_subcommands_parse():

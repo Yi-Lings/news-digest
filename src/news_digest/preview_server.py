@@ -443,10 +443,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._handle_subscriptions_get()
             return
         if path == "/admin/api/translations":
-            self._handle_translations_get()
+            self._handle_translations_get(parse_qs(urlsplit(self.path).query).get("edition", [None])[0])
             return
         if path == "/admin/api/translations/events":
-            self._handle_translation_events()
+            self._handle_translation_events(parse_qs(urlsplit(self.path).query).get("edition", [None])[0])
             return
         if path == "/admin/api/delivery":
             self._handle_delivery_get()
@@ -1463,14 +1463,24 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         self._json(200, {"ok": True})
 
-    def _translation_payload(self) -> dict[str, Any]:
+    def _translation_payload(self, edition_date: str | None = None) -> dict[str, Any]:
         if self.server.translation_db_path is None:
             raise RuntimeError("翻译任务数据库未配置")
         conn = db.connect(self.server.translation_db_path)
         try:
-            edition = db.latest_automation_edition(conn)
+            problem_dates = db.automation_problem_dates(conn)
+            selected = db.automation_edition(conn, edition_date) if edition_date else None
+            edition_dates = list(problem_dates)
+            if selected is not None and selected.edition_date not in edition_dates:
+                edition_dates.insert(0, selected.edition_date)
+            edition = selected or (
+                db.automation_edition(conn, problem_dates[0])
+                if problem_dates
+                else db.latest_automation_edition(conn)
+            )
             if edition is None:
                 return {
+                    "edition_dates": edition_dates,
                     "edition": None,
                     "summary": {
                         "total": 0,
@@ -1611,6 +1621,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     ),
                     "last_updated": last_updated,
                 },
+                "edition_dates": edition_dates,
                 "summary": summary,
                 "provider": {
                     "id": provider_id,
@@ -1671,23 +1682,23 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
-    def _handle_translations_get(self) -> None:
+    def _handle_translations_get(self, edition_date: str | None = None) -> None:
         if not self._authed():
             self._json(401, {"error": "未登录"})
             return
         try:
-            payload = self._translation_payload()
+            payload = self._translation_payload(edition_date)
         except RuntimeError as error:
             self._json(503, {"error": str(error), "category": "configuration"})
             return
         self._json(200, payload)
 
-    def _handle_translation_events(self) -> None:
+    def _handle_translation_events(self, edition_date: str | None = None) -> None:
         if not self._authed():
             self._json(401, {"error": "未登录"})
             return
         try:
-            payload = self._translation_payload()
+            payload = self._translation_payload(edition_date)
             event = (
                 "retry: 2000\n"
                 "event: translation-state\n"
@@ -2713,6 +2724,9 @@ button[aria-busy="true"]::after {
 .stat { min-width: 0; border-top: 3px solid var(--cinnabar); background: var(--panel); padding: .65rem; overflow-wrap: anywhere; }
 .stat strong { display: block; font: 700 1.35rem/1.2 var(--font-display); }
 .translation-head { display: flex; align-items: end; justify-content: space-between; gap: .8rem; margin-bottom: .75rem; }
+.translation-controls { display: flex; align-items: end; gap: .45rem; flex-wrap: wrap; }
+.translation-controls label { margin: 0; }
+.translation-controls select { min-width: 9.5rem; }
 .translation-provider {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .8rem;
   border-block: 1px solid var(--line); padding: .7rem 0; margin-bottom: .8rem;
@@ -2929,7 +2943,11 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
         <h2 id="translations-heading">翻译状态</h2>
         <p id="translation-edition" class="note">暂无自动化刊期</p>
       </div>
-      <button id="translation-refresh" type="button">刷新</button>
+      <div class="translation-controls">
+        <label for="translation-edition-select">刊期</label>
+        <select id="translation-edition-select" aria-label="选择翻译刊期"></select>
+        <button id="translation-refresh" type="button">刷新</button>
+      </div>
     </div>
     <div id="translation-provider" class="translation-provider"></div>
     <div id="translation-stats" class="stats translation-stats"></div>
@@ -3436,6 +3454,7 @@ var translationFilter = "all";
 var translationState = null;
 var translationSource = null;
 var translationPoll = null;
+var translationEdition = "";
 var translationStatusLabels = {
   pending: "等待中", running: "翻译中", failed: "失败", retry_wait: "待重试",
   succeeded: "已翻译", configuration_blocked: "配置阻断", cancelled: "已取消"
@@ -3519,7 +3538,13 @@ function queueTranslationRetry(item, action) {
   setBusy(action, true);
   api("/admin/api/translations/retry", {task_id: item.task_id})
     .then(function () { say("单篇重试已排队，等待 worker 调度。", true); return loadTranslations(); })
-    .catch(function (error) { say(error.message, false); })
+    .catch(function (error) {
+      if (error.message === "translation task is not retryable") {
+        say("任务状态已变化，正在刷新翻译列表。", true);
+        return loadTranslations();
+      }
+      say(error.message, false);
+    })
     .finally(function () { setBusy(action, false); });
 }
 function queueTranslationCancel(item, action) {
@@ -3533,11 +3558,24 @@ function queueTranslationCancel(item, action) {
 function renderTranslations(data) {
   translationState = data;
   if (data.csrf_token) { csrf = data.csrf_token; }
+  var editionSelect = field("translation-edition-select");
+  var dates = data.edition_dates || [];
+  var selectedDate = data.edition ? data.edition.date : (dates[0] || "");
+  if (translationEdition && dates.includes(translationEdition)) { selectedDate = translationEdition; }
+  editionSelect.replaceChildren();
+  dates.forEach(function (date) {
+    var option = document.createElement("option");
+    option.value = date; option.textContent = date; option.selected = date === selectedDate;
+    editionSelect.appendChild(option);
+  });
+  editionSelect.disabled = !dates.length;
+  if (selectedDate) { translationEdition = selectedDate; }
   var edition = data.edition;
   field("translation-edition").textContent = edition ?
     "刊期 " + edition.date + " · " + edition.status +
       (edition.error_code ? " · 错误 " + edition.error_code : "") +
-      " · 更新 " + timeText(edition.last_updated) :
+      " · 更新 " + timeText(edition.last_updated) +
+      (!dates.length ? " · 当前无待处理任务，显示最近一期结果" : "") :
     "暂无自动化刊期";
   var provider = field("translation-provider"); provider.replaceChildren();
   var providerCopy = document.createElement("div");
@@ -3606,7 +3644,8 @@ function renderTranslations(data) {
   list.appendChild(table(["文章", "状态", "阶段", "尝试", "错误代码", "下一次执行", "上线", "操作"], rows));
 }
 function loadTranslations() {
-  return api("/admin/api/translations")
+  var query = translationEdition ? "?edition=" + encodeURIComponent(translationEdition) : "";
+  return api("/admin/api/translations" + query)
     .then(renderTranslations)
     .catch(function (error) { say(error.message, false); });
 }
@@ -3621,7 +3660,10 @@ function startTranslationUpdates() {
     translationPoll = setInterval(loadTranslations, 3000);
     return;
   }
-  translationSource = new EventSource("/admin/api/translations/events");
+  var query = translationEdition ? "?edition=" + encodeURIComponent(translationEdition) : "";
+  translationSource = query ?
+    new EventSource("/admin/api/translations/events" + query) :
+    new EventSource("/admin/api/translations/events");
   translationSource.addEventListener("translation-state", function (event) {
     renderTranslations(JSON.parse(event.data));
   });
@@ -3640,6 +3682,10 @@ document.querySelectorAll("[data-translation-filter]").forEach(function (control
   });
 });
 field("translation-refresh").addEventListener("click", loadTranslations);
+field("translation-edition-select").addEventListener("change", function (event) {
+  translationEdition = event.currentTarget.value;
+  startTranslationUpdates();
+});
 
 var currentEdition = ""; var manualPreview = null;
 function loadDelivery() {

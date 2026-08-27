@@ -173,6 +173,114 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         server.server_close()
 
 
+def test_translation_admin_selects_edition_by_date(tmp_path):
+    database = tmp_path / "news.db"
+    _seed(database)
+    conn = db.connect(database)
+    try:
+        older = db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-27",
+            article_id="article-older",
+            article_title="Older article",
+            provider_id="provider-default",
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-27", target_count=1, now=_at())
+        db.claim_translation_task(
+            conn, older.task_id, owner="older-worker", now=_at(), lease_seconds=60
+        )
+        db.finish_translation_task_failure(
+            conn, older.task_id, owner="older-worker", now=_at(1),
+            error_code="NETWORK_CONNECT_FAILED", error_category="provider_infrastructure",
+            failure_stage="connect_provider", diagnostic_id="older-diagnostic"
+        )
+    finally:
+        conn.close()
+    server = create_server(tmp_path, tmp_path, 0, serve_static=False, db_path=database)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, latest = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert latest["edition"]["date"] == "2026-07-28"
+        assert latest["edition_dates"] == ["2026-07-28", "2026-07-27"]
+        status, older = _request(
+            port, "GET", "/admin/api/translations?edition=2026-07-27"
+        )
+        assert status == 200
+        assert older["edition"]["date"] == "2026-07-27"
+        assert [item["title"] for item in older["items"]] == ["Older article"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_keeps_running_edition_visible(tmp_path):
+    database = tmp_path / "news.db"
+    _seed(database)
+    server = create_server(tmp_path, tmp_path, 0, serve_static=False, db_path=database)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert payload["edition_dates"] == ["2026-07-28"]
+        assert payload["edition"]["date"] == "2026-07-28"
+        assert payload["summary"]["running"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_shows_latest_completed_edition_when_no_problems(tmp_path):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        task = db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-28",
+            article_id="article-complete",
+            article_title="Completed article",
+            provider_id="provider-default",
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+        db.claim_translation_task(
+            conn, task.task_id, owner="complete-worker", now=_at(), lease_seconds=60
+        )
+        db.finish_translation_task_success(
+            conn, task.task_id, owner="complete-worker", now=_at(1)
+        )
+        db.mark_translation_ready_for_build(
+            conn, task.task_id, now=_at(1), debounce_seconds=0
+        )
+        db.claim_automation_build(
+            conn, "2026-07-28", owner="complete-builder", now=_at(1), lease_seconds=60
+        )
+        db.finish_automation_build(
+            conn, "2026-07-28", owner="complete-builder", now=_at(2), succeeded=True
+        )
+    finally:
+        conn.close()
+    server = create_server(tmp_path, tmp_path, 0, serve_static=False, db_path=database)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert payload["edition"]["date"] == "2026-07-28"
+        assert payload["edition_dates"] == []
+        assert payload["summary"]["online"] == 1
+        assert payload["items"][0]["build_status"] == "online"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
     database = tmp_path / "news.db"
     failed, _ = _seed(database)

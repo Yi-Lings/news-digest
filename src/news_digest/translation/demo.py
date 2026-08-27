@@ -13,7 +13,7 @@ from news_digest.translation.automation import (
     fail_translation_work,
 )
 from news_digest.translation.client import TranslationError
-from news_digest.translation.schema import InvalidTranslation
+from news_digest.translation.schema import InvalidTranslation, split_sentences
 
 
 def build_demo_edition() -> DailyEdition:
@@ -57,7 +57,10 @@ class _DemoTranslator:
             {
                 "title_zh": f"本地模拟译文 {article.slug}",
                 "summary_zh": "这是一条不访问外部服务的本地模拟结果。",
-                "paragraphs_zh": ["本地模拟段落。"] * len(article.paragraphs),
+                "sentences_zh": [
+                    ["本地模拟句子。"] * len(split_sentences(paragraph.en))
+                    for paragraph in article.paragraphs
+                ],
                 "vocabulary": [
                     {
                         "word": "automation",

@@ -34,7 +34,7 @@ def _translation(article: Article) -> str:
         {
             "title_zh": f"测试标题 {article.slug}",
             "summary_zh": "用于隔离自动化测试的摘要。",
-            "paragraphs_zh": ["用于自动化测试的段落。"],
+            "sentences_zh": [["用于自动化测试的段落。"]],
             "vocabulary": [
                 {
                     "word": "automation",

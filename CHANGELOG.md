@@ -105,6 +105,11 @@ Cheapcoding News 首个正式版。0.6.0rc1–rc6 六个部署候选在线打磨
 - **rc5**:干净重发;`import-edition` 落地,创刊号 44 篇(18 篇双语)+ 简讯 10 条入归档。
 - **rc6**:修复发布器自删缺陷(序号复用 + 修剪误删组合);面板三连验收 + 外网安全复核 7 项全绿;
   发布序号递增与 `current` 自动接管在线实证。
+## v1.2.8
+
+- Added p5 sentence-aligned translation validation and cache migration.
+- Added conservative news sentence-boundary handling and resume service start limits.
+
 ## v1.2.7
 
 - Unified upstream HTTP 403 failures as `UPSTREAM_ERROR`.

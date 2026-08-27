@@ -923,8 +923,6 @@ def _run_preview(port: int, *, automation_demo: bool = False) -> int:
         translation_db_path=demo.database if demo is not None else None,
         translation_wakeup_callback=demo.wakeup if demo is not None else None,
     )
-    if demo is not None:
-        demo.wakeup()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

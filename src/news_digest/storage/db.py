@@ -1757,6 +1757,25 @@ def latest_automation_edition(conn: sqlite3.Connection) -> AutomationEdition | N
     return _automation_edition(row) if row else None
 
 
+def automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
+    """Return automation刊期 dates, newest first, for Admin selection."""
+    rows = conn.execute(
+        "SELECT edition_date FROM automation_editions ORDER BY edition_date DESC"
+    ).fetchall()
+    return [row["edition_date"] for row in rows]
+
+
+def automation_problem_dates(conn: sqlite3.Connection) -> list[str]:
+    """Return dates with translation tasks requiring attention, newest first."""
+    rows = conn.execute(
+        "SELECT DISTINCT edition_date FROM translation_tasks "
+        "WHERE status IN ('pending', 'running', 'failed', 'retry_wait', "
+        "'configuration_blocked', 'cancelled') "
+        "ORDER BY edition_date DESC"
+    ).fetchall()
+    return [row["edition_date"] for row in rows]
+
+
 def ensure_automation_edition(
     conn: sqlite3.Connection,
     edition_date: str,

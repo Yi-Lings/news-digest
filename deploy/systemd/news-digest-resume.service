@@ -3,6 +3,8 @@
 Description=Resume queued news-digest translation automation
 After=network-online.target docker.service
 Requires=docker.service
+StartLimitIntervalSec=15min
+StartLimitBurst=4
 
 [Service]
 Type=oneshot

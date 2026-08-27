@@ -62,8 +62,12 @@ class TranslateReport:
     failures: list[tuple[str, str]] = field(default_factory=list)
 
 
-def _result_from_dict(data: dict, paragraph_count: int) -> TranslationResult:
-    return parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count)
+def _result_from_dict(data: dict, article: Article) -> TranslationResult:
+    return parse_translation(
+        json.dumps(data, ensure_ascii=False),
+        len(article.paragraphs),
+        [paragraph.en for paragraph in article.paragraphs],
+    )
 
 
 def translate_article_once(
@@ -80,7 +84,7 @@ def translate_article_once(
     if cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            result = _result_from_dict(cached, len(article.paragraphs))
+            result = _result_from_dict(cached, article)
             return apply_translation(article, result, translator.label), True
         except (InvalidTranslation, json.JSONDecodeError):
             pass
@@ -90,7 +94,7 @@ def translate_article_once(
         raw = translate_with_cancel(article, cancel_requested=cancel_requested)
     else:
         raw = translator.translate(article)
-    result = parse_translation(raw, len(article.paragraphs))
+    result = parse_translation(raw, len(article.paragraphs), [p.en for p in article.paragraphs])
     temporary = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(
@@ -168,7 +172,7 @@ def translate_edition(
                 try:
                     _result_from_dict(
                         json.loads(cache_file.read_text(encoding="utf-8")),
-                        len(article.paragraphs),
+                        article,
                     )
                 except (InvalidTranslation, json.JSONDecodeError):
                     pass
@@ -185,7 +189,7 @@ def translate_edition(
         if not force and cache_file.is_file():
             try:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
-                result = _result_from_dict(cached, len(article.paragraphs))
+                result = _result_from_dict(cached, article)
                 report.cache_hits += 1
                 progress(f"✓ {article.slug}（缓存命中）")
             except (InvalidTranslation, json.JSONDecodeError):
@@ -221,7 +225,9 @@ def translate_edition(
                         )
                     else:
                         raw = translator.translate(article)
-                    result = parse_translation(raw, len(article.paragraphs))
+                    result = parse_translation(
+                        raw, len(article.paragraphs), [p.en for p in article.paragraphs]
+                    )
                     cache_file.write_text(
                         json.dumps(result_to_dict(result), ensure_ascii=False, indent=1),
                         encoding="utf-8",

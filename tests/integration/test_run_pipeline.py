@@ -14,6 +14,7 @@ from news_digest.pipeline import (
     selected_mains_for_translation,
     store_translated,
 )
+from news_digest.translation.schema import split_sentences
 from news_digest.translation.service import translate_edition
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -78,7 +79,10 @@ class FakeTranslator:
             {
                 "title_zh": "中文标题：测试",
                 "summary_zh": "中文摘要。",
-                "paragraphs_zh": ["中文段落。"] * len(article.paragraphs),
+                "sentences_zh": [
+                    ["中文句子。"] * len(split_sentences(paragraph.en))
+                    for paragraph in article.paragraphs
+                ],
                 "vocabulary": [
                     {
                         "word": "report",

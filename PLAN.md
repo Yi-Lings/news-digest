@@ -936,7 +936,7 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 - 新闻图片优先使用来源提供的远程地址和明确的来源标识；本地 UI fixture 使用仓库内小型测试图片。
 - 一年文字和索引归档目标低于 1 GB，阶段 6 根据样本量重新估算。
 
-## 12. v1.2.7 迭代计划：可恢复翻译与逐句对齐
+## 12. v1.2.8 迭代计划：可恢复翻译与逐句对齐
 
 ### 12.1 问题与目标
 
@@ -962,6 +962,7 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 ### 12.4 Admin 与数据
 
 - 在订阅管理和投递状态之间增加翻译状态模块：实时阶段/队列进度、标题省略、错误码、provider 状态、熔断倒计时、恢复探测、单篇重试和停止操作，沿用现有视觉与动效。
+- 翻译状态按刊期查看；日期选择器仅列出存在待处理（pending/running）或失败、待重试、配置阻断、已取消任务的日期，默认选择最新待处理日期；无待处理日期时显示最近一期完整结果并保留“已上线”状态。
 - 数据库记录 provider circuit 转换、任务恢复批次、重试次数/下次时间、错误分类和 schema 版本；迁移向前兼容，不删除历史审计。
 
 ### 12.5 测试与发布门禁
@@ -972,7 +973,7 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 
 ### 12.6 非目标
 
-- v1.2.7 不自动切换 provider、不补发历史刊期、不发送未获授权的真实测试邮件，也不在 UI/日志输出 secrets 或完整上游响应。
+- v1.2.8 不自动切换 provider、不补发历史刊期、不发送未获授权的真实测试邮件，也不在 UI/日志输出 secrets 或完整上游响应。
 
 ## 13. 待用户确认
 
@@ -1040,4 +1041,6 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 | 2026-07-28 | 发布后整治 | WSL 全新部署与幂等复跑通过 | 在隔离的 Ubuntu 24.04 + Docker 29.1.3 + Compose 2.40.3 + Nginx 1.24 环境，以 v1.2.2 公开 digest 从空目录真实执行 bootstrap 并原样复跑，再由 Windows `server-push.ps1` 经真实 SSH/SCP 完整部署并原样复跑，所有完整执行均返回 0；Web `/healthz` 与 Admin `/admin/` 均为 HTTP 200，容器 restart count 为 0，timer 仅排到次日 08:00，`news-digest.service` 无部署期运行记录。实测修复三项一键阻断：共享 SQLite volume 统一为 GID 10001、setgid、组可写，Admin 非默认端口正确渲染 `--port`，以及 preflight 在幂等复跑时精确放行由现有 Compose Web/Admin service 占用的端口；首次 `.env` 的 API/SMTP 为空，自动投递与公开订阅关闭，不生成 `providers.json` 或 `.env.incoming`，部署不执行抓取、翻译、构建或投递。certbot 因本地无公网 DNS 无法完成真实签发，其余 SSH/SCP、Docker/systemd/Nginx/镜像流程均真实执行；测试 timer 已禁用，相关部署资产与回归随本次开源迭代纳入 `main`，不改动已发布的 v1.2.2 tag/digest 或生产部署。 |
 | 2026-07-28 | 发布后整治 | v1.2.3 开源部署修复发布 | 保留 v1.2.2 tag、Release 与生产 digest 不可变；以新补丁版本发布参数化部署链、通用 README/运维文档、新版产品截图和部署回归，使 GitHub Latest Release 的部署包包含本次全部修复。生产服务器不随本次 GitHub Release 自动升级。 |
 | 2026-08-01 | 阶段 8 | v1.2.5 自动投递阻塞热修 | 生产证据显示 07-28 投递失败后刊期仍为 `complete`，07-29 至 08-01 虽全部翻译和上线但没有正式投递；恢复 worker 始终先领取旧刊，再被时间门禁拒绝并每 15 秒重启。修复为自动投递只领取当前 worker 刊期，新刊投递前把更早未投递刊期标记 `DELIVERY_EXPIRED` 并排除恢复队列；历史刊物与审计保留但不自动补发。应用确定性终态使用退出码 10，systemd 不再为其循环重启；锁竞争独立使用 75。定向回归 `243 passed, 1 skipped`；隔离临时目录后的最终离线全量 `578 passed, 1 skipped, 7 deselected(network)`，Ruff、PowerShell AST、Shell 语法和 diff check 通过，未调用真实 provider/SMTP；待不可变 `v1.2.5` 发布与用户侧部署核验。 |
+| 2026-08-28 | 阶段 8 | v1.2.8 本地实现完成，待人工门禁 | 已完成 p5 逐句 schema、旧缓存失效重译、失败单篇重试、provider 熔断/探测恢复、resume 防重启、Admin 翻译状态模块及按问题日期筛选；翻译/自动化/Admin 定向回归 `65 passed`，Ruff 与 diff check 通过。尚未完成浏览器人工 UI/人工重试验收、最终全量、独立复审、Release/GHCR 发布和生产部署；数据库仍使用现有 `translation_attempts`/`translation_admin_actions` 审计，未新增独立恢复批次字段；复杂列表/分号/中英文混排分句仍需补测后再决定是否扩展。 |
+| 2026-08-28 | 阶段 8 | v1.2.8 人工验收与最终离线门禁通过，可发布 | 用户确认浏览器 UI 与人工重试验收通过；修复 demo 启动自动清空任务、重试竞态提示和已完成刊期显示；最终离线全量 `587 passed, 1 skipped, 7 deselected(network)`，Ruff、diff check、`uv build` 均通过。尚未执行 Git 提交/tag、GitHub Release/GHCR 发布或生产部署；需按不可变版本纪律完成独立复审后再发布。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

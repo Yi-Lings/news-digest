@@ -17,6 +17,7 @@ from news_digest.translation.schema import (
     InvalidTranslation,
     apply_translation,
     parse_translation,
+    split_sentences,
 )
 from news_digest.translation.service import translate_edition
 
@@ -102,8 +103,8 @@ def test_parse_rejects_ambiguous_fenced_objects():
 
 
 def test_formal_prompt_uses_versioned_explicit_json_contract():
-    assert PROMPT_VERSION == "p4"
-    assert '"paragraphs_zh": ["逐段中文译文"]' in SYSTEM_PROMPT
+    assert PROMPT_VERSION == "p5"
+    assert '"sentences_zh": [["逐句中文译文"]]' in SYSTEM_PROMPT
     assert '"phonetic": "非空字符串"' in SYSTEM_PROMPT
 
 
@@ -120,8 +121,8 @@ def test_formal_prompt_requires_complete_non_summary_translation():
     [
         lambda d: d.pop("title_zh"),
         lambda d: d.__setitem__("title_zh", "  "),
-        lambda d: d.__setitem__("paragraphs_zh", d["paragraphs_zh"][:2]),
-        lambda d: d["paragraphs_zh"].__setitem__(1, ""),
+        lambda d: d.__setitem__("sentences_zh", d["sentences_zh"][:2]),
+        lambda d: d["sentences_zh"][1].__setitem__(0, ""),
         lambda d: d["vocabulary"][0].pop("phonetic"),
         lambda d: d.__setitem__("sentence_notes", "not-a-list"),
     ],
@@ -139,6 +140,29 @@ def test_parse_rejects_title_over_40_characters():
 
     with pytest.raises(InvalidTranslation, match="title_zh 不得超过 40 字"):
         parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
+
+
+def test_parse_rejects_sentence_count_mismatch_against_source():
+    data = json.loads(_valid_raw())
+    data["sentences_zh"][0].append("不应允许的额外句子。")
+    with pytest.raises(InvalidTranslation, match="句子数量"):
+        parse_translation(
+            json.dumps(data, ensure_ascii=False),
+            paragraph_count=3,
+            source_paragraphs=[paragraph.en for paragraph in _article().paragraphs],
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "count"),
+    [
+        ("Dr. Smith said the U.S. team arrived at 8.30 p.m. It left later.", 2),
+        ('The list included "A." and "B." Then it ended.', 2),
+        ("A 3.5% rise was reported. Markets reacted.", 2),
+    ],
+)
+def test_split_sentences_handles_common_news_boundaries(text, count):
+    assert len(split_sentences(text)) == count
 
 
 @pytest.mark.parametrize(
