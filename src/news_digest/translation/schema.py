@@ -158,6 +158,7 @@ _ABBREVIATIONS = re.compile(
     r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.$",
     re.IGNORECASE,
 )
+_INITIALISM = re.compile(r"(?:\b[A-Za-z]\.){3,}$")
 
 
 def split_sentences(text: str) -> list[str]:
@@ -168,7 +169,11 @@ def split_sentences(text: str) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        if parts and (_ABBREVIATIONS.search(parts[-1]) or re.search(r"\b\d\.$", parts[-1])):
+        if parts and (
+            _ABBREVIATIONS.search(parts[-1])
+            or _INITIALISM.search(parts[-1])
+            or re.search(r"\b\d\.$", parts[-1])
+        ):
             parts[-1] = f"{parts[-1]} {part}"
         else:
             parts.append(part)
