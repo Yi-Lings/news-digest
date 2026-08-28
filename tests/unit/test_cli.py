@@ -353,6 +353,105 @@ def test_production_automation_waits_and_retries_only_failed_article(
     assert now[0] == dt.datetime(2026, 7, 28, 0, 0, 17, tzinfo=dt.UTC)
 
 
+def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
+    tmp_path, monkeypatch
+):
+    fetch_config = FetchConfig(None, 24, "Asia/Shanghai", tmp_path / "data")
+    article = Article(
+        slug="article-1",
+        source="Fixture",
+        title_en="Fixture article",
+        summary_en="Fixture summary.",
+        author="Fixture",
+        published_at="2026-07-28T00:00:00+00:00",
+        url="https://example.com/article-1",
+        reading_minutes=1,
+        paragraphs=[Paragraph(en="Fixture paragraph.")],
+    )
+    edition = DailyEdition(date="2026-07-28", articles=[article])
+    holder = {}
+
+    class FakeTranslator:
+        cache_identity = "fake-cache"
+
+        def __init__(self, config):
+            del config
+
+        def close(self):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.calls = 0
+            holder["runner"] = self
+
+        def seed_edition(self, edition, *, now):
+            del edition, now
+
+        def run_ready(self, *, now, owner, max_tasks):
+            del now, owner, max_tasks
+            self.calls += 1
+            claimed = 1 if self.calls == 1 else 0
+            return types.SimpleNamespace(
+                claimed=claimed, succeeded=0, failed=1, blocked=0
+            )
+
+        def flush_build(self, *, now, owner):
+            del now, owner
+            return False
+
+        def flush_delivery(self, *, edition_date, now):
+            del edition_date, now
+            return False
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setattr("news_digest.translation.client.ApiTranslator", FakeTranslator)
+    monkeypatch.setattr(
+        "news_digest.cli._runtime_translation_config",
+        lambda: types.SimpleNamespace(cache_dir=tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        "news_digest.config.build_config_from_env",
+        lambda: BuildConfig(tmp_path / "site", "https://news.example.com"),
+    )
+    monkeypatch.setattr("news_digest.config.email_delivery_enabled_from_env", lambda: False)
+    monkeypatch.setattr(
+        "news_digest.pipeline.selected_mains_for_translation",
+        lambda config, date: edition,
+    )
+    monkeypatch.setattr(
+        "news_digest.translation.automation.TranslationAutomationRunner", FakeRunner
+    )
+    monkeypatch.setattr("news_digest.storage.db.connect", lambda database: FakeConnection())
+    monkeypatch.setattr(
+        "news_digest.storage.db.recover_interrupted_translation_tasks",
+        lambda *args, **kwargs: 0,
+    )
+    monkeypatch.setattr(
+        "news_digest.storage.db.automation_edition",
+        lambda conn, date: types.SimpleNamespace(status="partial"),
+    )
+    monkeypatch.setattr(
+        "news_digest.storage.db.list_translation_tasks",
+        lambda conn, date: [types.SimpleNamespace(status="failed", auto_retry=False)],
+    )
+
+    assert (
+        _run_automation_daily(
+            fetch_config,
+            edition,
+            clock=lambda: dt.datetime(2026, 7, 28, tzinfo=dt.UTC),
+            sleep=lambda seconds: None,
+        )
+        == 10
+    )
+    assert holder["runner"].calls == 2
+
+
 def test_daily_partial_or_archive_failure_returns_nonzero(tmp_path, monkeypatch):
     result = types.SimpleNamespace(
         sent_count=1,

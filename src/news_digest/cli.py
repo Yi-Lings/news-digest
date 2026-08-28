@@ -731,11 +731,14 @@ def _run_automation_daily(
                 conn.close()
             if state is not None and state.status == "delivered":
                 return 0
-            if any(
+            action_required = any(
                 task.status == "configuration_blocked"
                 or (task.status == "failed" and not task.auto_retry)
                 for task in tasks
-            ):
+            )
+            # A non-retryable task is isolated: keep draining other ready tasks
+            # before stopping so one bad article cannot strand the whole edition.
+            if action_required and not (result.claimed or built or delivered):
                 print("自动化已安全停止：存在需要人工处理的翻译任务。")
                 return _AUTOMATION_ACTION_REQUIRED
             if (
