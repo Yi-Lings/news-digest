@@ -902,9 +902,9 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 
 ### 阶段 8.1：v1.2.9 配置阻断恢复与人工调度闭环
 
-状态：`实现中；不修改已发布 tag、Release、镜像 digest 或生产数据库。`
+状态：`已完成；v1.2.9 已于 2026-08-28 部署到生产。已发布 tag、Release 与镜像 digest 保持不可变。`
 
-当前进度（本地）：已完成上游错误统一分类、v7 SQLite 动作迁移（含显式 `dispatch`）、provider 探测 lease 回收、Admin `available_actions`、动作 `action_id` 返回、配置阻断恢复接口，以及取消 lease 过期后的安全恢复命令；README 与 `docs/OPERATIONS.md` 已同步故障处理流程。已补齐 `pending` 任务“立即调度”、按任务 provider 计算动作、`half_open` 探测幂等，以及 300 秒默认翻译 lease（覆盖 180 秒硬总时限）回归；离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check 和 `uv build` 均通过。浏览器人工验收、独立复审、Release/GHCR 和生产部署仍未开始。
+当前进度：已完成上游错误统一分类、v7 SQLite 动作迁移（含显式 `dispatch`）、provider 探测 lease 回收、Admin `available_actions`、动作 `action_id` 返回、配置阻断恢复接口，以及取消 lease 过期后的安全恢复命令；README 与 `docs/OPERATIONS.md` 已同步故障处理流程。已补齐 `pending` 任务“立即调度”、按任务 provider 计算动作、`half_open` 探测幂等，以及 300 秒默认翻译 lease（覆盖 180 秒硬总时限）回归；离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check 和 `uv build` 均通过。浏览器人工验收、独立复审、`v1.2.9` Release/GHCR 和生产部署均已完成；生产版本核验为 `1.2.9`，HTTPS/Web/Admin 健康检查返回 200，`news-digest.timer` 与 `news-digest-wakeup.path` 已启用并运行，恢复服务观察窗口内未出现新的重启计数增长。
 
 本次线上核查暴露出 provider 熔断状态、单篇任务状态和 Admin 操作权限没有形成闭环：provider 已恢复为 `closed` 后，历史遗留的 `configuration_blocked` 任务仍停留在阻断状态；“立即探测”只在熔断打开时可用，恢复后按钮消失，而该任务也没有可执行的人工重试入口。下一版必须把以下规则固化为同一状态机：
 
