@@ -2372,8 +2372,8 @@ def finish_automation_build(
             succeeded_count = int(counts["succeeded_count"] or 0)
             online_count = int(counts["online_count"] or 0)
             complete = (
-                succeeded_count == row["target_count"]
-                and online_count == row["target_count"]
+                succeeded_count >= row["target_count"]
+                and online_count >= row["target_count"]
                 and generation == row["dirty_generation"]
             )
             status = "complete" if complete else (

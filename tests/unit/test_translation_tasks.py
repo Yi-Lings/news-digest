@@ -820,6 +820,27 @@ def test_build_generation_does_not_mark_late_success_online(tmp_path):
     assert complete.online_count == 2
 
 
+def test_build_completes_when_manual_retries_add_extra_tasks(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    first = _task(conn, article_id="first")
+    second = _task(conn, article_id="second")
+    db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+
+    _succeed_task(conn, first, owner="translate-1", started=1, finished=2)
+    db.mark_translation_ready_for_build(conn, first.task_id, now=_at(2), debounce_seconds=0)
+    _succeed_task(conn, second, owner="translate-2", started=3, finished=4)
+    db.mark_translation_ready_for_build(conn, second.task_id, now=_at(4), debounce_seconds=0)
+
+    assert db.claim_automation_build(
+        conn, "2026-07-28", owner="builder", now=_at(5), lease_seconds=30, force=True
+    )
+    complete = db.finish_automation_build(
+        conn, "2026-07-28", owner="builder", now=_at(6), succeeded=True
+    )
+    assert complete.status == "complete"
+    assert complete.succeeded_count == 2
+
+
 def test_complete_edition_delivery_claim_is_persistent_and_single(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     task = _task(conn)
