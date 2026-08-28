@@ -1905,6 +1905,24 @@ def recover_interrupted_translation_tasks(
         # Normalize those rows before scheduling so an upgrade cannot revive an
         # infinite retry loop.
         placeholders = ", ".join("?" for _ in _NON_RETRYABLE_TRANSLATION_ERRORS)
+        # A manual retry deliberately reuses ``auto_retry`` and ``retry_wait``
+        # so the normal worker can claim it.  Do not mistake that explicit
+        # action for a legacy automatic retry during startup recovery.
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
+            " next_retry_at = COALESCE(manual_retry_requested_at, ?),"
+            " updated_at = ? WHERE status = 'failed' AND auto_retry = 0"
+            " AND error_code IN (" + placeholders + ")"
+            " AND manual_retry_requested_at IS NOT NULL"
+            " AND manual_probe_requested_at IS NULL"
+            " AND manual_action_id IS NOT NULL"
+            " AND EXISTS (SELECT 1 FROM translation_admin_actions"
+            " WHERE translation_admin_actions.action_id = translation_tasks.manual_action_id"
+            " AND translation_admin_actions.task_id = translation_tasks.task_id"
+            " AND translation_admin_actions.action = 'retry'"
+            " AND translation_admin_actions.status = 'requested')",
+            (now, now, *_NON_RETRYABLE_TRANSLATION_ERRORS),
+        )
         conn.execute(
             "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
             " next_retry_at = NULL, current_stage = CASE error_code"
@@ -1917,6 +1935,13 @@ def recover_interrupted_translation_tasks(
             " WHEN 'UNPARSEABLE_RESPONSE' THEN 'receiving_response'"
             " ELSE failure_stage END, updated_at = ?"
             " WHERE status IN ('retry_wait', 'failed') AND auto_retry = 1"
+            " AND manual_retry_requested_at IS NULL"
+            " AND manual_probe_requested_at IS NULL"
+            " AND NOT EXISTS (SELECT 1 FROM translation_admin_actions"
+            " WHERE translation_admin_actions.action_id = translation_tasks.manual_action_id"
+            " AND translation_admin_actions.task_id = translation_tasks.task_id"
+            " AND translation_admin_actions.action IN ('retry', 'probe')"
+            " AND translation_admin_actions.status IN ('requested', 'running'))"
             f" AND error_code IN ({placeholders})",
             (now, *_NON_RETRYABLE_TRANSLATION_ERRORS),
         )

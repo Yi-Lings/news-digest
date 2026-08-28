@@ -451,6 +451,129 @@ def test_startup_normalizes_legacy_schema_retry_to_manual_failure(tmp_path):
     assert not normalized.auto_retry
 
 
+def test_startup_preserves_queued_manual_schema_retry(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+        assert db.claim_translation_task(
+            conn,
+            task.task_id,
+            owner="worker-a",
+            now=_at(1).isoformat(),
+            lease_seconds=30,
+        )
+        db.finish_translation_task_failure(
+            conn,
+            task.task_id,
+            owner="worker-a",
+            now=_at(2).isoformat(),
+            error_code="SCHEMA_VALIDATION_FAILED",
+            error_category="schema",
+            failure_stage="schema_validation",
+            diagnostic_id="schema-failed",
+            auto_retry=False,
+        )
+        queued = db.queue_translation_task_retry(
+            conn, task.task_id, now=_at(3).isoformat(), actor="admin"
+        )
+        assert queued.status == "retry_wait"
+        assert queued.manual_action_id
+
+        assert db.recover_interrupted_translation_tasks(
+            conn, now=_at(4).isoformat(), process_terminated=True
+        ) == 0
+        preserved = db.translation_task(conn, task.task_id)
+        assert preserved is not None
+        assert preserved.status == "retry_wait"
+        assert preserved.auto_retry
+        assert preserved.next_retry_at == _at(3).isoformat()
+        action = conn.execute(
+            "SELECT status FROM translation_admin_actions WHERE action_id = ?",
+            (preserved.manual_action_id,),
+        ).fetchone()
+        assert action["status"] == "requested"
+    finally:
+        conn.close()
+
+
+def test_startup_repairs_manual_schema_retry_already_normalized_by_old_worker(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+        assert db.claim_translation_task(
+            conn,
+            task.task_id,
+            owner="worker-a",
+            now=_at(1).isoformat(),
+            lease_seconds=30,
+        )
+        db.finish_translation_task_failure(
+            conn,
+            task.task_id,
+            owner="worker-a",
+            now=_at(2).isoformat(),
+            error_code="SCHEMA_VALIDATION_FAILED",
+            error_category="schema",
+            failure_stage="schema_validation",
+            diagnostic_id="schema-failed",
+            auto_retry=False,
+        )
+        queued = db.queue_translation_task_retry(
+            conn, task.task_id, now=_at(3).isoformat(), actor="admin"
+        )
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+            " next_retry_at = NULL WHERE task_id = ?",
+            (task.task_id,),
+        )
+        conn.commit()
+
+        assert db.recover_interrupted_translation_tasks(
+            conn, now=_at(4).isoformat(), process_terminated=True
+        ) == 0
+        repaired = db.translation_task(conn, task.task_id)
+        assert repaired is not None
+        assert repaired.status == "retry_wait"
+        assert repaired.auto_retry
+        assert repaired.next_retry_at == _at(3).isoformat()
+        assert repaired.manual_action_id == queued.manual_action_id
+
+        result = runner.run_ready(now=_at(5), owner="worker-b")
+        assert result.succeeded == 1
+        completed = db.translation_task(conn, task.task_id)
+        assert completed is not None
+        assert completed.status == "succeeded"
+        action = conn.execute(
+            "SELECT status, result_code FROM translation_admin_actions WHERE action_id = ?",
+            (queued.manual_action_id,),
+        ).fetchone()
+        assert tuple(action) == ("completed", "SUCCEEDED")
+    finally:
+        conn.close()
+
+
 def test_missing_task_article_releases_claim_as_visible_failure(tmp_path):
     database = tmp_path / "data" / "news.db"
     runner = TranslationAutomationRunner(
