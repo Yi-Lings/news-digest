@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from news_digest.models import Article, Collocation, Paragraph, SentenceNote, VocabularyItem
 
-PROMPT_VERSION = "p5"
+PROMPT_VERSION = "p6"
 
 SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与教学助理。
 文风要求：规范的新闻书面语（参照通讯社译文风格），正式、克制、准确；
@@ -50,6 +50,7 @@ SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与�
 - "summary_zh": 中文摘要，一到两句
 - "sentences_zh": 二维字符串数组，外层逐段、内层逐句对应；每个原文句子必须恰好对应
   一个同序中文句子，不得合并、拆分、跳过或新增句子
+- 用户消息中的 [P#S#] 是不可变的原文句子编号；必须按编号逐句翻译，不能自行重新分句
 - "vocabulary": 3 到 6 个值得学习的词，word 必须出自原文
 - "collocations": 1 到 3 个固定搭配
 - "sentence_notes": 1 到 2 个长难句解析，sentence_en 摘自原文，analysis_zh 讲清语法结构
@@ -74,11 +75,20 @@ class TranslationResult:
 
 
 def build_user_prompt(article: Article) -> str:
-    lines = [f"标题：{article.title_en}", f"摘要：{article.summary_en}", "正文段落："]
+    lines = [f"标题：{article.title_en}", f"摘要：{article.summary_en}", "正文按句编号："]
+    sentence_counts: list[int] = []
     for index, paragraph in enumerate(article.paragraphs, start=1):
-        lines.append(f"{index}. {paragraph.en}")
+        sentences = split_sentences(paragraph.en)
+        sentence_counts.append(len(sentences))
+        lines.append(f"段落 P{index}：")
+        for sentence_index, sentence in enumerate(sentences, start=1):
+            lines.append(f"[P{index}S{sentence_index}] {sentence}")
     count = len(article.paragraphs)
-    lines.append(f"（共 {count} 段；sentences_zh 外层必须恰好 {count} 项，逐句同序对应）")
+    counts = "、".join(f"P{index}={value}" for index, value in enumerate(sentence_counts, 1))
+    lines.append(
+        f"（共 {count} 段；sentences_zh 外层必须恰好 {count} 项；"
+        f"内层句数必须严格匹配：{counts}）"
+    )
     return "\n".join(lines)
 
 

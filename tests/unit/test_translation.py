@@ -16,6 +16,7 @@ from news_digest.translation.schema import (
     SYSTEM_PROMPT,
     InvalidTranslation,
     apply_translation,
+    build_user_prompt,
     parse_translation,
     split_sentences,
 )
@@ -103,9 +104,17 @@ def test_parse_rejects_ambiguous_fenced_objects():
 
 
 def test_formal_prompt_uses_versioned_explicit_json_contract():
-    assert PROMPT_VERSION == "p5"
+    assert PROMPT_VERSION == "p6"
     assert '"sentences_zh": [["逐句中文译文"]]' in SYSTEM_PROMPT
     assert '"phonetic": "非空字符串"' in SYSTEM_PROMPT
+    assert "[P#S#]" in SYSTEM_PROMPT
+
+
+def test_user_prompt_numbers_each_source_sentence():
+    prompt = build_user_prompt(_article())
+    assert "[P1S1]" in prompt
+    assert "[P2S1]" in prompt
+    assert "内层句数必须严格匹配" in prompt
 
 
 def test_formal_prompt_requires_complete_non_summary_translation():
