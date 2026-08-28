@@ -158,7 +158,8 @@ _ABBREVIATIONS = re.compile(
     r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.$",
     re.IGNORECASE,
 )
-_INITIALISM = re.compile(r"(?:\b[A-Za-z]\.){3,}$")
+_INITIALISM = re.compile(r"(?:\b[A-Za-z]\.){2,}$")
+_TIME_ABBREVIATION = re.compile(r"\b[ap]\.m\.$", re.IGNORECASE)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -171,7 +172,10 @@ def split_sentences(text: str) -> list[str]:
             continue
         if parts and (
             _ABBREVIATIONS.search(parts[-1])
-            or _INITIALISM.search(parts[-1])
+            or (
+                _INITIALISM.search(parts[-1])
+                and not _TIME_ABBREVIATION.search(parts[-1])
+            )
             or re.search(r"\b\d\.$", parts[-1])
         ):
             parts[-1] = f"{parts[-1]} {part}"

@@ -167,6 +167,7 @@ def test_parse_rejects_sentence_count_mismatch_against_source():
     [
         ("Dr. Smith said the U.S. team arrived at 8.30 p.m. It left later.", 2),
         ('The aircraft carrier was the U.S.S. Abraham Lincoln. It deployed in August.', 2),
+        ("The U.S. President addressed the nation. Markets reacted.", 2),
         ('The list included "A." and "B." Then it ended.', 2),
         ("A 3.5% rise was reported. Markets reacted.", 2),
     ],
