@@ -1066,6 +1066,7 @@ _TRANSLATION_ERROR_CODES = frozenset(
         "EMPTY_RESPONSE",
         "UNPARSEABLE_RESPONSE",
         "SCHEMA_VALIDATION_FAILED",
+        "TASK_DATA_MISSING",
         "CONFIGURATION_INVALID",
         "REQUEST_CANCELLED",
         "CIRCUIT_OPEN",
@@ -1080,6 +1081,7 @@ _TRANSLATION_ERROR_CATEGORIES = frozenset(
         "provider_infrastructure",
         "response_format",
         "schema",
+        "data_integrity",
         "cancelled",
         "build",
     }
@@ -1098,6 +1100,12 @@ _TRANSLATION_FAILURE_STAGES = frozenset(
 )
 _TASK_RETRY_DELAYS = (15, 30, 60, 120, 300)
 _CIRCUIT_COOLDOWNS = (60, 120, 300)
+_NON_RETRYABLE_TRANSLATION_ERRORS = (
+    "EMPTY_RESPONSE",
+    "UNPARSEABLE_RESPONSE",
+    "SCHEMA_VALIDATION_FAILED",
+    "TASK_DATA_MISSING",
+)
 
 
 def _automation_timestamp(value: str) -> str:
@@ -1893,6 +1901,25 @@ def recover_interrupted_translation_tasks(
         return 0
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Older workers incorrectly left content/schema failures in retry_wait.
+        # Normalize those rows before scheduling so an upgrade cannot revive an
+        # infinite retry loop.
+        placeholders = ", ".join("?" for _ in _NON_RETRYABLE_TRANSLATION_ERRORS)
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+            " next_retry_at = NULL, current_stage = CASE error_code"
+            " WHEN 'SCHEMA_VALIDATION_FAILED' THEN 'schema_validation'"
+            " WHEN 'EMPTY_RESPONSE' THEN 'receiving_response'"
+            " WHEN 'UNPARSEABLE_RESPONSE' THEN 'receiving_response'"
+            " ELSE current_stage END, failure_stage = CASE error_code"
+            " WHEN 'SCHEMA_VALIDATION_FAILED' THEN 'schema_validation'"
+            " WHEN 'EMPTY_RESPONSE' THEN 'receiving_response'"
+            " WHEN 'UNPARSEABLE_RESPONSE' THEN 'receiving_response'"
+            " ELSE failure_stage END, updated_at = ?"
+            " WHERE status IN ('retry_wait', 'failed') AND auto_retry = 1"
+            f" AND error_code IN ({placeholders})",
+            (now, *_NON_RETRYABLE_TRANSLATION_ERRORS),
+        )
         rows = conn.execute(
             "SELECT task_id, attempt_count, lease_owner, cancel_requested_at FROM translation_tasks"
             " WHERE status = 'running' AND lease_expires_at <= ?",

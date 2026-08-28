@@ -591,15 +591,15 @@ def test_configuration_failure_blocks_until_controlled_test_succeeds(tmp_path):
             TranslationError("redacted", category="empty_response"),
             "EMPTY_RESPONSE",
             "content_failure",
-            True,
+            False,
         ),
         (
             TranslationError("redacted", category="response_format"),
             "UNPARSEABLE_RESPONSE",
             "content_failure",
-            True,
+            False,
         ),
-        (InvalidTranslation("redacted"), "SCHEMA_VALIDATION_FAILED", "content_failure", True),
+        (InvalidTranslation("redacted"), "SCHEMA_VALIDATION_FAILED", "content_failure", False),
     ],
 )
 def test_translation_errors_map_to_closed_safe_failures(error, code, outcome, auto_retry):
@@ -675,7 +675,9 @@ def test_probe_schema_failure_closes_circuit_but_keeps_task_retryable(tmp_path):
         stage="schema_validation",
     )
 
-    assert failed.status == "retry_wait"
+    assert failed.status == "failed"
+    assert failed.next_retry_at is None
+    assert not failed.auto_retry
     circuit = db.get_provider_circuit(conn, "provider-default")
     assert circuit.state == "closed"
     assert circuit.recovery_mode

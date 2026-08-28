@@ -9,6 +9,7 @@ from news_digest.pipeline import build_editions
 from news_digest.storage import db
 from news_digest.translation.automation import TranslationAutomationRunner
 from news_digest.translation.client import TranslationError
+from news_digest.translation.schema import InvalidTranslation
 
 
 def _at(seconds: int = 0) -> dt.datetime:
@@ -357,6 +358,132 @@ def test_retry_delay_uses_request_completion_time(tmp_path):
     assert task.started_at == _at(1).isoformat()
     assert task.failed_at == _at(11).isoformat()
     assert task.next_retry_at == _at(26).isoformat()
+
+
+def test_schema_failure_is_terminal_for_automation_and_records_schema_stage(tmp_path):
+    database = tmp_path / "data" / "news.db"
+
+    class SchemaFailureTranslator:
+        label = "fake@schema"
+        model = "fake"
+        cache_identity = "fake-schema-failure"
+
+        def translate(self, article):
+            raise InvalidTranslation("redacted schema mismatch")
+
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=SchemaFailureTranslator(),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+
+    result = runner.run_ready(now=_at(1), owner="worker-a")
+
+    assert result.failed == 1
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+    finally:
+        conn.close()
+    assert task.status == "failed"
+    assert task.error_code == "SCHEMA_VALIDATION_FAILED"
+    assert task.failure_stage == "schema_validation"
+    assert not task.auto_retry
+    assert task.next_retry_at is None
+
+    later = runner.run_ready(now=_at(301), owner="worker-b")
+    assert later.claimed == 0
+
+
+def test_startup_normalizes_legacy_schema_retry_to_manual_failure(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+        assert db.claim_translation_task(
+            conn,
+            task.task_id,
+            owner="legacy-worker",
+            now=_at(1).isoformat(),
+            lease_seconds=30,
+        )
+        legacy = db.finish_translation_task_failure(
+            conn,
+            task.task_id,
+            owner="legacy-worker",
+            now=_at(2).isoformat(),
+            error_code="SCHEMA_VALIDATION_FAILED",
+            error_category="schema",
+            failure_stage="waiting_model",
+            diagnostic_id="legacy-schema",
+            auto_retry=True,
+        )
+        assert legacy.status == "retry_wait"
+    finally:
+        conn.close()
+
+    conn = db.connect(database)
+    try:
+        assert db.recover_interrupted_translation_tasks(
+            conn, now=_at(3).isoformat(), process_terminated=True
+        ) == 0
+        normalized = db.translation_task(conn, task.task_id)
+    finally:
+        conn.close()
+    assert normalized is not None
+    assert normalized.status == "failed"
+    assert normalized.failure_stage == "schema_validation"
+    assert normalized.next_retry_at is None
+    assert not normalized.auto_retry
+
+
+def test_missing_task_article_releases_claim_as_visible_failure(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+    conn = db.connect(database)
+    try:
+        conn.execute("DELETE FROM articles WHERE date = ?", ("2026-07-28",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = runner.run_ready(now=_at(1), owner="worker-a")
+
+    assert result.claimed == 1
+    assert result.failed == 1
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+    finally:
+        conn.close()
+    assert task.status == "failed"
+    assert task.error_code == "TASK_DATA_MISSING"
+    assert task.failure_stage == "saving_translation"
+    assert not task.auto_retry
+    assert task.lease_owner is None
+    assert task.lease_expires_at is None
 
 
 def test_runner_confirms_admin_cancel_only_after_provider_request_stops(tmp_path):

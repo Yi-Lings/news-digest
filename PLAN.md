@@ -756,8 +756,8 @@ Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停�
    ```
 
 3. `failed_at` 是失败结果完成并落库的时间，不是请求开始时间。超时必须先终止旧连接/子进程并确认不再运行，再标记失败和计算下一次重试。
-4. 单篇连续失败的自动重试间隔固定为：第一次失败后 `15 秒`，第二次 `30 秒`，第三次 `60 秒`，第四次 `2 分钟`，后续最多 `5 分钟`。
-5. 网络失败、确认终止后的超时、HTTP `429`、HTTP `5xx`、上游 HTTP `400/401/403`、空响应、无法解析的响应和 schema 校验失败可进入自动重试。
+4. 可自动恢复的单篇连续失败重试间隔固定为：第一次失败后 `15 秒`，第二次 `30 秒`，第三次 `60 秒`，第四次 `2 分钟`，后续最多 `5 分钟`。
+5. 网络失败、确认终止后的超时、HTTP `429`、HTTP `5xx` 和上游 HTTP `400/401/403` 可进入自动重试；空响应、无法解析的响应、schema 校验失败和任务数据缺失停止自动退避，保留人工重试动作。
 6. 本地缺失配置、字段冲突和请求参数前置校验错误不得盲目循环，才可转为 `configuration_blocked`；仅凭 provider 返回的 HTTP `400/401/403` 或余额/权限错误不得永久锁死任务，统一记录为 `UPSTREAM_ERROR` 并按上游重试/熔断规则处理。
 7. 成功、仍在运行或结果不确定时不得创建自动重试。结果不确定必须先收口旧请求，再由状态机决定失败或保留阻断。
 8. Admin 为失败文章提供“立即重试”。手动重试可跳过剩余等待时间，但仍须取得同一任务锁；运行期间按钮不得产生第二个请求。
@@ -833,9 +833,10 @@ Admin 主流程顺序固定为：
 | `PROVIDER_5XX` | provider 服务异常 | 自动重试并计入熔断 | 通常无需操作，可受控探测 |
 | `NETWORK_CONNECT_FAILED` | 网络连接失败 | 自动重试并计入熔断 | 检查网络、代理和 DNS |
 | `REQUEST_TIMEOUT` | 请求超时 | 终止旧请求后自动重试并计入熔断 | 确认状态或受控重试 |
-| `EMPTY_RESPONSE` | 返回内容为空 | 仅重试失败文章 | 查看次数或立即重试 |
-| `UNPARSEABLE_RESPONSE` | 返回内容无法解析 | 仅重试失败文章 | 检查协议/模型兼容性 |
-| `SCHEMA_VALIDATION_FAILED` | 内容不符合正式 schema | 仅重试失败文章 | 查看阶段并重新生成该篇 |
+| `EMPTY_RESPONSE` | 返回内容为空 | 停止自动退避，保留失败状态 | 查看输出并手动重试 |
+| `UNPARSEABLE_RESPONSE` | 返回内容无法解析 | 停止自动退避，保留失败状态 | 检查协议/模型兼容性后手动重试 |
+| `SCHEMA_VALIDATION_FAILED` | 内容不符合正式 schema | 停止自动退避，不计入熔断 | 查看 schema 阶段并手动重试 |
+| `TASK_DATA_MISSING` | 任务引用的原文不存在 | 停止自动退避并释放 lease | 恢复原文或重建任务后手动重试 |
 | `CONFIGURATION_INVALID` | 配置缺失或冲突 | 转为配置阻断 | 修正并保存配置 |
 | `REQUEST_CANCELLED` | 请求被管理员终止 | 保留为待重试 | 确认后手动恢复 |
 | `CIRCUIT_OPEN` | provider 已熔断 | 暂停翻译，不停站点 | 等待恢复或立即探测 |
@@ -1013,6 +1014,20 @@ Admin UI
 
 最终验收标准：任意异常任务都能在 Admin 看到当前事实、错误代码、下一步动作和 action 结果；取消请求最终必达“已终止、已恢复或明确超时”之一；provider 恢复后任务可继续调度；服务重启、网络抖动和页面刷新都不会制造无按钮或永久等待状态。
 
+### 阶段 8.2：v1.2.10 翻译响应失败与孤儿任务修复
+
+状态：`已实现，待最终全量与发布门禁`。
+
+本版本针对生产中“等待模型生成”持续失败退避和任务从列表消失的问题收口：
+
+1. `SCHEMA_VALIDATION_FAILED`、`EMPTY_RESPONSE`、`UNPARSEABLE_RESPONSE` 不再自动退避，任务进入可见 `failed`，保留 Admin 单篇“立即重试”。
+2. 翻译失败阶段按真实失败点记录；schema 错误显示 `schema_validation`，响应为空或不可解析显示 `receiving_response`。
+3. 任务引用原文缺失时记录 `TASK_DATA_MISSING`，释放 lease，避免任务永久停在 `running`。
+4. worker 启动恢复时把旧版本遗留的内容/schema `retry_wait` 任务归一化为人工可重试的 `failed`，保留原有尝试和诊断审计。
+5. 不改变上游 `400/401/403` 的 `UPSTREAM_ERROR` 退避、provider 熔断、站点增量 build 或投递幂等逻辑。
+
+验收门：翻译自动化定向回归、全量离线测试、Ruff、diff check 和构建全部通过；确认异常任务仍在 Admin 列表且存在恢复动作后，才允许创建不可变 `v1.2.10` tag、Release、GHCR 镜像和生产部署。人工验收前禁止最终发布操作。
+
 ## 9. 通用本地验收流程
 
 每个本地阶段统一执行：
@@ -1158,4 +1173,5 @@ Admin UI
 | 2026-08-28 | 阶段 8 | v1.2.8 人工验收与最终离线门禁通过，可发布 | 用户确认浏览器 UI 与人工重试验收通过；修复 demo 启动自动清空任务、重试竞态提示和已完成刊期显示；最终离线全量 `587 passed, 1 skipped, 7 deselected(network)`，Ruff、diff check、`uv build` 均通过。尚未执行 Git 提交/tag、GitHub Release/GHCR 发布或生产部署；需按不可变版本纪律完成独立复审后再发布。 |
 | 2026-08-28 | 阶段 8.1 | v1.2.9 状态机补强，待人工验收 | 新增 schema v7 的显式 `dispatch` 动作，修复 `pending + closed` 显示“可立即调度”却无按钮；动作判定改为按任务所属 provider，`half_open` 探测重复点击复用当前 probe；补充迁移、API、动作审计回归。离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 通过；已启动 8618 普通预览与 8620 fake automation 预览，尚未进行浏览器人工验收、独立复审、Release/GHCR、生产部署。 |
 | 2026-08-28 | 阶段 8.1 | v1.2.9 本地浏览器与人工验收通过，进入正式发布 | 独立启动 8621/8622 fake automation 预览，确认 provider `open` 时顶部及任务行均显示“立即探测”、运行任务显示“终止”、错误码/退避/下一次执行时间可见；探测完成后 provider 回到 `closed`，失败任务恢复并上线，状态列表未消失或串线。用户已确认人工验收通过；最终全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 均通过。正在执行独立发布复核、`v1.2.9` Release/GHCR 和生产部署。 |
+| 2026-08-28 | 阶段 8.2 | v1.2.10 翻译响应失败修复，待发布门禁 | schema/空响应/不可解析响应停止无限自动退避并保留人工重试；真实失败阶段可见；缺失原文释放 lease 并记录 `TASK_DATA_MISSING`；启动恢复归一化旧版遗留退避任务。定向回归 `57 passed`、Ruff、diff check 已通过；最终全量、tag、Release、GHCR 与生产部署尚未执行。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

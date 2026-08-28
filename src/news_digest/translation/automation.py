@@ -39,6 +39,10 @@ class TranslationFailure:
     http_status: int | None
 
 
+class TranslationTaskDataError(RuntimeError):
+    """A claimed task cannot be joined to its source article."""
+
+
 @dataclass(frozen=True)
 class TranslationWorkClaim:
     task: db.TranslationTask | None
@@ -63,13 +67,17 @@ def classify_translation_failure(
     stage: FailureStage,
 ) -> TranslationFailure:
     del stage  # The persisted stage is supplied separately; classification remains content-free.
+    if isinstance(error, TranslationTaskDataError):
+        return TranslationFailure(
+            "TASK_DATA_MISSING", "data_integrity", "content_failure", False, None
+        )
     if isinstance(error, InvalidTranslation):
         return TranslationFailure(
-            "SCHEMA_VALIDATION_FAILED", "schema", "content_failure", True, None
+            "SCHEMA_VALIDATION_FAILED", "schema", "content_failure", False, None
         )
     if not isinstance(error, TranslationError):
         return TranslationFailure(
-            "UNPARSEABLE_RESPONSE", "response_format", "content_failure", True, None
+            "UNPARSEABLE_RESPONSE", "response_format", "content_failure", False, None
         )
 
     status = error.status
@@ -117,11 +125,21 @@ def classify_translation_failure(
         )
     if error.category == "empty_response":
         return TranslationFailure(
-            "EMPTY_RESPONSE", "response_format", "content_failure", True, status
+            "EMPTY_RESPONSE", "response_format", "content_failure", False, status
         )
     return TranslationFailure(
-        "UNPARSEABLE_RESPONSE", "response_format", "content_failure", True, status
+        "UNPARSEABLE_RESPONSE", "response_format", "content_failure", False, status
     )
+
+
+def _failure_stage(error: Exception) -> FailureStage:
+    """Persist the phase that actually failed, rather than the request default."""
+    if isinstance(error, InvalidTranslation):
+        return "schema_validation"
+    if isinstance(error, TranslationError):
+        if error.response_started or error.category in {"empty_response", "response_format"}:
+            return "receiving_response"
+    return "waiting_model"
 
 
 def provider_concurrency_limit(
@@ -322,7 +340,7 @@ class TranslationAutomationRunner:
             for article in edition.articles:
                 if article.url == task.article_id:
                     return article
-        raise RuntimeError("translation task article is missing")
+        raise TranslationTaskDataError("translation task article is missing")
 
     def run_ready(
         self,
@@ -381,11 +399,33 @@ class TranslationAutomationRunner:
                 if claim.task is None:
                     result.blocked += 1
                     continue
-                article = self._article_for_task(conn, claim.task)
                 result.claimed += 1
                 result.probes += int(claim.is_probe)
+                try:
+                    article = self._article_for_task(conn, claim.task)
+                except TranslationTaskDataError as error:
+                    missing_article = error
+                else:
+                    missing_article = None
             finally:
                 conn.close()
+
+            if missing_article is not None:
+                completed_at = self._completion_timestamp(now)
+                conn = db.connect(self.database)
+                try:
+                    fail_translation_work(
+                        conn,
+                        candidate.task_id,
+                        owner=owner,
+                        now=completed_at,
+                        error=missing_article,
+                        stage="saving_translation",
+                    )
+                finally:
+                    conn.close()
+                result.failed += 1
+                continue
 
             try:
                 translated, cache_hit = translate_article_once(
@@ -419,7 +459,7 @@ class TranslationAutomationRunner:
                             owner=owner,
                             now=completed_at,
                             error=error,
-                            stage="waiting_model",
+                            stage=_failure_stage(error),
                         )
                 finally:
                     conn.close()

@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前版本：`v1.2.9`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器；本地自动化与浏览器人工验收已通过，正在执行正式发布流程。
+当前版本：`v1.2.10`。本版本修复翻译响应失败的无限退避与任务数据缺失遗留问题；本地自动化与浏览器人工验收已通过，待完成正式发布流程。
 
 ## 产品能力
 
@@ -66,7 +66,8 @@ flowchart TD
     C -->|成功| D["保存译文"]
     D --> E["合并增量 build"]
     E --> F["成功内容上线"]
-    C -->|失败| G["仅该篇退避重试"]
+    C -->|可恢复上游错误| G["仅该篇退避重试"]
+    C -->|schema/响应格式错误| K["失败并保留人工重试"]
     G --> C
     F --> H{"当日任务全部完成"}
     H -->|否| C
@@ -77,11 +78,12 @@ flowchart TD
 翻译状态页通过 SSE 实时更新，连接断开时自动退化为短间隔轮询。每一行显示当前阶段、耗时、尝试次数、错误代码、下一次执行时间、build/上线状态和脱敏诊断 ID；非流式接口不会伪造百分比。
 翻译状态按刊期查看；日期选择器只显示存在待处理（pending/running）或失败、待重试、配置阻断、已取消任务的日期，默认打开最新待处理刊期；无待处理日期时显示最近一期完整结果。
 
-- 单篇失败从 `failed_at` 开始按 `15 秒 → 30 秒 → 60 秒 → 2 分钟 → 5 分钟`退避。
+- 可恢复的上游基础设施失败从 `failed_at` 开始按 `15 秒 → 30 秒 → 60 秒 → 2 分钟 → 5 分钟`退避；schema、响应格式和任务数据错误不自动循环重试。
 - 同一 provider 连续 5 次基础设施失败后打开熔断器，不影响网站、归档、Admin 或已上线内容。
 - 熔断后自动探测依次等待 `60 秒 → 2 分钟 → 5 分钟`；同一时间最多一个 half-open 探测。
 - “立即调度”用于尚未启动的 pending 文章；“立即重试”只调度当前失败文章；“终止”先确认旧执行体结束；“立即探测”仍竞争持久 lease，重复点击不会创建第二个请求。
 - 上游 HTTP `400/401/403`、余额不足和权限拒绝统一记录为 `UPSTREAM_ERROR`，按单篇退避与 provider 熔断处理；只有本地配置前置校验失败才使用 `CONFIGURATION_INVALID`。
+- `EMPTY_RESPONSE`、`UNPARSEABLE_RESPONSE`、`SCHEMA_VALIDATION_FAILED` 和 `TASK_DATA_MISSING` 停在 `failed`，保留“立即重试”按钮；修正协议、模型或任务数据后再人工重试。
 - provider 已恢复为 `closed` 时，历史配置阻断任务通过“保存配置 → 成功受控测试 → 解除阻断”恢复为可调度；解除动作返回持久 `action_id` 并保留审计。
 - “等待终止确认”在 lease 过期后显示“恢复为可重试”。该动作只排队恢复，由 worker 确认旧执行体已结束，不会直接强制重发。
 - 生产 Admin 成功入队后会通过受限 systemd path 唤醒独立恢复 worker；HTTP 请求本身不调用 provider，每日 worker 与恢复 worker 使用同一宿主锁串行。
@@ -98,9 +100,10 @@ flowchart TD
 | `PROVIDER_5XX` | provider 服务异常 | 单篇退避并计入熔断 | 通常等待自动恢复 |
 | `NETWORK_CONNECT_FAILED` | DNS、代理或连接失败 | 单篇退避并计入熔断 | 检查网络与代理 |
 | `REQUEST_TIMEOUT` | 请求达到硬超时 | 结束旧请求后退避 | 确认旧请求已停止 |
-| `EMPTY_RESPONSE` | 返回内容为空 | 只重试当前文章 | 等待或立即重试 |
-| `UNPARSEABLE_RESPONSE` | 响应无法解析 | 只重试当前文章 | 检查协议与模型兼容性 |
-| `SCHEMA_VALIDATION_FAILED` | 内容不符合正式 schema | 只重试当前文章，不计入熔断 | 重试该篇或更换兼容模型 |
+| `EMPTY_RESPONSE` | 返回内容为空 | 停止自动重试，保留失败状态 | 检查模型输出后手动重试 |
+| `UNPARSEABLE_RESPONSE` | 响应无法解析 | 停止自动重试，保留失败状态 | 检查协议与模型兼容性后手动重试 |
+| `SCHEMA_VALIDATION_FAILED` | 内容不符合正式 schema | 停止自动重试，不计入熔断 | 修正提示词/模型后手动重试 |
+| `TASK_DATA_MISSING` | 任务引用的原文已不存在 | 停止自动重试，释放任务 lease | 恢复原文或重新生成任务后手动重试 |
 | `CONFIGURATION_INVALID` | 本地配置缺失、字段冲突或前置校验失败 | 配置阻断 | 按“保存 → 测试 → 解除阻断”处理 |
 | `REQUEST_CANCELLED` | 管理员终止请求 | 保留为待重试 | 确认原因后恢复该篇 |
 | `CIRCUIT_OPEN` | provider 已熔断 | 暂停新的翻译请求 | 等待冷却或立即探测 |

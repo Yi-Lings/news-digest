@@ -35,7 +35,7 @@ def test_demo_seeds_redacted_persistent_acceptance_states(tmp_path):
 
     tasks = _tasks(database)
     assert len(tasks) == 4
-    assert {task.status for task in tasks} == {"retry_wait", "running", "succeeded"}
+    assert {task.status for task in tasks} == {"failed", "retry_wait", "running", "succeeded"}
     assert any(task.build_status == "online" for task in tasks)
     assert {task.error_code for task in tasks if task.error_code} == {
         "NETWORK_CONNECT_FAILED",
