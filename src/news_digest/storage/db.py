@@ -2181,6 +2181,9 @@ def unfinished_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
         "SELECT edition_date FROM automation_editions"
         " WHERE status NOT IN ('delivered', 'delivery_pending')"
         " AND NOT (status = 'complete' AND last_error_code = 'DELIVERY_EXPIRED')"
+        " OR EXISTS (SELECT 1 FROM translation_tasks"
+        "   WHERE translation_tasks.edition_date = automation_editions.edition_date"
+        "   AND translation_tasks.status IN ('pending', 'retry_wait', 'running'))"
         " ORDER BY edition_date DESC"
     ).fetchall()
     return [row["edition_date"] for row in rows]

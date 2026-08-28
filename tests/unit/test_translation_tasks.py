@@ -43,6 +43,19 @@ def test_translation_task_creation_is_idempotent_and_persistent(tmp_path):
     assert db.list_translation_tasks(reopened, "2026-07-28") == [created]
 
 
+def test_pending_task_reopens_archived_edition_for_resume(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+    _task(conn)
+    with conn:
+        conn.execute(
+            "UPDATE automation_editions SET status = 'delivered' WHERE edition_date = ?",
+            ("2026-07-28",),
+        )
+
+    assert db.unfinished_automation_edition_dates(conn) == ["2026-07-28"]
+
+
 def test_running_task_never_has_a_retry_time(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     task = _task(conn)
