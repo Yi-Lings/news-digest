@@ -273,6 +273,7 @@ class _SseParser:
         self.parts: list[str] = []
         self.recognized = False
         self.foreign_format = False
+        self.completed = False
 
     @property
     def response_started(self) -> bool:
@@ -286,10 +287,18 @@ class _SseParser:
     def _feed_openai(self, data: str) -> bool:
         if data == "[DONE]":
             self.recognized = True
+            self.completed = True
             return True
         payload = _json_object(data)
         if payload is None:
             return False
+        if payload.get("type") == "error" or isinstance(payload.get("error"), dict):
+            raise TranslationError(
+                "翻译接口流式响应报错",
+                category="provider",
+                status=502,
+                response_started=self.response_started,
+            )
         if "content" in payload or str(payload.get("type", "")).startswith(
             ("message_", "content_block_")
         ):
@@ -350,6 +359,13 @@ class _SseParser:
     def result(self) -> str:
         content = "".join(self.parts)
         if content.strip():
+            if self.api_type == "openai_chat" and not self.completed:
+                raise TranslationError(
+                    "翻译接口流式响应未正常结束",
+                    category="provider",
+                    status=502,
+                    response_started=self.response_started,
+                )
             return content
         if self.foreign_format:
             raise TranslationError(

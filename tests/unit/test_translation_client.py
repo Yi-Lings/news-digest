@@ -602,6 +602,17 @@ def test_stream_failure_before_content_is_marked_started():
     assert "secret upstream detail" not in str(error)
 
 
+def test_openai_stream_without_done_is_retryable_provider_failure():
+    body = b'data: {"choices": [{"delta": {"content": "partial"}}]}\n\n'
+    translator = _translator(lambda request: httpx.Response(200, content=body))
+    with pytest.raises(TranslationError) as excinfo:
+        translator.translate(_article())
+    error = excinfo.value
+    assert error.category == "provider"
+    assert error.status == 502
+    assert error.response_started is True
+
+
 def test_non_stream_failure_after_headers_is_marked_started():
     class FailingBody(httpx.SyncByteStream):
         def __iter__(self):
