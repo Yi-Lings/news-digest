@@ -704,6 +704,17 @@ def _run_automation_daily(
         clock=clock,
     )
     owner = f"daily-{os.getpid()}"
+    recovery_conn = db.connect(fetch_config.database)
+    try:
+        # The daily service is protected by the same worker flock as resume;
+        # stale leases can therefore be recovered before scheduling new work.
+        db.recover_interrupted_translation_tasks(
+            recovery_conn,
+            now=clock().astimezone(dt.UTC).isoformat(),
+            process_terminated=True,
+        )
+    finally:
+        recovery_conn.close()
     runner.seed_edition(edition, now=clock())
     print(f"[2/4] 逐篇翻译自动化：{date}，任务 {len(edition.articles)} 篇")
     try:
@@ -748,6 +759,8 @@ def _run_automation_daily(
 
 
 def _run_automation_resume(yes: bool) -> int:
+    import datetime as dt
+
     if not yes:
         print("未加 --yes：未恢复自动化任务，也未调用 provider 或 SMTP。")
         return 0
@@ -757,6 +770,13 @@ def _run_automation_resume(yes: bool) -> int:
 
     conn = db.connect(fetch_config.database)
     try:
+        # The systemd flock guarantees the previous worker is no longer
+        # running before this process takes ownership of stale leases.
+        db.recover_interrupted_translation_tasks(
+            conn,
+            now=dt.datetime.now(dt.UTC).isoformat(),
+            process_terminated=True,
+        )
         unfinished = db.unfinished_automation_edition_dates(conn)
     finally:
         conn.close()

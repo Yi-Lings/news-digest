@@ -7,8 +7,8 @@ from news_digest import __version__
 ROOT = Path(__file__).parents[2]
 
 
-def test_phase_8_release_version_is_v1_2_8():
-    assert __version__ == "1.2.8"
+def test_phase_8_release_version_is_v1_2_9():
+    assert __version__ == "1.2.9"
 
 
 def _read(path: str) -> str:

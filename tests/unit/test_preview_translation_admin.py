@@ -2,7 +2,9 @@ import datetime as dt
 import http.client
 import json
 import threading
+import time
 
+from news_digest.admin_providers import provider_fingerprint, save_test_state
 from news_digest.preview_server import ADMIN_HTML, create_server
 from news_digest.storage import db
 
@@ -115,7 +117,9 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         states = {item["task_id"]: item for item in payload["items"]}
         assert states[failed.task_id]["queue_state"] == "waiting_backoff"
         assert states[failed.task_id]["next_executable_at"] == _at(16)
+        assert states[failed.task_id]["available_actions"] == ["retry"]
         assert states[running.task_id]["queue_state"] == "executing"
+        assert states[running.task_id]["available_actions"] == ["cancel"]
         encoded = json.dumps(payload, ensure_ascii=False)
         assert "safe-diagnostic" in encoded
         assert "provider raw response" not in encoded
@@ -142,6 +146,7 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
             {"task_id": failed.task_id},
         )
         assert status == 202 and queued["status"] == "retry_wait"
+        assert isinstance(queued["action_id"], str)
 
         status, cancelled = _request(
             port,
@@ -150,6 +155,7 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
             {"task_id": running.task_id, "confirm": True},
         )
         assert status == 202 and cancelled["cancel_requested"]
+        assert isinstance(cancelled["action_id"], str)
         conn = db.connect(database)
         try:
             still_running = db.translation_task(conn, running.task_id)
@@ -168,6 +174,92 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         states = {item["task_id"]: item for item in updated["items"]}
         assert states[failed.task_id]["queue_state"] == "waiting_dispatch"
         assert states[running.task_id]["queue_state"] == "waiting_cancel_confirmation"
+        assert states[failed.task_id]["action"]["type"] == "retry"
+        assert states[failed.task_id]["action"]["status"] == "requested"
+        assert states[running.task_id]["action"]["type"] == "cancel"
+        assert states[running.task_id]["action"]["status"] == "requested"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_exposes_dispatch_for_pending_closed_task(tmp_path):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        task = db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-28",
+            article_id="article-pending",
+            article_title="Pending article",
+            provider_id="provider-default",
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+    finally:
+        conn.close()
+    wakeups = []
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        db_path=database,
+        translation_wakeup_callback=lambda: wakeups.append("wake"),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        item = payload["items"][0]
+        assert item["queue_state"] == "waiting_dispatch"
+        assert item["available_actions"] == ["dispatch"]
+
+        status, queued = _request(
+            port,
+            "POST",
+            "/admin/api/translations/dispatch",
+            {"task_id": task.task_id},
+        )
+        assert status == 202
+        assert queued["status"] == "pending"
+        assert isinstance(queued["action_id"], str)
+        assert wakeups == ["wake"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_keeps_pending_task_actionable_when_provider_blocked(tmp_path):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-28",
+            article_id="article-blocked-pending",
+            article_title="Blocked pending article",
+            provider_id="provider-default",
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="configuration_failure", now=_at(1)
+        )
+    finally:
+        conn.close()
+    server = create_server(tmp_path, tmp_path, 0, serve_static=False, db_path=database)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        item = payload["items"][0]
+        assert item["available_actions"] == ["unblock"]
+        assert item["queue_state"] == "blocked"
     finally:
         server.shutdown()
         server.server_close()
@@ -324,6 +416,7 @@ def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
         assert first_status == second_status == 202
         assert first["already_queued"] is False
         assert second["already_queued"] is True
+        assert first["action_id"] == second["action_id"]
         assert wakeups == ["wake", "wake"]
         conn = db.connect(database)
         try:
@@ -344,6 +437,146 @@ def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
         server.server_close()
 
 
+def test_translation_admin_unblock_requires_recent_matching_provider_test(tmp_path):
+    database = tmp_path / "news.db"
+    failed, _ = _seed(database)
+    conn = db.connect(database)
+    try:
+        db.claim_translation_task(
+            conn, failed.task_id, owner="config-worker", now=_at(2),
+            lease_seconds=30, manual=True
+        )
+        db.finish_translation_task_failure(
+            conn,
+            failed.task_id,
+            owner="config-worker",
+            now=_at(3),
+            error_code="CONFIGURATION_INVALID",
+            error_category="configuration",
+            failure_stage="connect_provider",
+            diagnostic_id="config-diagnostic",
+            auto_retry=False,
+        )
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="configuration_failure", now=_at()
+        )
+    finally:
+        conn.close()
+    provider = {
+        "name": "provider-default",
+        "base_url": "https://provider.example/v1",
+        "api_key": "redacted-key",
+        "model": "gpt-test",
+        "api_type": "openai_chat",
+        "stream": True,
+        "enabled": True,
+        "is_default": True,
+    }
+    (tmp_path / ".env.providers.local").write_text(
+        json.dumps({"providers": {provider["name"]: provider}}), encoding="utf-8"
+    )
+    save_test_state(
+        tmp_path,
+        provider["name"],
+        {
+            "status": "success",
+            "tested_at_epoch": time.time(),
+            "fingerprint": provider_fingerprint(tmp_path, provider),
+        },
+    )
+    wakeups = []
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        db_path=database,
+        translation_wakeup_callback=lambda: wakeups.append("wake"),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(
+            port,
+            "POST",
+            "/admin/api/translations/unblock",
+            {"task_id": failed.task_id, "confirm": True},
+        )
+        assert status == 202
+        assert isinstance(payload["action_id"], str)
+        assert payload["already_queued"] is False
+        assert wakeups == ["wake"]
+        conn = db.connect(database)
+        try:
+            task = db.translation_task(conn, failed.task_id)
+            circuit = db.get_provider_circuit(conn, "provider-default")
+            action = conn.execute(
+                "SELECT action, status, result_code FROM translation_admin_actions"
+                " WHERE action_id = ?",
+                (payload["action_id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert task.status == "pending"
+        assert circuit.state == "closed"
+        assert tuple(action) == ("unblock", "completed", "UNBLOCKED")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_exposes_recovery_after_cancel_lease_expiry(tmp_path):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        task = db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-28",
+            article_id="article-cancelled",
+            article_title="Cancelled article",
+            provider_id="provider-default",
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+        db.claim_translation_task(
+            conn, task.task_id, owner="worker-a", now=_at(), lease_seconds=10
+        )
+        db.request_translation_task_cancel(conn, task.task_id, now=_at(1), actor="admin")
+    finally:
+        conn.close()
+    wakeups = []
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        db_path=database,
+        clock=lambda: dt.datetime.fromisoformat(_at(12)).timestamp(),
+        translation_wakeup_callback=lambda: wakeups.append("wake"),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert payload["items"][0]["available_actions"] == ["recover"]
+        status, result = _request(
+            port,
+            "POST",
+            "/admin/api/translations/recover",
+            {"task_id": task.task_id, "confirm": True},
+        )
+        assert status == 202
+        assert result["already_queued"] is False
+        assert isinstance(result["action_id"], str)
+        assert wakeups == ["wake"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_translation_admin_dom_contract_and_reduced_motion():
     assert ADMIN_HTML.index('data-tab="subscriptions"') < ADMIN_HTML.index(
         'data-tab="translations"'
@@ -357,8 +590,15 @@ def test_translation_admin_dom_contract_and_reduced_motion():
         'data-translation-filter="failed"',
         'data-translation-filter="online"',
         '"/admin/api/translations/retry"',
+        '"/admin/api/translations/dispatch"',
         '"/admin/api/translations/cancel"',
         '"/admin/api/translations/probe"',
+        '"/admin/api/translations/recover"',
+        'item.available_actions || []',
+        "queueTranslationProbe(item, event.currentTarget)",
+        "立即调度",
+        "解除阻断并重试",
+        'item.action.status',
         "探测已在队列，已重新唤醒 worker。",
         'new EventSource("/admin/api/translations/events")',
         "translationPoll = setInterval(loadTranslations, 3000)",

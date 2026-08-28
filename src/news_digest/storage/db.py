@@ -17,7 +17,7 @@ from news_digest.models import (
     article_to_dict,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 DeliveryStatus = Literal["pending", "sending", "sent", "failed", "unknown"]
 ArchiveStatus = Literal["pending", "archived", "failed"]
@@ -45,6 +45,12 @@ TranslationTaskStatus = Literal[
 TranslationBuildStatus = Literal["build_pending", "built", "online"]
 TranslationAttemptKind = Literal["automatic", "manual", "probe"]
 TranslationAttemptStatus = Literal["running", "succeeded", "failed", "cancelled"]
+TranslationAdminActionType = Literal[
+    "dispatch", "retry", "cancel", "probe", "unblock", "recover"
+]
+TranslationAdminActionStatus = Literal[
+    "requested", "running", "completed", "rejected", "timed_out", "recovered"
+]
 ProviderCircuitState = Literal["closed", "open", "half_open", "configuration_blocked"]
 ProviderOutcome = Literal[
     "success", "provider_failure", "content_failure", "configuration_failure"
@@ -276,6 +282,20 @@ class TranslationAttempt:
 
 
 @dataclass(frozen=True)
+class TranslationAdminAction:
+    action_id: str
+    task_id: str | None
+    provider_id: str
+    action: TranslationAdminActionType
+    actor: str
+    status: TranslationAdminActionStatus
+    requested_at: str
+    started_at: str | None
+    finished_at: str | None
+    result_code: str | None
+
+
+@dataclass(frozen=True)
 class ProviderCircuit:
     provider_id: str
     state: ProviderCircuitState
@@ -421,9 +441,13 @@ CREATE TABLE IF NOT EXISTS translation_admin_actions (
     action_id TEXT PRIMARY KEY,
     task_id TEXT REFERENCES translation_tasks(task_id) ON DELETE SET NULL,
     provider_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('retry', 'cancel', 'probe')),
+    action TEXT NOT NULL CHECK(action IN (
+        'dispatch', 'retry', 'cancel', 'probe', 'unblock', 'recover'
+    )),
     actor TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('requested', 'running', 'completed', 'rejected')),
+    status TEXT NOT NULL CHECK(status IN (
+        'requested', 'running', 'completed', 'rejected', 'timed_out', 'recovered'
+    )),
     requested_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
@@ -611,6 +635,98 @@ def _migrate_to_v5(conn: sqlite3.Connection, path: Path) -> None:
     conn.executescript(_TRANSLATION_AUTOMATION_SCHEMA)
 
 
+def _migrate_to_v6(conn: sqlite3.Connection, path: Path) -> None:
+    """Extend durable Admin actions without dropping existing audit rows."""
+    backup_path = path.with_name(f"{path.name}.pre-v6.bak")
+    if path.is_file() and not backup_path.exists():
+        backup = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup)
+            row = backup.execute("PRAGMA integrity_check").fetchone()
+            if row is None or row[0] != "ok":
+                raise RuntimeError("schema v6 迁移前数据库备份校验失败")
+        finally:
+            backup.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE translation_admin_actions RENAME TO translation_admin_actions_v5")
+        conn.execute(
+            "CREATE TABLE translation_admin_actions ("
+            "action_id TEXT PRIMARY KEY,"
+            "task_id TEXT REFERENCES translation_tasks(task_id) ON DELETE SET NULL,"
+            "provider_id TEXT NOT NULL,"
+            "action TEXT NOT NULL CHECK(action IN ("
+            "'dispatch', 'retry', 'cancel', 'probe', 'unblock', 'recover')),"
+            "actor TEXT NOT NULL,"
+            "status TEXT NOT NULL CHECK(status IN ('requested', 'running', 'completed',"
+            " 'rejected', 'timed_out', 'recovered')),"
+            "requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, result_code TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO translation_admin_actions "
+            "(action_id, task_id, provider_id, action, actor, status, requested_at, "
+            "started_at, finished_at, result_code) "
+            "SELECT action_id, task_id, provider_id, action, actor, status, requested_at, "
+            "started_at, finished_at, result_code FROM translation_admin_actions_v5"
+        )
+        conn.execute("DROP TABLE translation_admin_actions_v5")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_translation_admin_actions_requested "
+            "ON translation_admin_actions(requested_at DESC)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_to_v7(conn: sqlite3.Connection, path: Path) -> None:
+    """Add the explicit dispatch action without rewriting existing audit rows."""
+    backup_path = path.with_name(f"{path.name}.pre-v7.bak")
+    if path.is_file() and not backup_path.exists():
+        backup = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup)
+            row = backup.execute("PRAGMA integrity_check").fetchone()
+            if row is None or row[0] != "ok":
+                raise RuntimeError("schema v7 迁移前数据库备份校验失败")
+        finally:
+            backup.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE translation_admin_actions RENAME TO translation_admin_actions_v6")
+        conn.execute(
+            "CREATE TABLE translation_admin_actions ("
+            "action_id TEXT PRIMARY KEY,"
+            "task_id TEXT REFERENCES translation_tasks(task_id) ON DELETE SET NULL,"
+            "provider_id TEXT NOT NULL,"
+            "action TEXT NOT NULL CHECK(action IN ("
+            "'dispatch', 'retry', 'cancel', 'probe', 'unblock', 'recover')),"
+            "actor TEXT NOT NULL,"
+            "status TEXT NOT NULL CHECK(status IN ('requested', 'running', 'completed',"
+            " 'rejected', 'timed_out', 'recovered')),"
+            "requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, result_code TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO translation_admin_actions "
+            "(action_id, task_id, provider_id, action, actor, status, requested_at, "
+            "started_at, finished_at, result_code) "
+            "SELECT action_id, task_id, provider_id, action, actor, status, requested_at, "
+            "started_at, finished_at, result_code FROM translation_admin_actions_v6"
+        )
+        conn.execute("DROP TABLE translation_admin_actions_v6")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_translation_admin_actions_requested "
+            "ON translation_admin_actions(requested_at DESC)"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def connect(path: Path) -> sqlite3.Connection:
     """打开数据库,父目录与表按需创建,并校验 schema 版本。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -626,7 +742,7 @@ def connect(path: Path) -> sqlite3.Connection:
             (str(SCHEMA_VERSION),),
         )
         conn.commit()
-    elif row["value"] in {"1", "2", "3", "4"} and SCHEMA_VERSION == 5:
+    elif row["value"] in {"1", "2", "3", "4"} and SCHEMA_VERSION == 7:
         if row["value"] in {"1", "2"}:
             _migrate_to_v3(conn)
         if row["value"] in {"1", "2", "3"}:
@@ -634,8 +750,41 @@ def connect(path: Path) -> sqlite3.Connection:
         _migrate_to_v5(conn, path)
         conn.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("5",),
+        )
+        conn.commit()
+        _migrate_to_v6(conn, path)
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("6",),
+        )
+        conn.commit()
+        _migrate_to_v7(conn, path)
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),
         )
+        conn.commit()
+    elif row["value"] == "5" and SCHEMA_VERSION == 7:
+        _migrate_to_v6(conn, path)
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("6",),
+        )
+        conn.commit()
+        _migrate_to_v7(conn, path)
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.commit()
+    elif row["value"] == "6" and SCHEMA_VERSION == 7:
+        _migrate_to_v7(conn, path)
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.commit()
         conn.commit()
     elif row["value"] != str(SCHEMA_VERSION):
         found = row["value"]
@@ -1121,6 +1270,32 @@ def list_translation_attempts(
     return [_translation_attempt(row) for row in rows]
 
 
+def latest_translation_admin_action(
+    conn: sqlite3.Connection, task_id: str
+) -> TranslationAdminAction | None:
+    _validate_test_attempt_digest(task_id, "task_id")
+    row = conn.execute(
+        "SELECT action_id, task_id, provider_id, action, actor, status, requested_at,"
+        " started_at, finished_at, result_code FROM translation_admin_actions"
+        " WHERE task_id = ? ORDER BY requested_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return TranslationAdminAction(
+        action_id=row["action_id"],
+        task_id=row["task_id"],
+        provider_id=row["provider_id"],
+        action=row["action"],
+        actor=row["actor"],
+        status=row["status"],
+        requested_at=row["requested_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        result_code=row["result_code"],
+    )
+
+
 def claim_translation_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -1150,6 +1325,8 @@ def claim_translation_task(
         allowed = row["status"] == "pending" or row["status"] in {"retry_wait", "failed"} and (
             manual or (row["next_retry_at"] is not None and row["next_retry_at"] <= now)
         )
+        if probe and row["status"] == "configuration_blocked":
+            allowed = True
         if not allowed:
             conn.commit()
             return None
@@ -1298,6 +1475,59 @@ def request_translation_task_cancel(
     return task
 
 
+def queue_translation_task_dispatch(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: str,
+    actor: str,
+) -> TranslationTask:
+    """Request immediate scheduling for a pending task through an audited action."""
+    _validate_test_attempt_digest(task_id, "task_id")
+    actor = _non_empty(actor, "actor", maximum=128)
+    now = _automation_timestamp(now)
+    action_id = uuid.uuid4().hex
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT provider_id, status, manual_retry_requested_at, next_retry_at"
+            " FROM translation_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("translation task does not exist")
+        if row["status"] != "pending":
+            raise RuntimeError("translation task is not waiting for dispatch")
+        if row["manual_retry_requested_at"] is not None:
+            raise RuntimeError("translation dispatch is already queued")
+        circuit = conn.execute(
+            "SELECT state FROM provider_circuits WHERE provider_id = ?",
+            (row["provider_id"],),
+        ).fetchone()
+        if circuit is not None and circuit["state"] != "closed":
+            raise RuntimeError("provider circuit requires a controlled probe")
+        conn.execute(
+            "INSERT INTO translation_admin_actions"
+            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
+            " VALUES (?, ?, ?, 'dispatch', ?, 'requested', ?)",
+            (action_id, task_id, row["provider_id"], actor, now),
+        )
+        conn.execute(
+            "UPDATE translation_tasks SET auto_retry = 1, next_retry_at = ?,"
+            " manual_retry_requested_at = ?, manual_action_id = ?, updated_at = ?"
+            " WHERE task_id = ? AND status = 'pending'",
+            (now, now, action_id, now, task_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    task = translation_task(conn, task_id)
+    if task is None:
+        raise RuntimeError("translation task does not exist")
+    return task
+
+
 def queue_translation_task_retry(
     conn: sqlite3.Connection,
     task_id: str,
@@ -1318,7 +1548,12 @@ def queue_translation_task_retry(
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task does not exist")
-        if row["status"] not in {"failed", "retry_wait", "cancelled"}:
+        if row["status"] not in {
+            "failed",
+            "retry_wait",
+            "cancelled",
+            "configuration_blocked",
+        }:
             raise RuntimeError("translation task is not retryable")
         if row["manual_retry_requested_at"] is not None:
             raise RuntimeError("translation retry is already queued")
@@ -1366,9 +1601,24 @@ def queue_provider_probe(
     try:
         conn.execute("BEGIN IMMEDIATE")
         circuit = conn.execute(
-            "SELECT state FROM provider_circuits WHERE provider_id = ?", (provider_id,)
+            "SELECT state, probe_task_id FROM provider_circuits WHERE provider_id = ?",
+            (provider_id,),
         ).fetchone()
-        if circuit is None or circuit["state"] not in {"open", "configuration_blocked"}:
+        if circuit is None:
+            raise RuntimeError("provider circuit is not probeable")
+        if circuit["state"] == "half_open":
+            active_task_id = circuit["probe_task_id"]
+            if not active_task_id:
+                raise RuntimeError("provider probe is already running")
+            active_task = conn.execute(
+                _translation_task_select() + " WHERE task_id = ?",
+                (active_task_id,),
+            ).fetchone()
+            if active_task is None:
+                raise RuntimeError("provider probe task does not exist")
+            conn.commit()
+            return _translation_task(active_task)
+        if circuit["state"] not in {"open", "configuration_blocked"}:
             raise RuntimeError("provider circuit is not probeable")
         queued_probe = conn.execute(
             "SELECT 1 FROM translation_tasks WHERE provider_id = ?"
@@ -1515,7 +1765,9 @@ def finish_translation_task_failure(
         error_code, error_category, failure_stage, diagnostic_id, http_status
     )
     now = _automation_timestamp(now)
-    configuration_blocked = error_code in {"AUTH_401", "CONFIGURATION_INVALID"}
+    # Only locally validated configuration errors may permanently block a
+    # provider. Upstream HTTP/auth/permission failures remain retryable.
+    configuration_blocked = error_code == "CONFIGURATION_INVALID"
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -1642,7 +1894,7 @@ def recover_interrupted_translation_tasks(
     try:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
-            "SELECT task_id, attempt_count, lease_owner FROM translation_tasks"
+            "SELECT task_id, attempt_count, lease_owner, cancel_requested_at FROM translation_tasks"
             " WHERE status = 'running' AND lease_expires_at <= ?",
             (now,),
         ).fetchall()
@@ -1667,6 +1919,76 @@ def recover_interrupted_translation_tasks(
                 " AND owner = ?",
                 (now, row["task_id"], row["attempt_count"], row["lease_owner"]),
             )
+            conn.execute(
+                "UPDATE translation_admin_actions SET status = 'recovered',"
+                " started_at = COALESCE(started_at, ?), finished_at = ?,"
+                " result_code = 'RECOVERED' WHERE task_id = ? AND action = 'recover'"
+                " AND status IN ('requested', 'running')",
+                (now, now, row["task_id"]),
+            )
+            if row["cancel_requested_at"] is not None:
+                conn.execute(
+                    "UPDATE translation_admin_actions SET status = 'recovered',"
+                    " started_at = COALESCE(started_at, ?), finished_at = ?,"
+                    " result_code = 'RECOVERED' WHERE task_id = ? AND action = 'cancel'"
+                    " AND status IN ('requested', 'running')",
+                    (now, now, row["task_id"]),
+                )
+        # A worker can die after claiming a half-open provider probe. Reopen
+        # the circuit and release that probe lease so Admin can probe again.
+        probe_rows = conn.execute(
+            "SELECT provider_id, probe_task_id, open_count FROM provider_circuits"
+            " WHERE state = 'half_open' AND probe_lease_expires_at <= ?",
+            (now,),
+        ).fetchall()
+        for row in probe_rows:
+            next_open_count = row["open_count"] + 1
+            conn.execute(
+                "UPDATE provider_circuits SET state = 'open', open_count = ?,"
+                " opened_at = ?, next_probe_at = ?, probe_task_id = NULL,"
+                " probe_owner = NULL, probe_lease_expires_at = NULL,"
+                " last_outcome = 'provider_failure', updated_at = ?"
+                " WHERE provider_id = ? AND state = 'half_open'",
+                (
+                    next_open_count,
+                    now,
+                    _future_timestamp(now, _circuit_cooldown(next_open_count)),
+                    now,
+                    row["provider_id"],
+                ),
+            )
+            if row["probe_task_id"]:
+                conn.execute(
+                    "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
+                    " error_code = 'REQUEST_TIMEOUT', error_category = 'provider_infrastructure',"
+                    " failure_stage = 'waiting_model', current_stage = 'waiting_model',"
+                    " failed_at = ?, next_retry_at = ?, finished_at = ?,"
+                    " manual_probe_requested_at = NULL, manual_retry_requested_at = NULL,"
+                    " manual_action_id = NULL, updated_at = ? WHERE task_id = ?"
+                    " AND status IN ('running', 'retry_wait', 'pending')",
+                    (
+                        now,
+                        _future_timestamp(now, _TASK_RETRY_DELAYS[0]),
+                        now,
+                        now,
+                        row["probe_task_id"],
+                    ),
+                )
+                conn.execute(
+                    "UPDATE translation_attempts SET status = 'failed', finished_at = ?,"
+                    " error_code = 'REQUEST_TIMEOUT',"
+                    " error_category = 'provider_infrastructure',"
+                    " failure_stage = 'waiting_model', diagnostic_id = 'probe-expired'"
+                    " WHERE task_id = ? AND status = 'running'",
+                    (now, row["probe_task_id"]),
+                )
+                conn.execute(
+                    "UPDATE translation_admin_actions SET status = 'completed',"
+                    " started_at = COALESCE(started_at, ?), finished_at = ?,"
+                    " result_code = 'REQUEST_TIMEOUT' WHERE task_id = ?"
+                    " AND action = 'probe' AND status IN ('requested', 'running')",
+                    (now, now, row["probe_task_id"]),
+                )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2400,6 +2722,126 @@ def clear_provider_configuration_block(
                 (now, provider_id),
             )
     return circuit_changed
+
+
+def unblock_provider_configuration(
+    conn: sqlite3.Connection,
+    provider_id: str,
+    *,
+    task_id: str,
+    now: str,
+    actor: str,
+) -> tuple[str, bool]:
+    """Close a verified configuration circuit and audit the recovery command."""
+    provider_id = _non_empty(provider_id, "provider_id", maximum=128)
+    _validate_test_attempt_digest(task_id, "task_id")
+    actor = _non_empty(actor, "actor", maximum=128)
+    now = _automation_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        circuit = conn.execute(
+            "SELECT state FROM provider_circuits WHERE provider_id = ?",
+            (provider_id,),
+        ).fetchone()
+        if circuit is None:
+            raise RuntimeError("provider circuit does not exist")
+        task = conn.execute(
+            "SELECT status FROM translation_tasks WHERE task_id = ? AND provider_id = ?",
+            (task_id, provider_id),
+        ).fetchone()
+        if task is None:
+            raise RuntimeError("translation task does not exist")
+        existing = conn.execute(
+            "SELECT action_id FROM translation_admin_actions"
+            " WHERE provider_id = ? AND action = 'unblock'"
+            " AND status IN ('requested', 'running') ORDER BY requested_at DESC LIMIT 1",
+            (provider_id,),
+        ).fetchone()
+        if existing is not None:
+            conn.commit()
+            return existing["action_id"], True
+        if circuit["state"] != "configuration_blocked":
+            raise RuntimeError("provider configuration is not blocked")
+        action_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO translation_admin_actions"
+            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
+            " VALUES (?, ?, ?, 'unblock', ?, 'requested', ?)",
+            (action_id, task_id, provider_id, actor, now),
+        )
+        conn.execute(
+            "UPDATE provider_circuits SET state = 'closed', consecutive_failures = 0,"
+            " open_count = 0, recovery_successes = 0, recovery_mode = 0,"
+            " opened_at = NULL, next_probe_at = NULL, probe_task_id = NULL,"
+            " probe_owner = NULL, probe_lease_expires_at = NULL,"
+            " last_outcome = 'success', updated_at = ? WHERE provider_id = ?",
+            (now, provider_id),
+        )
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'pending', auto_retry = 1,"
+            " next_retry_at = NULL, error_code = NULL, error_category = NULL,"
+            " failure_stage = NULL, finished_at = NULL, manual_action_id = NULL,"
+            " updated_at = ? WHERE provider_id = ? AND status = 'configuration_blocked'",
+            (now, provider_id),
+        )
+        conn.execute(
+            "UPDATE translation_admin_actions SET status = 'completed',"
+            " started_at = ?, finished_at = ?, result_code = 'UNBLOCKED'"
+            " WHERE action_id = ?",
+            (now, now, action_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return action_id, False
+
+
+def queue_translation_task_recovery(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: str,
+    actor: str,
+) -> tuple[str, bool]:
+    """Queue safe recovery after a cancellation lease has expired."""
+    _validate_test_attempt_digest(task_id, "task_id")
+    actor = _non_empty(actor, "actor", maximum=128)
+    now = _automation_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        task = conn.execute(
+            "SELECT provider_id, status, cancel_requested_at, lease_expires_at"
+            " FROM translation_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if task is None:
+            raise RuntimeError("translation task does not exist")
+        if task["status"] != "running" or task["cancel_requested_at"] is None:
+            raise RuntimeError("translation cancellation is not awaiting confirmation")
+        if task["lease_expires_at"] is None or task["lease_expires_at"] > now:
+            raise RuntimeError("translation cancellation is still being confirmed")
+        existing = conn.execute(
+            "SELECT action_id FROM translation_admin_actions"
+            " WHERE task_id = ? AND action = 'recover'"
+            " AND status IN ('requested', 'running') ORDER BY requested_at DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if existing is not None:
+            conn.commit()
+            return existing["action_id"], True
+        action_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO translation_admin_actions"
+            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
+            " VALUES (?, ?, ?, 'recover', ?, 'requested', ?)",
+            (action_id, task_id, task["provider_id"], actor, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return action_id, False
 
 
 def upsert_articles(conn: sqlite3.Connection, date: str, articles: list[Article]) -> None:

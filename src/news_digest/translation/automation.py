@@ -73,11 +73,11 @@ def classify_translation_failure(
         )
 
     status = error.status
-    if status == 401:
-        return TranslationFailure("AUTH_401", "authentication", "configuration_failure", False, 401)
-    if status == 403:
+    # HTTP auth/permission responses come from the upstream gateway. They are
+    # retryable provider failures, not proof that the local profile is invalid.
+    if status in {400, 401, 403}:
         return TranslationFailure(
-            "UPSTREAM_ERROR", "provider_infrastructure", "provider_failure", False, 403
+            "UPSTREAM_ERROR", "provider_infrastructure", "provider_failure", True, status
         )
     if error.category in {"configuration", "endpoint", "request"}:
         return TranslationFailure(
@@ -330,7 +330,9 @@ class TranslationAutomationRunner:
         now,
         owner: str,
         max_tasks: int = 1,
-        lease_seconds: int = 120,
+        # Keep the task lease longer than the configured 180s provider deadline;
+        # recovery must never reclaim a request that can still be running.
+        lease_seconds: int = 300,
     ) -> AutomationRunResult:
         if type(max_tasks) is not int or max_tasks < 1:
             raise ValueError("max_tasks must be a positive integer")

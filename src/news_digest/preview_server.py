@@ -77,7 +77,11 @@ from news_digest.delivery.mailer import (
 from news_digest.delivery.publisher import resolve_published_release
 from news_digest.rendering.email import render_email_preview
 from news_digest.storage import db
-from news_digest.translation.client import ApiTranslator, TranslationError
+from news_digest.translation.client import (
+    ApiTranslator,
+    TranslationError,
+    translation_cache_identity,
+)
 
 _APR1_CHARS = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _SESSION_TTL_SECONDS = 7 * 24 * 3600
@@ -536,12 +540,18 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._limited("subscription-enable", lambda: self._handle_subscription_enable(body))
         elif path == "/admin/api/subscriptions/delete":
             self._limited("subscription-delete", lambda: self._handle_subscription_delete(body))
+        elif path == "/admin/api/translations/dispatch":
+            self._limited("translation-dispatch", lambda: self._handle_translation_dispatch(body))
         elif path == "/admin/api/translations/retry":
             self._limited("translation-retry", lambda: self._handle_translation_retry(body))
         elif path == "/admin/api/translations/cancel":
             self._limited("translation-cancel", lambda: self._handle_translation_cancel(body))
         elif path == "/admin/api/translations/probe":
             self._limited("translation-probe", lambda: self._handle_translation_probe(body))
+        elif path == "/admin/api/translations/unblock":
+            self._limited("translation-unblock", lambda: self._handle_translation_unblock(body))
+        elif path == "/admin/api/translations/recover":
+            self._limited("translation-recover", lambda: self._handle_translation_recover(body))
         elif path == "/admin/api/delivery/retry-failed":
             self._limited("delivery", lambda: self._handle_retry_failed(body))
         elif path == "/admin/api/delivery/retry-unknown":
@@ -1509,25 +1519,35 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 }
             tasks = db.list_translation_tasks(conn, edition.edition_date)
             provider_id = tasks[0].provider_id if tasks else ""
-            circuit = db.get_provider_circuit(conn, provider_id) if provider_id else None
+            provider_circuits = {
+                task.provider_id: db.get_provider_circuit(conn, task.provider_id)
+                for task in tasks
+            }
+            circuit = provider_circuits.get(provider_id)
             circuit_state = circuit.state if circuit else "closed"
             now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
 
             def parsed(value: str | None) -> dt.datetime | None:
                 return dt.datetime.fromisoformat(value) if value else None
 
+            def task_circuit(task: db.TranslationTask) -> db.ProviderCircuit | None:
+                return provider_circuits.get(task.provider_id)
+
             def next_executable(task: db.TranslationTask) -> str | None:
                 if task.status not in {"pending", "retry_wait"}:
                     return None
                 if task.manual_retry_requested_at or task.manual_probe_requested_at:
                     return task.next_retry_at or now.isoformat()
+                task_provider = task_circuit(task)
                 candidates = [parsed(task.next_retry_at)]
-                if circuit_state == "open" and circuit is not None:
-                    candidates.append(parsed(circuit.next_probe_at))
+                if task_provider is not None and task_provider.state == "open":
+                    candidates.append(parsed(task_provider.next_probe_at))
                 available = [value for value in candidates if value is not None]
                 return max(available).isoformat() if available else now.isoformat()
 
             def queue_state(task: db.TranslationTask) -> str:
+                task_provider = task_circuit(task)
+                task_circuit_state = task_provider.state if task_provider else "closed"
                 if task.status == "running":
                     return (
                         "waiting_cancel_confirmation"
@@ -1535,12 +1555,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         else "executing"
                     )
                 if task.status in {"pending", "retry_wait"}:
-                    if circuit_state == "configuration_blocked":
+                    if task_circuit_state == "configuration_blocked":
                         return "blocked"
                     if task.manual_retry_requested_at or task.manual_probe_requested_at:
                         return "waiting_dispatch"
                     available = parsed(next_executable(task))
-                    if circuit_state == "open" and (
+                    if task_circuit_state in {"open", "half_open"} and (
                         available is None or available <= now
                     ):
                         return "waiting_probe"
@@ -1582,9 +1602,43 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     task
                     for task in tasks
                     if task.status in {"failed", "retry_wait", "cancelled", "pending", "configuration_blocked"}
+                    and (
+                        task_circuit(task) is not None
+                        and task_circuit(task).state in {"open", "half_open", "configuration_blocked"}
+                    )
                 ),
                 key=lambda task: task.status == "pending",
             )
+
+            def available_actions(task: db.TranslationTask) -> list[str]:
+                task_provider = task_circuit(task)
+                task_circuit_state = task_provider.state if task_provider else "closed"
+                if (
+                    task.status == "running"
+                    and task.cancel_requested_at is not None
+                    and task.lease_expires_at is not None
+                    and task.lease_expires_at <= now.isoformat()
+                ):
+                    return ["recover"]
+                if task.status == "running":
+                    return ["cancel"] if task.cancel_requested_at is None else []
+                if task.status == "pending" and task_circuit_state == "closed":
+                    return ["dispatch"]
+                if task.status in {"failed", "retry_wait", "cancelled"} and task_circuit_state == "closed":
+                    return ["retry"]
+                if task_circuit_state == "configuration_blocked":
+                    return ["unblock"]
+                if task.status == "configuration_blocked" and task_circuit_state == "closed":
+                    return ["retry"]
+                if (
+                    task.status in {
+                        "pending", "failed", "retry_wait", "cancelled", "configuration_blocked"
+                    }
+                    and task_circuit_state in {"open", "half_open"}
+                ):
+                    return ["probe"]
+                return []
+
             summary = {
                 "total": len(tasks),
                 "online": sum(task.build_status == "online" for task in tasks),
@@ -1662,10 +1716,22 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         "cancel_requested": task.cancel_requested_at is not None,
                         "queue_state": task_queue_states[task.task_id],
                         "next_executable_at": next_executable(task),
-                        "retry_allowed": (
-                            task.status in {"failed", "retry_wait", "cancelled"}
-                            and circuit_state == "closed"
+                        # The API is the single authority for recovery controls.
+                        # The browser must not infer actions from status strings.
+                        "available_actions": available_actions(task),
+                        "action": (
+                            {
+                                "action_id": action.action_id,
+                                "type": action.action,
+                                "status": action.status,
+                                "result_code": action.result_code,
+                                "requested_at": action.requested_at,
+                                "finished_at": action.finished_at,
+                            }
+                            if (action := db.latest_translation_admin_action(conn, task.task_id))
+                            else None
                         ),
+                        "retry_allowed": "retry" in available_actions(task),
                         "cancel_allowed": (
                             task.status == "running" and task.cancel_requested_at is None
                         ),
@@ -1673,9 +1739,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     for task in tasks
                 ],
                 "probe_task_id": (
-                    probe_candidates[0].task_id
-                    if circuit_state in {"open", "configuration_blocked"} and probe_candidates
-                    else None
+                    circuit.probe_task_id
+                    if circuit_state == "half_open" and circuit is not None
+                    else (
+                        probe_candidates[0].task_id
+                        if circuit_state in {"open", "configuration_blocked"} and probe_candidates
+                        else None
+                    )
                 ),
                 "csrf_token": self._csrf_for_response(),
             }
@@ -1750,7 +1820,43 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
         self.server.translation_wakeup_callback()
-        self._json(202, {"ok": True, "status": task.status})
+        self._json(
+            202,
+            {
+                "ok": True,
+                "status": task.status,
+                "action_id": task.manual_action_id,
+            },
+        )
+
+    def _handle_translation_dispatch(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                task = db.queue_translation_task_dispatch(
+                    conn,
+                    task_id,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(
+            202,
+            {
+                "ok": True,
+                "status": task.status,
+                "action_id": task.manual_action_id,
+            },
+        )
 
     def _handle_translation_cancel(self, body: dict[str, Any]) -> None:
         if self.server.translation_db_path is None:
@@ -1772,7 +1878,24 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
         self.server.translation_wakeup_callback()
-        self._json(202, {"ok": True, "cancel_requested": task.cancel_requested_at is not None})
+        conn = db.connect(self.server.translation_db_path)
+        try:
+            action = conn.execute(
+                "SELECT action_id FROM translation_admin_actions"
+                " WHERE task_id = ? AND action = 'cancel'"
+                " ORDER BY requested_at DESC LIMIT 1",
+                (task.task_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        self._json(
+            202,
+            {
+                "ok": True,
+                "cancel_requested": task.cancel_requested_at is not None,
+                "action_id": action["action_id"] if action else None,
+            },
+        )
 
     def _handle_translation_probe(self, body: dict[str, Any]) -> None:
         if self.server.translation_db_path is None:
@@ -1786,7 +1909,8 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 if task is None:
                     raise RuntimeError("translation task does not exist")
                 already_queued = False
-                try:
+                circuit = db.get_provider_circuit(conn, task.provider_id)
+                if circuit is not None and circuit.state == "half_open":
                     queued = db.queue_provider_probe(
                         conn,
                         task.provider_id,
@@ -1794,13 +1918,23 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         now=dt.datetime.now(dt.UTC).isoformat(),
                         actor=self._admin_actor(),
                     )
-                except RuntimeError as error:
-                    if str(error) != "provider probe is already queued":
-                        raise
-                    queued = db.queued_provider_probe(conn, task.provider_id)
-                    if queued is None:
-                        raise
                     already_queued = True
+                else:
+                    try:
+                        queued = db.queue_provider_probe(
+                            conn,
+                            task.provider_id,
+                            task_id,
+                            now=dt.datetime.now(dt.UTC).isoformat(),
+                            actor=self._admin_actor(),
+                        )
+                    except RuntimeError as error:
+                        if str(error) != "provider probe is already queued":
+                            raise
+                        queued = db.queued_provider_probe(conn, task.provider_id)
+                        if queued is None:
+                            raise
+                        already_queued = True
             finally:
                 conn.close()
         except (RuntimeError, ValueError) as error:
@@ -1813,7 +1947,87 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "ok": True,
                 "status": queued.status,
                 "already_queued": already_queued,
+                "action_id": queued.manual_action_id,
             },
+        )
+
+    def _handle_translation_unblock(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body, confirm=True)
+            profiles = load_profiles(self.server.project_root, self.server.profiles_file)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                task = db.translation_task(conn, task_id)
+                if task is None:
+                    raise RuntimeError("translation task does not exist")
+                circuit = db.get_provider_circuit(conn, task.provider_id)
+                if circuit is None or circuit.state != "configuration_blocked":
+                    raise RuntimeError("provider configuration is not blocked")
+            finally:
+                conn.close()
+            matched = None
+            for provider in profiles["providers"].values():
+                identity = translation_cache_identity(
+                    provider["api_type"], provider["base_url"], provider["model"]
+                )
+                if task.provider_id in {
+                    provider["name"],
+                    f"default-{identity[:64]}",
+                }:
+                    matched = provider
+                    break
+            if matched is None or not assert_recent_success(
+                self.server.project_root,
+                matched,
+                max_age_seconds=_TEST_MAX_AGE_SECONDS,
+            ):
+                raise RuntimeError("请先保存当前配置并完成成功的受控测试")
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                action_id, already_queued = db.unblock_provider_configuration(
+                    conn,
+                    task.provider_id,
+                    task_id=task_id,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(
+            202,
+            {"ok": True, "action_id": action_id, "already_queued": already_queued},
+        )
+
+    def _handle_translation_recover(self, body: dict[str, Any]) -> None:
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        try:
+            task_id = self._translation_task_body(body, confirm=True)
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                action_id, already_queued = db.queue_translation_task_recovery(
+                    conn,
+                    task_id,
+                    now=dt.datetime.fromtimestamp(self.server.clock(), dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(
+            202,
+            {"ok": True, "action_id": action_id, "already_queued": already_queued},
         )
 
     def _delivery_status_payload(self, edition_date: str) -> dict[str, Any]:
@@ -3505,7 +3719,9 @@ function translationNextNode(item) {
   if (item.queue_state === "executing") { addText(node, "strong", "正在执行"); return node; }
   if (item.queue_state === "waiting_dispatch") { addText(node, "strong", "可立即调度"); return node; }
   if (item.queue_state === "waiting_cancel_confirmation") {
-    addText(node, "strong", "等待终止确认"); return node;
+    addText(node, "strong", "等待终止确认");
+    if (item.action) { addText(node, "small", "动作 " + item.action.status); }
+    return node;
   }
   if (item.queue_state === "waiting_probe") {
     addText(node, "strong", "可立即探测"); return node;
@@ -3514,6 +3730,9 @@ function translationNextNode(item) {
     addText(node, "strong", timeText(item.next_executable_at));
     addText(node, "small", secondsUntil(item.next_executable_at) + " 秒后");
     return node;
+  }
+  if (item.action && item.action.status !== "completed") {
+    addText(node, "small", "动作 " + item.action.status);
   }
   addText(node, "strong", "—");
   return node;
@@ -3547,11 +3766,51 @@ function queueTranslationRetry(item, action) {
     })
     .finally(function () { setBusy(action, false); });
 }
+function queueTranslationDispatch(item, action) {
+  setBusy(action, true);
+  api("/admin/api/translations/dispatch", {task_id: item.task_id})
+    .then(function () { say("任务已排队，等待 worker 调度。", true); return loadTranslations(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
 function queueTranslationCancel(item, action) {
   if (!confirm("确认终止这一个运行请求？系统会先关闭执行体，再从确认时间安排重试。")) { return; }
   setBusy(action, true);
   api("/admin/api/translations/cancel", {task_id: item.task_id, confirm: true})
     .then(function () { say("终止请求已提交，等待 worker 确认执行体关闭。", true); return loadTranslations(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
+function queueTranslationUnblock(item, action) {
+  if (!confirm("确认使用最近一次成功的受控测试解除 provider 阻断并恢复任务？")) { return; }
+  setBusy(action, true);
+  api("/admin/api/translations/unblock", {task_id: item.task_id, confirm: true})
+    .then(function (result) {
+      say(result.already_queued ? "解除阻断已在处理中。" : "已解除阻断并唤醒翻译队列。", true);
+      return loadTranslations();
+    })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
+function queueTranslationProbe(item, action) {
+  if (!item || !confirm("确认跳过冷却并用一篇失败文章执行正式 schema 探测？")) { return; }
+  setBusy(action, true);
+  api("/admin/api/translations/probe", {task_id: item.task_id, confirm: true})
+    .then(function (result) {
+      say(result.already_queued ? "探测已在队列，已重新唤醒 worker。" : "受控探测已排队。", true);
+      return loadTranslations();
+    })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
+function queueTranslationRecover(item, action) {
+  if (!confirm("确认旧执行体 lease 已过期，并请求恢复为可重试？系统不会直接重发。")) { return; }
+  setBusy(action, true);
+  api("/admin/api/translations/recover", {task_id: item.task_id, confirm: true})
+    .then(function (result) {
+      say(result.already_queued ? "恢复命令已在处理中。" : "恢复命令已排队，等待 worker 确认。", true);
+      return loadTranslations();
+    })
     .catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
 }
@@ -3597,15 +3856,10 @@ function renderTranslations(data) {
   );
   provider.appendChild(providerCopy);
   var probeButton = button("立即探测", function (event) {
-    if (!data.probe_task_id || !confirm("确认跳过冷却并用一篇失败文章执行正式 schema 探测？")) { return; }
-    var action = event.currentTarget; setBusy(action, true);
-    api("/admin/api/translations/probe", {task_id: data.probe_task_id, confirm: true})
-      .then(function (result) {
-        say(result.already_queued ? "探测已在队列，已重新唤醒 worker。" : "受控探测已排队。", true);
-        return loadTranslations();
-      })
-      .catch(function (error) { say(error.message, false); })
-      .finally(function () { setBusy(action, false); });
+    queueTranslationProbe(
+      data.probe_task_id ? {task_id: data.probe_task_id} : null,
+      event.currentTarget
+    );
   });
   probeButton.disabled = !data.probe_task_id;
   probeButton.title = data.probe_task_id ? "执行一次正式单篇探测" : "当前无需探测";
@@ -3619,10 +3873,33 @@ function renderTranslations(data) {
     var title = document.createElement("span"); title.className = "translation-title";
     title.textContent = item.title; title.title = item.title; title.tabIndex = 0;
     var actions = document.createElement("div"); actions.className = "translation-actions";
-    if (item.retry_allowed) {
-      actions.appendChild(button("立即重试", function (event) { queueTranslationRetry(item, event.currentTarget); }));
+    if ((item.available_actions || []).includes("recover")) {
+      actions.appendChild(button("恢复为可重试", function (event) {
+        queueTranslationRecover(item, event.currentTarget);
+      }));
     }
-    if (item.cancel_allowed) {
+    if ((item.available_actions || []).includes("dispatch")) {
+      actions.appendChild(button("立即调度", function (event) {
+        queueTranslationDispatch(item, event.currentTarget);
+      }));
+    }
+    if ((item.available_actions || []).includes("retry")) {
+      actions.appendChild(button(
+        item.status === "configuration_blocked" ? "解除阻断并重试" : "立即重试",
+        function (event) { queueTranslationRetry(item, event.currentTarget); }
+      ));
+    }
+    if ((item.available_actions || []).includes("unblock")) {
+      actions.appendChild(button("解除阻断", function (event) {
+        queueTranslationUnblock(item, event.currentTarget);
+      }));
+    }
+    if ((item.available_actions || []).includes("probe")) {
+      actions.appendChild(button("立即探测", function (event) {
+        queueTranslationProbe(item, event.currentTarget);
+      }));
+    }
+    if ((item.available_actions || []).includes("cancel")) {
       actions.appendChild(button("终止", function (event) { queueTranslationCancel(item, event.currentTarget); }, "danger"));
     } else if (item.cancel_requested) {
       addText(actions, "span", "终止中", "meta");

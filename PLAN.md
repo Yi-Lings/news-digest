@@ -757,8 +757,8 @@ Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停�
 
 3. `failed_at` 是失败结果完成并落库的时间，不是请求开始时间。超时必须先终止旧连接/子进程并确认不再运行，再标记失败和计算下一次重试。
 4. 单篇连续失败的自动重试间隔固定为：第一次失败后 `15 秒`，第二次 `30 秒`，第三次 `60 秒`，第四次 `2 分钟`，后续最多 `5 分钟`。
-5. 网络失败、确认终止后的超时、HTTP `429`、HTTP `5xx`、空响应、无法解析的响应和 schema 校验失败可进入自动重试。
-6. HTTP `401/403`、缺失配置和确定的请求参数错误不得盲目循环；provider 转为 `configuration_blocked`，保存正确配置并完成受控测试后再恢复。
+5. 网络失败、确认终止后的超时、HTTP `429`、HTTP `5xx`、上游 HTTP `400/401/403`、空响应、无法解析的响应和 schema 校验失败可进入自动重试。
+6. 本地缺失配置、字段冲突和请求参数前置校验错误不得盲目循环，才可转为 `configuration_blocked`；仅凭 provider 返回的 HTTP `400/401/403` 或余额/权限错误不得永久锁死任务，统一记录为 `UPSTREAM_ERROR` 并按上游重试/熔断规则处理。
 7. 成功、仍在运行或结果不确定时不得创建自动重试。结果不确定必须先收口旧请求，再由状态机决定失败或保留阻断。
 8. Admin 为失败文章提供“立即重试”。手动重试可跳过剩余等待时间，但仍须取得同一任务锁；运行期间按钮不得产生第二个请求。
 
@@ -766,13 +766,13 @@ Admin 仍保留全局“暂停自动投递”而不删除订阅数据；暂停�
 
 1. 熔断以 provider 为范围，只暂停该 provider 的新翻译请求，不停止网站、Admin、订阅、归档、已有页面或已成功内容的 build。
 2. 失败计数包含首次失败。任意文章出现一次 provider 请求成功即清零连续 provider 失败数。
-3. 同一 provider 连续 `5 次` provider 级可重试失败后打开全局翻译熔断。计入全局熔断的失败仅包括网络连接失败、请求超时、HTTP `429`、HTTP `5xx` 和 provider 服务不可用。
+3. 同一 provider 连续 `5 次` provider 级可重试失败后打开全局翻译熔断。计入全局熔断的失败包括网络连接失败、请求超时、上游 HTTP `400/401/403`、HTTP `429`、HTTP `5xx` 和 provider 服务不可用；本地配置校验错误不计入。
 4. 单篇 schema 校验失败、内容格式异常和文章数据异常不计入全局熔断，只按该文章的重试状态机处理，其他文章继续翻译。
 5. 第一次熔断冷却 `60 秒`；到期进入 `half-open`，只允许一个真实单篇翻译探测。探测失败后依次冷却 `2 分钟`、`5 分钟`，后续持续失败每次最多 `5 分钟`。
 6. 自动探测从已到重试时间的失败任务中选择一篇，执行完整正式翻译与 schema 校验，不使用只能证明连接/鉴权的固定 `Hi` 代替。
 7. 探测完整成功：保存该篇、关闭熔断、清零连续失败数，并先以并发 `1` 恢复队列；再连续成功两篇后恢复正常并发，避免恢复瞬间请求拥塞。
 8. 探测取得可解析响应但该篇 schema 失败：视为 provider 传输能力已恢复，关闭全局熔断；该文章继续执行单篇重试。
-9. 探测发生网络、超时、`429` 或 `5xx`：重新打开熔断并升级冷却时间。探测返回 `401/403` 或配置错误：转为 `configuration_blocked`，停止自动探测。
+9. 探测发生网络、超时、上游 HTTP `400/401/403`、`429` 或 `5xx`：记录 `UPSTREAM_ERROR`，重新打开熔断并升级冷却时间，不得永久配置阻断；只有本地配置校验失败才转为 `configuration_blocked` 并停止自动探测。
 10. 熔断状态在 Admin 显示“立即探测”。管理员可跳过冷却时间选择一篇失败文章作为探测，但全局探测锁保证同一时间只有一个请求；手动探测成功关闭熔断，失败则从失败完成时间重新计算冷却。
 11. 如果没有待处理文章，熔断器不制造无业务意义的请求；下一篇新任务到达时按 `half-open` 单请求规则探测。
 12. provider 熔断状态、连续失败数、打开时间、下一次探测时间、探测任务 ID、lease 与结果分类必须持久化，服务重启后不得丢失或重复探测。
@@ -827,8 +827,8 @@ Admin 主流程顺序固定为：
 
 | 内部错误代码 | 含义 | 自动处理 | Admin 操作 |
 |---|---|---|---|
-| `AUTH_401` | API 凭据无效 | 转为配置阻断 | 修正配置、测试后手动恢复 |
-| `AUTH_403` | 无接口或模型权限 | 转为配置阻断 | 检查账号和模型权限 |
+| `AUTH_401` | 上游返回凭据/鉴权错误 | 统一归类 `UPSTREAM_ERROR`，按上游重试/熔断规则处理 | 检查账号和模型权限，可修正配置后立即重试 |
+| `AUTH_403` | 上游返回权限/余额错误 | 统一归类 `UPSTREAM_ERROR`，不得永久配置阻断 | 检查账号余额和模型权限，可修正配置后立即重试 |
 | `RATE_LIMIT_429` | 请求频率受限 | 自动退避并计入熔断 | 等待恢复或受控探测 |
 | `PROVIDER_5XX` | provider 服务异常 | 自动重试并计入熔断 | 通常无需操作，可受控探测 |
 | `NETWORK_CONNECT_FAILED` | 网络连接失败 | 自动重试并计入熔断 | 检查网络、代理和 DNS |
@@ -899,6 +899,119 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 本阶段的“本地模拟通过”不能替代用户 UI/人工重试验收，用户人工验收也不能替代最终全量与发布门禁；三者必须按顺序分别通过。
 
 验收门：逐篇失败恢复、熔断/探测、增量上线、刊物完成后单次自动投递、Admin 监控 UI、错误码和 README 运维文档全部满足 A–K；本地定向回归、本地自动链路模拟、浏览器检查、用户 UI/人工重试验收、最终全量与独立复审依次通过后，才可发布 `v1.2.0`。
+
+### 阶段 8.1：v1.2.9 配置阻断恢复与人工调度闭环
+
+状态：`实现中；不修改已发布 tag、Release、镜像 digest 或生产数据库。`
+
+当前进度（本地）：已完成上游错误统一分类、v7 SQLite 动作迁移（含显式 `dispatch`）、provider 探测 lease 回收、Admin `available_actions`、动作 `action_id` 返回、配置阻断恢复接口，以及取消 lease 过期后的安全恢复命令；README 与 `docs/OPERATIONS.md` 已同步故障处理流程。已补齐 `pending` 任务“立即调度”、按任务 provider 计算动作、`half_open` 探测幂等，以及 300 秒默认翻译 lease（覆盖 180 秒硬总时限）回归；离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check 和 `uv build` 均通过。浏览器人工验收、独立复审、Release/GHCR 和生产部署仍未开始。
+
+本次线上核查暴露出 provider 熔断状态、单篇任务状态和 Admin 操作权限没有形成闭环：provider 已恢复为 `closed` 后，历史遗留的 `configuration_blocked` 任务仍停留在阻断状态；“立即探测”只在熔断打开时可用，恢复后按钮消失，而该任务也没有可执行的人工重试入口。下一版必须把以下规则固化为同一状态机：
+
+1. **明确 provider 状态语义**：`closed` 表示 provider 健康、允许正常调度，不是阻断；`open` 表示临时熔断、暂停普通调度；`half_open` 表示正在执行唯一恢复探测；`configuration_blocked` 表示配置确实无效、暂停调度。Admin 默认显示中文语义“正常 / 熔断暂停 / 恢复探测中 / 配置阻断”，同时保留内部状态码供诊断。
+2. **区分探测与重调度**：`立即探测` 只用于 provider 为 `open`/`configuration_blocked` 时的受控单篇正式请求；provider 已为 `closed` 时不显示探测按钮，改为对遗留阻断任务显示“解除阻断并重试”或“立即重试”。按钮禁用时必须给出明确原因，不得静默消失。
+3. **恢复时收口遗留任务**：受控探测成功或管理员完成“保存配置 -> 测试成功 -> 手动恢复”后，在同一事务中将该 provider 下所有 `configuration_blocked` 任务转为 `pending`，清除旧错误/失败阶段并保留原尝试审计；新任务和探测并发到达时不得漏解除或重复创建任务。
+4. **已恢复 provider 的人工重试权限**：`configuration_blocked` 任务在 provider `closed` 且存在有效配置时允许人工重试；仍须竞争原有任务 lease，运行中不得重复提交。重试动作记录操作者、任务、时间、结果和脱敏诊断 ID。
+5. **未恢复 provider 的安全边界**：provider 非 `closed` 时，普通任务不得绕过熔断直接重试；只有唯一的受控探测可以跳过冷却。探测排队、lease 过期和 worker 重启必须清理为可再次操作的明确状态，不能永久显示“已排队”。
+6. **错误分类不混淆**：本地配置缺失、字段冲突和 schema 前置校验失败才使用 `CONFIGURATION_INVALID`；上游返回的 HTTP `400/401/403` 或余额/权限错误统一归类为 `UPSTREAM_ERROR`（保留 HTTP 状态和脱敏 provider code），不得因此把 provider 永久配置阻断。只有明确确认是本地配置错误时才进入 `configuration_blocked`。
+7. **Admin 日期与状态可见性**：按刊期查看时保留 `pending`、`retry_wait`、`failed`、`configuration_blocked` 和运行中的任务；只隐藏已完成且无待处理动作的日期。每个问题日期至少显示可执行动作、当前 provider 状态、错误代码、失败阶段、下一步重试时间和最近动作结果。
+8. **API 幂等与响应契约**：重复点击“解除阻断/立即重试/立即探测”返回稳定的 `409` 或“已排队”状态，并关联既有 action ID；成功排队返回 `202`，任务列表立即反映 `waiting_dispatch`/`waiting_probe`，不得因前端刷新丢失操作结果。
+9. **回归测试与人工验收**：新增测试覆盖“配置阻断 -> provider 恢复 -> 遗留任务可重试”、provider 已关闭时探测按钮隐藏且重试按钮可用、探测排队/lease 回收、上游 400/401/403 分类、日期筛选和重复点击幂等；浏览器验收必须确认按钮不会从列表消失、错误代码可见、操作后状态实时更新。
+10. **运维文档**：在 README 与 `docs/OPERATIONS.md` 增加当天故障次日处理流程：确认 provider 实际可用 -> 保存并测试配置 -> 手动恢复/解除阻断 -> 按日期逐篇重试 -> 等待 build；明确不会自动补发历史刊期，且禁止直接修改生产数据库绕过审计。
+11. **不可卡死不变量**：任何未处于 `succeeded`/`running` 且仍需处理的任务，都必须在 Admin 任务行提供至少一个可见恢复动作，绝不允许因错误分类、provider 状态或日期筛选而出现“无按钮、无下一步”。动作按状态映射为：`pending` 且 provider `closed` 使用“立即调度”；`retry_wait`/`failed`/`cancelled` 且 provider `closed` 使用“立即重试”；provider `open`/`half_open` 使用“查看熔断/等待探测”并在可控时提供“立即探测”；`configuration_blocked` 使用“修正配置并解除阻断”或“解除阻断并重试”。运行中的任务显示“终止请求”，终止后立即回到可重试状态。按钮不可执行时必须显示具体前置条件和下一步，不得静默禁用或从列表移除。
+12. **配置阻断恢复接口**：数据库层的 `clear_provider_configuration_block()` 必须接入受 CSRF、会话和审计保护的 Admin HTTP 接口及可见按钮。流程固定为“保存配置 -> 受控测试成功 -> 解除阻断并重试”；仅保存配置或读取 `/v1/models` 不得自动解锁。接口在同一事务中关闭 provider 阻断、清理探测 lease、将该 provider 下遗留 `configuration_blocked` 任务转为 `pending`，返回 `202 + action_id` 并唤醒 worker；测试失败返回明确错误且保持原阻断状态。重复点击必须幂等，不得绕过审计直接写数据库。
+13. **状态迁移矩阵与接口契约**：provider 状态与任务状态分开建模并分别展示；唯一允许的恢复路径为 `configuration_blocked + 测试成功 -> closed + 任务 pending`，`open -> half_open -> closed/open` 只由探测状态机驱动，普通重试不得跨越熔断。恢复接口必须固定请求/响应字段、错误码、`action_id`、`202/409` 语义和权限校验，并覆盖重复请求、并发请求、worker 重启、探测 lease 过期和测试成功后 worker 尚未唤醒等边界。
+14. **数据与投递隔离门禁**：上线前执行 SQLite online backup、完整性校验和 schema 向前迁移；恢复任务只能影响翻译任务和 provider circuit，不得重置文章、已上线 release、订阅或投递审计。v1.2.9 的恢复操作不得自动补发历史刊期；历史刊期只能由明确日期的人工投递命令触发并沿用既有幂等锁。
+15. **最终发布验收**：新增单元、集成、API 和浏览器测试全部通过后，执行唯一最终全量、独立复审和不可变 `v1.2.9` Release；生产部署后核对旧 `configuration_blocked` 任务可见、恢复按钮可用、provider 正常时可重试、无任务/容器重启死循环，且站点与既有投递记录不被回滚或重复发送。
+
+本阶段验收门：上述状态迁移和错误分类定向回归通过，并增加“每个可处理异常任务均存在恢复动作”的全状态矩阵测试；Admin 浏览器人工验收确认恢复按钮、错误信息和日期筛选可用，且不会出现无按钮死路；再运行一次最终全量并按不可变新版本流程发布。未通过人工验收前不得修改生产状态或发布 `v1.2.9`。
+
+#### v1.2.9 头脑风暴：问题归类、目标架构与分步实施
+
+本次线上证据显示，问题不是单个按钮文案，而是四个层次的职责混用：任务生命周期、provider 熔断、执行 lease/取消协议、Admin 动作状态没有形成明确边界。下一版按下列架构收敛，禁止继续通过前端条件拼接临时修补。
+
+**一、实现逻辑归类（P0）**
+
+1. **任务生命周期**：`pending -> running -> succeeded`；失败进入 `retry_wait` 或 `failed`；本地配置校验失败才进入 `configuration_blocked`；管理员终止后进入 `cancelled` 或带下一次执行时间的 `retry_wait`。每个非成功终态必须可恢复。
+2. **执行控制**：任务生命周期与执行控制分离保存。`lease_owner/lease_expires_at/hard_timeout_at` 表示执行体；`cancel_requested_at/termination_confirmed_at` 表示取消协议；不能用“取消请求已写入”冒充“请求已终止”。
+3. **provider 熔断**：`closed/open/half_open/configuration_blocked` 只描述 provider 能否接收新请求，不直接决定单篇任务是否完成；`closed` 允许调度，`open` 暂停普通调度，`half_open` 只允许唯一探测。
+4. **Admin 动作**：重试、探测、解除阻断、终止都是带 `action_id` 的持久化命令，拥有 `requested/running/completed/failed/timed_out/recovered` 终态；页面显示动作状态而不是只显示一个布尔按钮。
+5. **错误分类**：本地配置错误与上游错误分开。上游 `400/401/403`、余额不足、权限拒绝统一记录 `UPSTREAM_ERROR`，受单篇重试和 provider 熔断约束；只有本地配置前置校验失败才允许 `CONFIGURATION_INVALID`。
+
+**二、目标架构（P0）**
+
+```text
+Admin UI
+  -> Admin Command API（CSRF/会话/幂等/action_id）
+      -> Domain State Machine（唯一状态迁移入口）
+          -> SQLite（任务、lease、action、circuit、审计）
+      -> Wakeup Signal
+          -> Worker Scheduler
+              -> Execution Supervisor（硬超时、取消、lease续租/回收）
+                  -> Provider Adapter
+```
+
+1. SQLite 是事实来源；UI、SSE、systemd 日志都只能读取状态，不能自行推断或写状态。
+2. 所有状态迁移集中到 domain/storage 函数，API 不直接更新任务字段；每次迁移同时写 action 审计和安全诊断信息。
+3. “可立即调度”由后端返回 `available_actions` 计算，至少包含 `dispatch/retry/probe/unblock/cancel/recover` 之一；前端只渲染后端许可，禁止再按状态字符串自行猜按钮。
+4. 取消采用两阶段协议：请求取消 -> 执行器确认连接/子进程已终止 -> 写入最终任务状态。超过取消确认期限由恢复器接管，先确认旧 lease/进程不再存活，再转为可重试状态；任何不确定结果不得直接重发。
+5. worker 启动、systemd 超时和进程退出都调用同一个 recovery 函数：回收过期 lease、完成超时 action、清理 probe/cancel 标记，并为每个任务给出下一步动作。
+
+**三、分步实施与门禁**
+
+**阶段 0：生产基线与迁移设计**
+
+- 只读导出线上状态矩阵，统计 `pending/running+cancel_requested/retry_wait/failed/configuration_blocked` 的组合。
+- 设计 SQLite 向前迁移：新增取消确认时间、执行体终止证据、action 终态/超时原因和恢复批次字段；迁移前 online backup + `integrity_check`。
+- 明确兼容旧 `v1.2.8` 数据，禁止删除尝试审计、文章、release 或投递记录。
+- 门禁：迁移脚本可在副本库往返执行，旧数据零丢失；不触碰生产。
+
+**阶段 1：状态机与错误分类**
+
+- 实现唯一状态迁移表和不变量检查；禁止 `configuration_blocked` 在没有“解除阻断”命令时成为不可恢复终态。
+- 统一 `UPSTREAM_ERROR` 映射，保留 HTTP 状态和脱敏 provider code；修正旧的 `AUTH_401/AUTH_403` 永久阻断路径。
+- 增加 `available_actions` 后端契约及全状态矩阵单测。
+- 门禁：每个未成功任务至少一个动作；非法迁移、重复迁移、并发迁移全部拒绝且可审计。
+
+**阶段 2：执行监督、lease 与取消**
+
+- provider 请求增加硬超时、可观测最后活动时间和安全取消钩子；流式/非流式都必须能确认执行体终止。
+- lease 在请求期间续租；lease 过期、SIGTERM、systemd timeout 不得留下 `running` 孤儿。
+- `cancel` action 实现请求、确认、超时、恢复四条路径；恢复前禁止再次发起同一任务请求。
+- 门禁：fake provider 覆盖连接阻塞、模型阻塞、取消成功、取消超时、进程终止和重启恢复；无重复请求、无永久 waiting cancel。
+
+**阶段 3：调度器与 provider 恢复**
+
+- `pending` 且已到执行时间的任务必须进入 `waiting_dispatch` 并提供“立即调度/立即重试”。
+- `open/half_open` 只允许受控探测；探测成功后原子解除遗留阻断任务并唤醒 worker；探测排队重复点击返回既有 action。
+- provider `closed` 时允许所有可重试任务调度，包括遗留 `configuration_blocked`（前提是配置测试成功并完成解除动作）。
+- 门禁：fake clock 覆盖重试退避、5 次熔断、探测冷却、lease 回收和 worker 重启；systemd 失败不产生无限重启。
+
+**阶段 4：Admin Command API 与 UI**
+
+- 新增动作接口：`dispatch/retry/probe/unblock/cancel/recover`，统一返回 `202 + action_id`、幂等 `409` 或明确前置条件错误。
+- 任务行显示状态、阶段、错误码、action 状态、下一次执行时间和可用动作；“可立即调度”不得只显示文字而没有按钮。
+- “等待终止确认”显示倒计时、执行体状态和“恢复为可重试”路径，超时后自动刷新为 `recovered/timed_out`。
+- 门禁：浏览器验收覆盖桌面/移动端、SSE 断线轮询、重复点击、刷新恢复、按钮永不消失和 reduced-motion。
+
+**阶段 5：本地自动链路与运维文档**
+
+- 在隔离数据库模拟：08:00 刷新 -> 部分成功 -> 上游错误 -> 熔断 -> 探测 -> 解除阻断 -> 单篇重试 -> 增量 build -> complete；另模拟取消阻塞与 systemd 重启。
+- 更新 README 与 `docs/OPERATIONS.md`：当天/次日恢复步骤、按钮含义、错误代码、action 超时、禁止直接改库、历史刊期不自动补发。
+- 门禁：离线全量、Ruff、迁移回归、浏览器人工验收全部通过。
+
+**阶段 6：发布与生产验收**
+
+- 人工门禁通过后执行唯一最终全量、独立复审、不可变 `v1.2.9` tag/Release/GHCR。
+- 生产部署前备份数据库并记录旧 digest；部署后只验证状态查询、按钮契约、健康检查、timer/path、resume 无重启循环。
+- 不自动重试或补发历史刊期；任何生产数据恢复动作必须由明确日期和 action_id 驱动。
+
+**四、明确非目标**
+
+- 本版不引入多 provider 自动切换、不改邮件模板、不重做首页视觉、不允许通过“清空任务/重建数据库”解决阻断。
+- 不把 `closed` 改名为“完成”；不把 `configuration_blocked` 当作永久失败；不以增加重试次数掩盖取消和 lease 协议缺陷。
+
+最终验收标准：任意异常任务都能在 Admin 看到当前事实、错误代码、下一步动作和 action 结果；取消请求最终必达“已终止、已恢复或明确超时”之一；provider 恢复后任务可继续调度；服务重启、网络抖动和页面刷新都不会制造无按钮或永久等待状态。
 
 ## 9. 通用本地验收流程
 
@@ -1043,4 +1156,6 @@ provider 原始错误消息只有在完成长度限制、HTML 转义和敏感信
 | 2026-08-01 | 阶段 8 | v1.2.5 自动投递阻塞热修 | 生产证据显示 07-28 投递失败后刊期仍为 `complete`，07-29 至 08-01 虽全部翻译和上线但没有正式投递；恢复 worker 始终先领取旧刊，再被时间门禁拒绝并每 15 秒重启。修复为自动投递只领取当前 worker 刊期，新刊投递前把更早未投递刊期标记 `DELIVERY_EXPIRED` 并排除恢复队列；历史刊物与审计保留但不自动补发。应用确定性终态使用退出码 10，systemd 不再为其循环重启；锁竞争独立使用 75。定向回归 `243 passed, 1 skipped`；隔离临时目录后的最终离线全量 `578 passed, 1 skipped, 7 deselected(network)`，Ruff、PowerShell AST、Shell 语法和 diff check 通过，未调用真实 provider/SMTP；待不可变 `v1.2.5` 发布与用户侧部署核验。 |
 | 2026-08-28 | 阶段 8 | v1.2.8 本地实现完成，待人工门禁 | 已完成 p5 逐句 schema、旧缓存失效重译、失败单篇重试、provider 熔断/探测恢复、resume 防重启、Admin 翻译状态模块及按问题日期筛选；翻译/自动化/Admin 定向回归 `65 passed`，Ruff 与 diff check 通过。尚未完成浏览器人工 UI/人工重试验收、最终全量、独立复审、Release/GHCR 发布和生产部署；数据库仍使用现有 `translation_attempts`/`translation_admin_actions` 审计，未新增独立恢复批次字段；复杂列表/分号/中英文混排分句仍需补测后再决定是否扩展。 |
 | 2026-08-28 | 阶段 8 | v1.2.8 人工验收与最终离线门禁通过，可发布 | 用户确认浏览器 UI 与人工重试验收通过；修复 demo 启动自动清空任务、重试竞态提示和已完成刊期显示；最终离线全量 `587 passed, 1 skipped, 7 deselected(network)`，Ruff、diff check、`uv build` 均通过。尚未执行 Git 提交/tag、GitHub Release/GHCR 发布或生产部署；需按不可变版本纪律完成独立复审后再发布。 |
+| 2026-08-28 | 阶段 8.1 | v1.2.9 状态机补强，待人工验收 | 新增 schema v7 的显式 `dispatch` 动作，修复 `pending + closed` 显示“可立即调度”却无按钮；动作判定改为按任务所属 provider，`half_open` 探测重复点击复用当前 probe；补充迁移、API、动作审计回归。离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 通过；已启动 8618 普通预览与 8620 fake automation 预览，尚未进行浏览器人工验收、独立复审、Release/GHCR、生产部署。 |
+| 2026-08-28 | 阶段 8.1 | v1.2.9 本地浏览器与人工验收通过，进入正式发布 | 独立启动 8621/8622 fake automation 预览，确认 provider `open` 时顶部及任务行均显示“立即探测”、运行任务显示“终止”、错误码/退避/下一次执行时间可见；探测完成后 provider 回到 `closed`，失败任务恢复并上线，状态列表未消失或串线。用户已确认人工验收通过；最终全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 均通过。正在执行独立发布复核、`v1.2.9` Release/GHCR 和生产部署。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |

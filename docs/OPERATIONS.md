@@ -79,7 +79,7 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 **8000 与 8080 端口被本机常驻程序占用。** 预览固定用 8618（`preview --port` 与 `NEWS_SITE_URL` 默认值一致），不要改回。
 
-**翻译网关超时。** 每个阶段与整个请求都有硬 deadline；可恢复的连接/读取超时、429 和受限 5xx 才会有限重试，401/403/404、TLS、协议或 schema 错误不重试。流已开始后不整次重试，避免重复计费。
+**翻译网关超时。** 每个阶段与整个请求都有硬 deadline；连接/读取超时、上游 `400/401/403`、429 和受限 5xx 按单篇有限重试与 provider 熔断处理。TLS、协议或 schema 错误按任务错误分类处理；流已开始后不整次重试，避免重复计费。
 
 **API/SMTP 出网目标。** translation client 明确忽略系统 `HTTP_PROXY` / `HTTPS_PROXY`；API 与 SMTP 都先要求 DNS 的全部结果为公网地址，再把本次 TCP 连接固定到已验证地址，同时继续用原域名执行 HTTP Host、TLS SNI 与证书主机名校验。环境代理不会绕过 provider 校验，DNS 重绑定也不能把实际连接切到私网地址。
 
@@ -94,13 +94,17 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 **翻译中断（Ctrl+C 或断网）。** 直接重跑同一条命令：已成功篇目在 `var/data/translations/` 请求级缓存中，续接瞬时完成、不重复计费。daily 流程里中断则以当前状态成刊，之后单独 `translate --yes` 补齐再 `build`。
 
-**Admin 显示 `provider probe is already queued`。** 先检查 `systemctl status news-digest-wakeup.path news-digest-resume.service`。Admin 的“立即探测/重试/终止”只写持久队列和 `${APP_DIR}/config/automation.wake`，由 path 单元启动 `resume-automation --yes`；HTTP 进程不直接调用 provider。恢复 worker 与每日 worker 由 `/run/news-digest-worker.lock` 串行。path 正常但历史请求仍在排队时，执行 `sudo systemctl start news-digest-resume.service`，不要删除数据库记录或重复点击。
+**Admin 显示 `provider probe is already queued`。** 先检查 `systemctl status news-digest-wakeup.path news-digest-resume.service`。Admin 的“立即调度/立即探测/重试/终止/恢复”只写持久队列和 `${APP_DIR}/config/automation.wake`，由 path 单元启动 `resume-automation --yes`；HTTP 进程不直接调用 provider。恢复 worker 与每日 worker 由 `/run/news-digest-worker.lock` 串行。探测 lease 过期后恢复器会清理 `half_open` 和排队标记，之后可再次探测；如果探测已经处于 `half_open`，再次点击会复用当前探测，不会创建第二个请求。path 正常但历史请求仍在排队时，执行 `sudo systemctl start news-digest-resume.service`，不要删除数据库记录或重复点击。
+
+**当天或次日出现翻译阻断。** 先在 Admin 查看 provider 的实际测试结果，不要只看 `/v1/models`。若为上游 `UPSTREAM_ERROR`，确认余额、权限和网关状态，等待自动退避或点击“立即探测”；若为 `CONFIGURATION_INVALID`，保存正确配置并完成一次成功的受控测试，再点击任务行“解除阻断”。恢复后只会重新调度失败文章，不会删除尝试审计、文章、release 或投递记录，也不会自动补发历史刊期。
+
+**Admin 显示“等待终止确认”。** 运行中的任务先显示取消请求；lease 未过期时等待 worker 确认。lease 过期后任务行显示“恢复为可重试”，点击只创建恢复 action 并唤醒 worker；恢复器确认旧进程不再运行后才把任务转为 `retry_wait`。不要在确认前手动重发同一篇。
 
 **单篇翻译质量差。** `uv run news-digest translate --redo SLUG --yes`（SLUG 即文章页地址 `/issues/日期/SLUG.html` 的末段，也出现在翻译进度输出里；可多次 `--redo`），完成后 `build`。重翻跳过缓存读取并覆盖旧结果，产生一次真实调用。
 
 **构建失败。** 无需清理：`var/site/current` 是指向 `releases/<日期-序号>` 的链接（Windows 为 junction），只在新版本完整生成后才切换；失败时仍指向上一完整版本，修好后重跑 `build` 即可。
 
-**报「schema 版本不匹配：库中为 X，代码期望 1，需迁移」。** 数据库由另一代码版本创建。不要删库重建（丢全部翻译成果）：先备份 `var/data/news.db`，再按迁移记录升级，或把代码切回与库匹配的版本。
+**报「schema 版本不匹配：库中为 X，代码期望当前版本，需迁移」。** 数据库由另一代码版本创建。不要删库重建（丢全部翻译成果）：先备份 `var/data/news.db`，再按迁移记录升级，或把代码切回与库匹配的版本。v1.2.9 会为动作表执行向前迁移并生成 `news.db.pre-v7.bak`（同时保留既有 v5/v6 迁移备份），旧翻译、文章、release 和投递审计保留不变。
 
 ## 5. 数据备份
 

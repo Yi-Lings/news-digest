@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前正式版：`v1.2.6`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器。
+当前版本：`v1.2.9`。项目通过 Docker Compose、Nginx、HTTPS 和 systemd timer 自托管到 Linux 服务器；本地自动化与浏览器人工验收已通过，正在执行正式发布流程。
 
 ## 产品能力
 
@@ -80,7 +80,10 @@ flowchart TD
 - 单篇失败从 `failed_at` 开始按 `15 秒 → 30 秒 → 60 秒 → 2 分钟 → 5 分钟`退避。
 - 同一 provider 连续 5 次基础设施失败后打开熔断器，不影响网站、归档、Admin 或已上线内容。
 - 熔断后自动探测依次等待 `60 秒 → 2 分钟 → 5 分钟`；同一时间最多一个 half-open 探测。
-- “立即重试”只调度当前失败文章；“终止”先确认旧执行体结束；“立即探测”仍竞争持久 lease，重复点击不会创建第二个请求。
+- “立即调度”用于尚未启动的 pending 文章；“立即重试”只调度当前失败文章；“终止”先确认旧执行体结束；“立即探测”仍竞争持久 lease，重复点击不会创建第二个请求。
+- 上游 HTTP `400/401/403`、余额不足和权限拒绝统一记录为 `UPSTREAM_ERROR`，按单篇退避与 provider 熔断处理；只有本地配置前置校验失败才使用 `CONFIGURATION_INVALID`。
+- provider 已恢复为 `closed` 时，历史配置阻断任务通过“保存配置 → 成功受控测试 → 解除阻断”恢复为可调度；解除动作返回持久 `action_id` 并保留审计。
+- “等待终止确认”在 lease 过期后显示“恢复为可重试”。该动作只排队恢复，由 worker 确认旧执行体已结束，不会直接强制重发。
 - 生产 Admin 成功入队后会通过受限 systemd path 唤醒独立恢复 worker；HTTP 请求本身不调用 provider，每日 worker 与恢复 worker 使用同一宿主锁串行。
 - 任务、lease、下一次重试、熔断、build 和投递幂等状态均保存在 SQLite，进程重启后继续恢复。
 
@@ -90,8 +93,7 @@ flowchart TD
 
 | 错误代码 | 含义 | 自动处理 | 管理员操作 |
 |---|---|---|---|
-| `AUTH_401` | API 凭据无效 | 配置阻断 | 修正配置，保存并完成受控测试 |
-| `AUTH_403` | 接口或模型无权限 | 配置阻断 | 检查账号与模型权限 |
+| `UPSTREAM_ERROR` | 上游 HTTP `400/401/403`、余额或权限拒绝 | 单篇退避并计入熔断 | 检查 provider 余额/权限，修正后重试或受控探测 |
 | `RATE_LIMIT_429` | provider 限流 | 单篇退避并计入熔断 | 等待恢复或受控探测 |
 | `PROVIDER_5XX` | provider 服务异常 | 单篇退避并计入熔断 | 通常等待自动恢复 |
 | `NETWORK_CONNECT_FAILED` | DNS、代理或连接失败 | 单篇退避并计入熔断 | 检查网络与代理 |
@@ -99,7 +101,7 @@ flowchart TD
 | `EMPTY_RESPONSE` | 返回内容为空 | 只重试当前文章 | 等待或立即重试 |
 | `UNPARSEABLE_RESPONSE` | 响应无法解析 | 只重试当前文章 | 检查协议与模型兼容性 |
 | `SCHEMA_VALIDATION_FAILED` | 内容不符合正式 schema | 只重试当前文章，不计入熔断 | 重试该篇或更换兼容模型 |
-| `CONFIGURATION_INVALID` | 配置缺失或冲突 | 配置阻断 | 按“保存 → 测试 → 恢复”处理 |
+| `CONFIGURATION_INVALID` | 本地配置缺失、字段冲突或前置校验失败 | 配置阻断 | 按“保存 → 测试 → 解除阻断”处理 |
 | `REQUEST_CANCELLED` | 管理员终止请求 | 保留为待重试 | 确认原因后恢复该篇 |
 | `CIRCUIT_OPEN` | provider 已熔断 | 暂停新的翻译请求 | 等待冷却或立即探测 |
 
@@ -367,7 +369,7 @@ systemctl status news-digest.timer
 journalctl -u news-digest.service -n 100 --no-pager
 ```
 
-先在 Admin 查看翻译状态。`AUTH_401/403` 和 `CONFIGURATION_INVALID` 应修正配置并测试，不能用重复重试代替；网络、限流和 5xx 通常交给自动退避与熔断恢复。
+先在 Admin 查看翻译状态。上游 `400/401/403`、余额不足和权限拒绝显示为 `UPSTREAM_ERROR`，由自动退避与熔断恢复；只有 `CONFIGURATION_INVALID` 才需要按“保存 → 测试 → 解除阻断”处理。
 
 **站点打不开或返回 404**
 

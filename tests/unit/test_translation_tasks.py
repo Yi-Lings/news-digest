@@ -62,6 +62,56 @@ def test_running_task_never_has_a_retry_time(tmp_path):
     assert claimed.next_retry_at is None
 
 
+def test_pending_task_dispatch_is_audited_and_claimable_immediately(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+
+    queued = db.queue_translation_task_dispatch(
+        conn, task.task_id, now=_at(1), actor="admin"
+    )
+    assert queued.status == "pending"
+    assert queued.manual_retry_requested_at == _at(1)
+    assert queued.manual_action_id
+
+    claimed = db.claim_translation_task(
+        conn, task.task_id, owner="worker-a", now=_at(2), lease_seconds=30
+    )
+    assert claimed is not None
+    action = conn.execute(
+        "SELECT action, status, result_code FROM translation_admin_actions"
+        " WHERE action_id = ?",
+        (queued.manual_action_id,),
+    ).fetchone()
+    assert tuple(action) == ("dispatch", "running", None)
+
+
+def test_probe_request_during_half_open_returns_active_probe_task(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    for failure in range(5):
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="provider_failure", now=_at(failure)
+        )
+    assert db.claim_provider_probe(
+        conn,
+        "provider-default",
+        task_id=task.task_id,
+        owner="probe-worker",
+        now=_at(64),
+        lease_seconds=30,
+    )
+
+    same = db.queue_provider_probe(
+        conn,
+        "provider-default",
+        task.task_id,
+        now=_at(65),
+        actor="admin",
+    )
+    assert same.task_id == task.task_id
+    assert db.get_provider_circuit(conn, "provider-default").state == "half_open"
+
+
 @pytest.mark.parametrize(
     ("attempt_number", "delay_seconds"),
     [(1, 15), (2, 30), (3, 60), (4, 120), (5, 300), (6, 300)],
@@ -164,6 +214,46 @@ def test_expired_lease_can_resume_after_process_termination_is_confirmed(tmp_pat
     )
 
 
+def test_cancel_action_is_recovered_when_worker_dies_after_cancel_request(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    assert db.claim_translation_task(
+        conn, task.task_id, owner="old-worker", now=_at(), lease_seconds=10
+    )
+    db.request_translation_task_cancel(conn, task.task_id, now=_at(1), actor="admin")
+    assert db.recover_interrupted_translation_tasks(
+        conn, now=_at(11), process_terminated=True
+    ) == 1
+    action = conn.execute(
+        "SELECT action, status, result_code FROM translation_admin_actions"
+        " WHERE task_id = ? ORDER BY requested_at",
+        (task.task_id,),
+    ).fetchall()
+    assert [tuple(row) for row in action] == [("cancel", "recovered", "RECOVERED")]
+
+
+def test_expired_probe_lease_is_released_for_future_probe(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    for failure in range(5):
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="provider_failure", now=_at(failure)
+        )
+    assert db.claim_provider_probe(
+        conn, "provider-default", task_id=task.task_id, owner="dead-worker",
+        now=_at(64), lease_seconds=10, manual=True
+    )
+    assert db.recover_interrupted_translation_tasks(
+        conn, now=_at(75), process_terminated=True
+    ) == 0
+    circuit = db.get_provider_circuit(conn, "provider-default")
+    assert circuit.state == "open"
+    assert circuit.probe_task_id is None
+    assert db.queue_provider_probe(
+        conn, "provider-default", task.task_id, now=_at(76), actor="admin"
+    )
+
+
 def test_cancel_request_does_not_change_running_state_until_termination_confirmed(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     task = _task(conn)
@@ -201,6 +291,30 @@ def test_cancel_request_does_not_change_running_state_until_termination_confirme
     assert cancelled.failed_at == _at(3)
     assert cancelled.next_retry_at == _at(18)
     assert cancelled.lease_owner is None
+
+
+def test_expired_cancel_can_queue_recovery_and_is_marked_recovered(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    assert db.claim_translation_task(
+        conn, task.task_id, owner="worker-a", now=_at(), lease_seconds=10
+    )
+    db.request_translation_task_cancel(conn, task.task_id, now=_at(1), actor="admin")
+    action_id, already_queued = db.queue_translation_task_recovery(
+        conn, task.task_id, now=_at(11), actor="admin"
+    )
+    assert already_queued is False
+    assert isinstance(action_id, str)
+    assert db.recover_interrupted_translation_tasks(
+        conn, now=_at(12), process_terminated=True
+    ) == 1
+    recovered = db.translation_task(conn, task.task_id)
+    assert recovered.status == "retry_wait"
+    action = conn.execute(
+        "SELECT status, result_code FROM translation_admin_actions WHERE action_id = ?",
+        (action_id,),
+    ).fetchone()
+    assert tuple(action) == ("recovered", "RECOVERED")
 
 
 def test_duplicate_cancel_request_is_rejected_and_audited_once(tmp_path):
@@ -390,6 +504,23 @@ def test_only_one_manual_probe_can_be_queued_for_provider(tmp_path):
     ]
 
 
+def test_configuration_blocked_task_can_be_claimed_for_controlled_probe(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    db.record_provider_outcome(
+        conn, "provider-default", outcome="configuration_failure", now=_at()
+    )
+    db.queue_provider_probe(
+        conn, "provider-default", task.task_id, now=_at(1), actor="admin"
+    )
+    claimed = claim_translation_work(
+        conn, task.task_id, owner="probe-worker", now=_at(2),
+        lease_seconds=30, manual_probe=True
+    )
+    assert claimed.task is not None
+    assert claimed.is_probe
+
+
 def test_configuration_failure_blocks_until_controlled_test_succeeds(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     blocked = db.record_provider_outcome(
@@ -415,16 +546,22 @@ def test_configuration_failure_blocks_until_controlled_test_succeeds(tmp_path):
     ("error", "code", "outcome", "auto_retry"),
     [
         (
+            TranslationError("redacted", category="provider", status=400),
+            "UPSTREAM_ERROR",
+            "provider_failure",
+            True,
+        ),
+        (
             TranslationError("redacted", category="authentication", status=401),
-            "AUTH_401",
-            "configuration_failure",
-            False,
+            "UPSTREAM_ERROR",
+            "provider_failure",
+            True,
         ),
         (
             TranslationError("redacted", category="authentication", status=403),
-                "UPSTREAM_ERROR",
-                "provider_failure",
-            False,
+            "UPSTREAM_ERROR",
+            "provider_failure",
+            True,
         ),
         (
             TranslationError("redacted", category="rate_limit", status=429),
@@ -574,7 +711,7 @@ def test_two_successes_after_probe_leave_recovery_concurrency_limit(tmp_path):
     assert provider_concurrency_limit(circuit, normal_limit=4) == 4
 
 
-def test_auth_failure_blocks_claimed_task_and_provider(tmp_path):
+def test_upstream_auth_failure_is_retryable_and_opens_provider_circuit(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     task = _task(conn)
     claimed = claim_translation_work(
@@ -595,10 +732,10 @@ def test_auth_failure_blocks_claimed_task_and_provider(tmp_path):
         stage="connect_provider",
     )
 
-    assert failed.status == "configuration_blocked"
-    assert failed.error_code == "AUTH_401"
-    assert failed.next_retry_at is None
-    assert db.get_provider_circuit(conn, "provider-default").state == "configuration_blocked"
+    assert failed.status == "retry_wait"
+    assert failed.error_code == "UPSTREAM_ERROR"
+    assert failed.next_retry_at is not None
+    assert db.get_provider_circuit(conn, "provider-default").state == "closed"
     assert "secret-bearing" not in repr(failed)
 
 
@@ -709,7 +846,7 @@ def test_complete_edition_delivery_claim_is_persistent_and_single(tmp_path):
     assert db.claim_automation_delivery(reopened, "2026-07-28", now=_at(7)) is None
 
 
-def test_v4_to_v5_migration_writes_verified_online_backup(tmp_path):
+def test_v4_to_v7_migration_writes_verified_online_backups(tmp_path):
     path = tmp_path / "digest.db"
     conn = db.connect(path)
     conn.executescript(
@@ -726,7 +863,7 @@ def test_v4_to_v5_migration_writes_verified_online_backup(tmp_path):
     migrated = db.connect(path)
     assert migrated.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "5"
+    ).fetchone()["value"] == "7"
     assert migrated.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     migrated.close()
 
@@ -738,5 +875,26 @@ def test_v4_to_v5_migration_writes_verified_online_backup(tmp_path):
         assert backup.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0] == "4"
+    finally:
+        backup.close()
+    v6_backup = path.with_name("digest.db.pre-v6.bak")
+    assert v6_backup.is_file()
+    backup = db.sqlite3.connect(v6_backup)
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "5"
+    finally:
+        backup.close()
+
+    v7_backup = path.with_name("digest.db.pre-v7.bak")
+    assert v7_backup.is_file()
+    backup = db.sqlite3.connect(v7_backup)
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "6"
     finally:
         backup.close()
