@@ -1016,7 +1016,7 @@ Admin UI
 
 ### 阶段 8.2：v1.2.10 翻译响应失败与孤儿任务修复
 
-状态：`已实现，待最终全量与发布门禁`。
+状态：`已发布并部署生产（2026-08-28）`。
 
 本版本针对生产中“等待模型生成”持续失败退避和任务从列表消失的问题收口：
 
@@ -1026,7 +1026,7 @@ Admin UI
 4. worker 启动恢复时把旧版本遗留的内容/schema `retry_wait` 任务归一化为人工可重试的 `failed`，保留原有尝试和诊断审计。
 5. 不改变上游 `400/401/403` 的 `UPSTREAM_ERROR` 退避、provider 熔断、站点增量 build 或投递幂等逻辑。
 
-验收门：翻译自动化定向回归、全量离线测试、Ruff、diff check 和构建全部通过；确认异常任务仍在 Admin 列表且存在恢复动作后，才允许创建不可变 `v1.2.10` tag、Release、GHCR 镜像和生产部署。人工验收前禁止最终发布操作。
+验收门：翻译自动化定向回归、全量离线测试、Ruff、diff check、构建、CI、Release/GHCR 和生产健康核验均已通过；生产旧版 schema 退避已归一化为可见失败，恢复服务无重启循环。未自动补跑历史翻译或投递。
 
 ## 9. 通用本地验收流程
 
@@ -1173,5 +1173,5 @@ Admin UI
 | 2026-08-28 | 阶段 8 | v1.2.8 人工验收与最终离线门禁通过，可发布 | 用户确认浏览器 UI 与人工重试验收通过；修复 demo 启动自动清空任务、重试竞态提示和已完成刊期显示；最终离线全量 `587 passed, 1 skipped, 7 deselected(network)`，Ruff、diff check、`uv build` 均通过。尚未执行 Git 提交/tag、GitHub Release/GHCR 发布或生产部署；需按不可变版本纪律完成独立复审后再发布。 |
 | 2026-08-28 | 阶段 8.1 | v1.2.9 状态机补强，待人工验收 | 新增 schema v7 的显式 `dispatch` 动作，修复 `pending + closed` 显示“可立即调度”却无按钮；动作判定改为按任务所属 provider，`half_open` 探测重复点击复用当前 probe；补充迁移、API、动作审计回归。离线全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 通过；已启动 8618 普通预览与 8620 fake automation 预览，尚未进行浏览器人工验收、独立复审、Release/GHCR、生产部署。 |
 | 2026-08-28 | 阶段 8.1 | v1.2.9 本地浏览器与人工验收通过，进入正式发布 | 独立启动 8621/8622 fake automation 预览，确认 provider `open` 时顶部及任务行均显示“立即探测”、运行任务显示“终止”、错误码/退避/下一次执行时间可见；探测完成后 provider 回到 `closed`，失败任务恢复并上线，状态列表未消失或串线。用户已确认人工验收通过；最终全量 `598 passed, 1 skipped, 7 deselected(network)`、Ruff、diff check、`uv build` 均通过。正在执行独立发布复核、`v1.2.9` Release/GHCR 和生产部署。 |
-| 2026-08-28 | 阶段 8.2 | v1.2.10 翻译响应失败修复，待发布门禁 | schema/空响应/不可解析响应停止无限自动退避并保留人工重试；真实失败阶段可见；缺失原文释放 lease 并记录 `TASK_DATA_MISSING`；启动恢复归一化旧版遗留退避任务。定向回归 `57 passed`、Ruff、diff check 已通过；最终全量、tag、Release、GHCR 与生产部署尚未执行。 |
+| 2026-08-28 | 阶段 8.2 | v1.2.10 翻译响应失败修复，已发布并部署 | schema/空响应/不可解析响应停止无限自动退避并保留人工重试；真实失败阶段可见；缺失原文释放 lease 并记录 `TASK_DATA_MISSING`；启动恢复归一化旧版遗留退避任务。全量 `601 passed, 1 skipped, 7 deselected`、Ruff、diff check、`uv build`、CI、Release/GHCR 均通过；生产已切换 worker/web digest，数据库已备份，旧重启循环已停止。 |
 | 2026-07-27 | 发布 | v1.0.0 定稿打标 | 终审 8 项 P0 逐级修复完成，复审逐项裁决通过（7 代码项全过，P0-8 凭据轮换属运维待用户确认；docs/v1.0.0-final-review.md + v1.0.0-rereview.md 归档）。随发布修正复审遗留 2 处一行级失实：bootstrap digest 注释改为台账语义、README §8 更正 dry-run 不执行 deploy 钩子（补钩子本体直跑验证）；OPERATIONS §7 补「部署会重置面板热切换」须知。版本 0.6.0rc6→1.0.0（跳过 rc7 独立发版，加固直接随正式版上线），新增 CHANGELOG.md；main 快进合并至发布提交；本地打 annotated tag v1.0.0（遵嘱不推送——deploy-all 的 tag 预检与推送流程负责，由 Hermes 在本机执行部署） |
