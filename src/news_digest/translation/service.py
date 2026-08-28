@@ -94,7 +94,33 @@ def translate_article_once(
         raw = translate_with_cancel(article, cancel_requested=cancel_requested)
     else:
         raw = translator.translate(article)
-    result = parse_translation(raw, len(article.paragraphs), [p.en for p in article.paragraphs])
+    try:
+        result = parse_translation(
+            raw, len(article.paragraphs), [p.en for p in article.paragraphs]
+        )
+    except InvalidTranslation as first_error:
+        # Model output can be structurally valid JSON but miss a sentence. Give the
+        # provider two bounded correction attempts before surfacing a terminal task.
+        repair = getattr(translator, "translate_with_feedback", None)
+        if not callable(repair):
+            raise
+        last_error = first_error
+        for _ in range(2):
+            raw = repair(
+                article,
+                str(last_error),
+                cancel_requested=cancel_requested,
+            )
+            try:
+                result = parse_translation(
+                    raw, len(article.paragraphs), [p.en for p in article.paragraphs]
+                )
+            except InvalidTranslation as error:
+                last_error = error
+            else:
+                break
+        else:
+            raise last_error
     temporary = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(

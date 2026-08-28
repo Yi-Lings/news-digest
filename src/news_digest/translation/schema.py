@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from news_digest.models import Article, Collocation, Paragraph, SentenceNote, VocabularyItem
 
-PROMPT_VERSION = "p6"
+PROMPT_VERSION = "p7"
 
 SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与教学助理。
 文风要求：规范的新闻书面语（参照通讯社译文风格），正式、克制、准确；

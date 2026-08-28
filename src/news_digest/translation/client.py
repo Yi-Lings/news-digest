@@ -529,6 +529,27 @@ class ApiTranslator:
             timeout_seconds=timeout_seconds,
         )
 
+    def translate_with_feedback(
+        self,
+        article: Article,
+        feedback: str,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> str:
+        """Retry a malformed translation with the closed validation error as guidance."""
+        repair_prompt = (
+            f"{build_user_prompt(article)}\n\n"
+            "上一份输出未通过严格 schema 校验。请完整重新生成 JSON，先修正以下问题：\n"
+            f"{feedback}\n"
+            "必须继续使用 [P#S#] 编号逐句对应，不能合并、拆分、跳过或新增句子。"
+        )
+        return self._request_text(
+            SYSTEM_PROMPT,
+            repair_prompt,
+            max_tokens=self._config.max_tokens,
+            cancel_requested=cancel_requested,
+        )
+
     def translate_with_cancel(
         self,
         article: Article,

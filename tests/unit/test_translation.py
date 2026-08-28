@@ -20,7 +20,7 @@ from news_digest.translation.schema import (
     parse_translation,
     split_sentences,
 )
-from news_digest.translation.service import translate_edition
+from news_digest.translation.service import translate_article_once, translate_edition
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "translations" / "valid-response.json"
 
@@ -104,7 +104,7 @@ def test_parse_rejects_ambiguous_fenced_objects():
 
 
 def test_formal_prompt_uses_versioned_explicit_json_contract():
-    assert PROMPT_VERSION == "p6"
+    assert PROMPT_VERSION == "p7"
     assert '"sentences_zh": [["逐句中文译文"]]' in SYSTEM_PROMPT
     assert '"phonetic": "非空字符串"' in SYSTEM_PROMPT
     assert "[P#S#]" in SYSTEM_PROMPT
@@ -493,6 +493,46 @@ def test_invalid_schema_is_not_retried(tmp_path):
     )
     assert translator.calls == 1
     assert report.failed == 1
+
+
+def test_single_article_schema_failure_uses_bounded_feedback_repair(tmp_path):
+    class RepairTranslator:
+        label = "fake-model@p7"
+        model = "fake-model"
+        cache_identity = "fake-repair"
+
+        def __init__(self):
+            self.calls = 0
+            self.feedback: list[str] = []
+
+        def translate(self, article: Article) -> str:
+            del article
+            self.calls += 1
+            return "not json"
+
+        def translate_with_feedback(
+            self,
+            article: Article,
+            feedback: str,
+            *,
+            cancel_requested=None,
+        ) -> str:
+            del article, cancel_requested
+            self.feedback.append(feedback)
+            if len(self.feedback) == 1:
+                return "still not json"
+            return _valid_raw()
+
+    translator = RepairTranslator()
+    translated, cache_hit = translate_article_once(
+        _article(), translator, tmp_path
+    )
+
+    assert translated.translated_by == "fake-model@p7"
+    assert cache_hit is False
+    assert translator.calls == 1
+    assert len(translator.feedback) == 2
+    assert "响应不是合法 JSON" in translator.feedback[0]
 
 
 def test_retry_after_is_used_and_attempts_are_hard_capped(tmp_path, monkeypatch):
