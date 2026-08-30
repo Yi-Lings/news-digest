@@ -46,7 +46,7 @@ def test_bootstrap_prepares_shared_data_volume_before_starting_admin():
 
     function_start = bootstrap.index("prepare_shared_data_volume()")
     call = bootstrap.index("\nprepare_shared_data_volume\n", function_start)
-    admin = bootstrap.index('"${COMPOSE[@]}" up -d web admin', call)
+    admin = bootstrap.index('"${COMPOSE[@]}" up -d web site admin', call)
     function_body = bootstrap[function_start:call]
 
     assert call < admin

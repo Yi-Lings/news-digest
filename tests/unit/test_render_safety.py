@@ -57,6 +57,10 @@ def test_parse_feed_drops_non_http_links():
 def test_safe_url_filter_neutralizes_dangerous_schemes():
     assert safe_url("https://example.com/x") == "https://example.com/x"
     assert safe_url("http://example.com/x") == "http://example.com/x"
+    assert safe_url("/assets/demo/demo-city.svg") == "/assets/demo/demo-city.svg"
+    assert safe_url("//example.com/protocol-relative") == ""
+    assert safe_url("/\\example.com") == ""
+    assert safe_url("/assets\\example.svg") == ""
     assert safe_url(_XSS) == ""
     assert safe_url("JavaScript:alert(1)") == ""  # 大小写
     assert safe_url("data:text/html;base64,PHNjcmlwdD4=") == ""
@@ -113,7 +117,7 @@ def test_rendered_pages_escape_script_in_title():
     assert "&lt;script&gt;" in article
 
 
-def test_public_subscription_form_is_explicitly_gated_and_links_privacy():
+def test_home_links_the_unified_membership_page_without_anonymous_form():
     env = create_environment()
     edition = _edition_with_evil_urls()
     disabled = render_home(env, edition, is_today=True, all_dates=[edition.date])
@@ -125,5 +129,7 @@ def test_public_subscription_form_is_explicitly_gated_and_links_privacy():
         public_subscription_enabled=True,
     )
     assert "data-subscribe-form" not in disabled
-    assert "data-subscribe-form" in enabled
+    assert "data-subscribe-form" not in enabled
+    assert "会员订阅与每日简报" in enabled
+    assert 'href="/subscribe"' in enabled
     assert 'href="/privacy/"' in enabled

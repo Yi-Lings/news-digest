@@ -17,6 +17,8 @@ from news_digest.cli import (
     _run_daily,
     _run_preview,
     _run_preview_email,
+    _run_site,
+    _run_site_admin,
     _runtime_translation_config,
     build_parser,
     main,
@@ -37,6 +39,74 @@ def test_version_option_reports_package_version(capsys):
 def test_bare_invocation_prints_help_and_succeeds(capsys):
     assert main([]) == 0
     assert "news-digest" in capsys.readouterr().out
+
+
+def test_site_admin_cli_previews_grants_and_revokes_active_account(
+    tmp_path, monkeypatch, capsys
+):
+    database = tmp_path / "news.db"
+    monkeypatch.setenv("NEWS_DATABASE_PATH", str(database))
+    conn = db.connect(database)
+    user = db.upsert_pending_user(
+        conn,
+        email="operator@example.com",
+        email_key=db.delivery_recipient_key("operator@example.com"),
+        password_hash="pbkdf2_sha256$1$00$00",
+        now="2026-08-30T12:00:00+00:00",
+    )
+    user = db.activate_user(
+        conn, email_key=user.email_key, now="2026-08-30T12:00:00+00:00"
+    )
+    conn.close()
+
+    assert _run_site_admin("operator@example.com", revoke=False, yes=False) == 0
+    conn = db.connect(database)
+    assert db.user_by_id(conn, user.id).is_admin is False
+    conn.close()
+    assert "预览模式" in capsys.readouterr().out
+
+    assert _run_site_admin("operator@example.com", revoke=False, yes=True) == 0
+    conn = db.connect(database)
+    assert db.user_by_id(conn, user.id).is_admin is True
+    conn.close()
+
+    assert _run_site_admin("operator@example.com", revoke=True, yes=True) == 0
+    conn = db.connect(database)
+    assert db.user_by_id(conn, user.id).is_admin is False
+    conn.close()
+
+
+def test_site_admin_cli_rejects_missing_or_disabled_account(tmp_path, monkeypatch):
+    database = tmp_path / "news.db"
+    monkeypatch.setenv("NEWS_DATABASE_PATH", str(database))
+    conn = db.connect(database)
+    user = db.upsert_pending_user(
+        conn,
+        email="disabled@example.com",
+        email_key=db.delivery_recipient_key("disabled@example.com"),
+        password_hash="pbkdf2_sha256$1$00$00",
+        now="2026-08-30T12:00:00+00:00",
+    )
+    user = db.activate_user(
+        conn, email_key=user.email_key, now="2026-08-30T12:00:00+00:00"
+    )
+    db.set_user_status(
+        conn, user.id, status="disabled", now="2026-08-30T12:01:00+00:00"
+    )
+    conn.close()
+
+    assert _run_site_admin("missing@example.com", revoke=False, yes=True) == 1
+    assert _run_site_admin("disabled@example.com", revoke=False, yes=True) == 1
+
+
+def test_site_admin_parser_requires_email_and_supports_revoke():
+    args = build_parser().parse_args(
+        ["site-admin", "--email", "operator@example.com", "--revoke", "--yes"]
+    )
+    assert args.command == "site-admin"
+    assert args.email == "operator@example.com"
+    assert args.revoke is True
+    assert args.yes is True
 
 
 def test_runtime_translation_uses_local_provider_authority(tmp_path, monkeypatch):
@@ -432,6 +502,10 @@ def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
         lambda *args, **kwargs: 0,
     )
     monkeypatch.setattr(
+        "news_digest.storage.db.run_worker_maintenance",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
         "news_digest.storage.db.automation_edition",
         lambda conn, date: types.SimpleNamespace(status="partial"),
     )
@@ -618,6 +692,115 @@ def test_production_admin_wires_translation_wakeup_file(tmp_path, monkeypatch):
     assert captured["args"] == (config_dir, config_dir, 8619)
     assert captured["wake_value"].strip().isdigit()
     assert captured["closed"] is True
+
+
+def test_production_admin_projects_only_site_runtime_configuration(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    site_config_dir = tmp_path / "site-config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "NEWS_SITE_URL=https://news.example.com\n"
+        "NEWS_TIMEZONE=Asia/Shanghai\n"
+        "PUBLIC_SUBSCRIPTION_ENABLED=false\n"
+        "SMTP_HOST=smtp.example.com\n"
+        "TRANSLATION_API_KEY=must-not-be-projected\n"
+        "EPAY_ENABLED=false\n",
+        encoding="utf-8",
+    )
+    for name in ("NEWS_SITE_URL", "NEWS_TIMEZONE", "PUBLIC_SUBSCRIPTION_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    captured = {}
+
+    class FakeServer:
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    def create_server(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return FakeServer()
+
+    monkeypatch.setattr("news_digest.preview_server.create_server", create_server)
+
+    assert _run_admin(8619, config_dir, site_config_dir) == 0
+    projected = (site_config_dir / ".env").read_text(encoding="utf-8")
+    assert "SMTP_HOST=smtp.example.com" in projected
+    assert "TRANSLATION_API_KEY" not in projected
+    assert captured["kwargs"]["site_env_path"] == site_config_dir / ".env"
+
+
+def test_site_verification_smtp_hot_reloads_and_ignores_digest_delivery_switch(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "site-config"
+    config_dir.mkdir()
+    env_path = config_dir / ".env"
+
+    def write_env(host: str) -> None:
+        env_path.write_text(
+            "NEWS_SITE_URL=https://news.example.com\n"
+            "NEWS_TIMEZONE=Asia/Shanghai\n"
+            "NEWS_DATABASE_PATH=var/data/news.db\n"
+            "NEWS_OUTPUT_PATH=var/site\n"
+            "EMAIL_DELIVERY_ENABLED=false\n"
+            f"SMTP_HOST={host}\n"
+            "SMTP_PORT=465\n"
+            "SMTP_USERNAME=mailer\n"
+            "SMTP_PASSWORD=secret\n"
+            "SMTP_SECURITY=implicit_tls\n"
+            "SMTP_FROM=news@example.com\n"
+            "EPAY_ENABLED=false\n",
+            encoding="utf-8",
+        )
+
+    write_env("smtp-one.example.com")
+    for name in (
+        "NEWS_SITE_URL",
+        "NEWS_TIMEZONE",
+        "NEWS_DATABASE_PATH",
+        "NEWS_OUTPUT_PATH",
+        "EMAIL_DELIVERY_ENABLED",
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USERNAME",
+        "SMTP_PASSWORD",
+        "SMTP_SECURITY",
+        "SMTP_FROM",
+        "EPAY_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    sent = []
+    captured = {}
+
+    def send_verification(config, email, code, purpose):
+        sent.append((config.host, config.delivery_enabled, purpose))
+
+    class FakeServer:
+        def serve_forever(self):
+            captured["code_sender"]("first@example.com", "123456", "register")
+            write_env("smtp-two.example.com")
+            captured["code_sender"]("second@example.com", "654321", "reset")
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    def create_site_server(**kwargs):
+        captured.update(kwargs)
+        return FakeServer()
+
+    monkeypatch.setattr(
+        "news_digest.delivery.mailer.send_verification_code", send_verification
+    )
+    monkeypatch.setattr("news_digest.site_server.create_site_server", create_site_server)
+
+    assert _run_site(8620, config_dir) == 0
+    assert sent == [
+        ("smtp-one.example.com", False, "register"),
+        ("smtp-two.example.com", False, "reset"),
+    ]
 
 
 def test_resume_automation_is_a_noop_without_unfinished_editions(tmp_path, monkeypatch):

@@ -3,7 +3,7 @@
 # 红线（PLAN 阶段 7）：
 #   - 服务器不检出源码、不构建镜像：只消费 GHCR 已发布镜像与随本脚本上传的工件；
 #   - 密钥只在服务器端通过 Admin 注入：本脚本不经参数、标准输入或部署主机接收密钥；
-#   - 部署只启动 Web/Admin，不执行抓取、翻译、构建或投递流水线。
+#   - 部署只启动 Web/Site/Admin，不执行抓取、翻译、构建或投递流水线。
 # 参数化：部署目标必须通过 ND_* 环境变量显式提供（全表见 install.sh
 # 头注释或 deploy/README.md §0），换域名/端口/目录部署不用改脚本。
 # 用法：由 server-push.ps1 上传到 ND_APP_DIR/incoming 后，以 root 执行。
@@ -22,9 +22,11 @@ OWNER="$ND_OWNER"                         # GHCR 命名空间（必须全小写�
 TAG="${ND_VERSION:-}"                     # 发布 tag；仅用于审计与镜像 label 核对
 APP_DIR="$ND_APP_DIR"                     # 部署目录（compose、config/、备份）
 CONFIG_DIR="${APP_DIR}/config"            # 密钥配置子目录：admin 容器唯一 bind 挂载的宿主路径
+SITE_CONFIG_DIR="${APP_DIR}/site-config"  # 仅公开 Site 所需字段的独立投影目录
 DOMAIN="$ND_DOMAIN"
 WEB_PORT="${ND_WEB_PORT:-8618}"           # web 宿主回环端口（服务器 8080 已被既有服务占用）
 ADMIN_PORT="${ND_ADMIN_PORT:-8619}"       # 模型切换面板宿主回环端口
+SITE_PORT="${ND_SITE_PORT:-8620}"         # 公开读者站点宿主回环端口
 CERTBOT_EMAIL="$ND_CERTBOT_EMAIL"
 if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   printf '\n错误：ND_OWNER 非法：%s\n' "$OWNER" >&2
@@ -43,15 +45,15 @@ if [[ ! "$CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]
   printf '\n错误：ND_CERTBOT_EMAIL 非法。\n' >&2
   exit 1
 fi
-for port_name in WEB_PORT ADMIN_PORT; do
+for port_name in WEB_PORT ADMIN_PORT SITE_PORT; do
   port_value="${!port_name}"
   if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
     printf '\n错误：%s 非法：%s\n' "$port_name" "$port_value" >&2
     exit 1
   fi
 done
-if [ "$WEB_PORT" = "$ADMIN_PORT" ]; then
-  printf '\n错误：ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。\n' >&2
+if [ "$WEB_PORT" = "$ADMIN_PORT" ] || [ "$WEB_PORT" = "$SITE_PORT" ] || [ "$ADMIN_PORT" = "$SITE_PORT" ]; then
+  printf '\n错误：ND_WEB_PORT、ND_ADMIN_PORT 与 ND_SITE_PORT 必须互不相同。\n' >&2
   exit 1
 fi
 CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
@@ -91,6 +93,33 @@ section() { printf '\n=== %s ===\n' "$1"; }
 warnbox() { printf '\n!!! 警告：%s\n\n' "$1"; }
 die()     { printf '\n错误：%s\n' "$1" >&2; exit 1; }
 
+require_deployment_units_quiescent() {
+  local unit load_state active_state
+  command -v systemctl >/dev/null 2>&1 ||
+    die "systemctl 不可用——无法确认定时器与 worker 已冻结"
+  for unit in \
+    news-digest.timer \
+    news-digest.service \
+    news-digest-resume.service \
+    news-digest-wakeup.path
+  do
+    load_state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" ||
+      die "无法读取 ${unit} 的 LoadState——拒绝在运行状态未知时部署"
+    if [ "$load_state" = "not-found" ]; then
+      continue
+    fi
+    active_state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)" ||
+      die "无法读取 ${unit} 的 ActiveState——拒绝在运行状态未知时部署"
+    case "$active_state" in
+      inactive|failed) ;;
+      *)
+        die "${unit} ActiveState=${active_state:-unknown}；先停止 timer、wakeup path 与 worker，再重新部署"
+        ;;
+    esac
+  done
+  echo "运行入口已冻结；unit 的 enabled 状态保持不变"
+}
+
 # 幂等就位：内容相同则跳过；目标已存在且不同则先备份为 .bak-时间戳再覆盖。
 # 为什么备份：nginx 配置与 compose.yaml（可能已手工固定 digest）都不允许被静默丢弃。
 install_file() {  # $1=源 $2=目标 $3=权限
@@ -116,6 +145,7 @@ for f in compose.yaml news-digest.service news-digest-resume.service news-digest
   [ -f "${SRC_DIR}/${f}" ] || die "缺少上传工件：${SRC_DIR}/${f}（应由 server-push.ps1 一并上传）"
 done
 command -v flock >/dev/null 2>&1 || die "缺少 flock（util-linux）；无法保证每日与恢复 worker 串行"
+require_deployment_units_quiescent
 echo "校验通过：root、Docker、Compose 与上传工件齐备"
 
 # ---------------------------------------------------------------
@@ -125,7 +155,7 @@ install -d -m 755 "$APP_DIR" "$APP_DIR/mail" "$APP_DIR/backups"
 
 # compose.yaml：先只在临时文件里渲染；section 6 拉取镜像并完成迁移前数据库备份后才就位，
 # 避免现有 timer 在备份前读到新 worker digest。重跑时内容一致仍会幂等跳过。
-# 渲染内容：OWNER/VERSION 占位符（worker 镜像两处：worker 与 admin 服务共用同一
+# 渲染内容：OWNER/VERSION 占位符（worker 镜像三处：worker、site 与 admin 服务共用同一
 # 引用，sed 逐行匹配自动同时替换）、部署目录（env_file 与 admin 的 /config bind
 # 挂载）、web 宿主端口、admin 监听端口（admin 用 host 网络，command 的 --port
 # 即宿主端口）。若现有文件手工固定过 digest，会先备份再覆盖。
@@ -134,6 +164,7 @@ sed -e "s|ghcr.io/OWNER/news-digest-worker:VERSION|${WORKER_IMAGE}|" \
     -e "s|/srv/news-digest|${APP_DIR}|g" \
     -e "s|127.0.0.1:8618:|127.0.0.1:${WEB_PORT}:|" \
     -e "s|--port 8619|--port ${ADMIN_PORT}|g" \
+    -e "s|--port 8620|--port ${SITE_PORT}|g" \
     "${SRC_DIR}/compose.yaml" > "${TMP_DIR}/compose.yaml"
 if [ -f "${APP_DIR}/compose.yaml" ] && ! cmp -s "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml"; then
   echo "注意：现有 compose.yaml 内容不同；将在迁移前数据库备份成功后覆盖（原文件自动备份）"
@@ -202,6 +233,15 @@ TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
 
+# ---- EasyPay 兼容支付；完成公网 HTTPS 回调验收前保持关闭 ----
+EPAY_ENABLED=false
+EPAY_API_BASE=
+EPAY_PID=
+EPAY_PKEY=
+EPAY_PAYMENT_TYPE=alipay
+EPAY_ORDER_TTL_SECONDS=300
+EPAY_AMOUNT_HOLD_SECONDS=3600
+
 # ---- SMTP 发信与邮件内容（SMTP_RECIPIENTS 仅用于旧安装一次性导入）----
 EMAIL_DELIVERY_ENABLED=false
 SMTP_HOST=
@@ -235,6 +275,20 @@ fi
 # 幂等收紧：无论谁动过，权限始终回到 root:600
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+
+# Site 不得读取 providers.json 或整份管理配置。按原始 dotenv 行投影固定白名单，
+# 后续 Admin 保存 SMTP/EasyPay 时会用同一白名单原子刷新此文件。
+mkdir -p "$SITE_CONFIG_DIR"
+chown root:10001 "$SITE_CONFIG_DIR"
+chmod 750 "$SITE_CONFIG_DIR"
+SITE_ENV_FILE="${SITE_CONFIG_DIR}/.env"
+SITE_ENV_TMP="${SITE_CONFIG_DIR}/.env.tmp.$$"
+awk -F= '
+  $1 ~ /^(NEWS_SITE_URL|NEWS_TIMEZONE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_FROM|EPAY_ENABLED|EPAY_API_BASE|EPAY_PID|EPAY_PKEY|EPAY_PAYMENT_TYPE|EPAY_ORDER_TTL_SECONDS|EPAY_AMOUNT_HOLD_SECONDS)$/ { print }
+' "$ENV_FILE" > "$SITE_ENV_TMP"
+chown root:root "$SITE_ENV_TMP"
+chmod 600 "$SITE_ENV_TMP"
+mv -f "$SITE_ENV_TMP" "$SITE_ENV_FILE"
 if ! awk '
   /^[[:space:]]*NEWS_TIMEZONE=/ {
     value=$0
@@ -462,23 +516,50 @@ record_deployed() {
 }
 record_deployed
 # /healthz 不依赖站点内容，current 出现前仅健康检查可用。admin 与 worker 使用同一镜像，
-# 但部署阶段只常驻 Web/Admin，不执行任何 worker 业务流水线。
-"${COMPOSE[@]}" up -d web admin
+# 但部署阶段只常驻 Web/Site/Admin，不执行任何 worker 业务流水线。
+"${COMPOSE[@]}" up -d web site admin
 echo "部署阶段已跳过抓取、翻译、构建与投递；请先在 Admin 完成运行配置"
 
 # ---------------------------------------------------------------
-section "7/10 systemd 定时任务"
-systemctl daemon-reload
-# 部署发生在 08:00 之后时，Persistent=true 会把当天错过的任务立即补跑。先把本次部署时刻
-# 记为 timer 的持久状态，确保部署过程不间接触发 worker；下一次按正常 08:00 运行。
-install -d -m 755 /var/lib/systemd/timers
-touch /var/lib/systemd/timers/stamp-news-digest.timer
-# 只 enable timer，不 enable service（service 无 [Install] 段，单元内注释已说明）。
-# 后续真正因服务器停机错过的任务仍由 Persistent=true 补跑。
-systemctl enable --now news-digest.timer
-systemctl enable --now news-digest-wakeup.path
-echo "下次触发（NEXT 列）："
-systemctl list-timers news-digest.timer --no-pager || true
+section "7/10 回环健康门禁"
+# 公网 Nginx 与 systemd 调度仍保持冻结。三项本地服务全部可用后才允许切换公网入口；
+# 任一失败都会在旧 Nginx 与停止的 timer/path 状态下退出。
+HEALTH_CODE="000"
+for _ in {1..15}; do
+  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${WEB_PORT}/healthz" || true)"
+  [ "$HEALTH_CODE" = "200" ] && break
+  sleep 2
+done
+echo "web /healthz         ：HTTP ${HEALTH_CODE:-000}（期望 200）"
+if [ "$HEALTH_CODE" != "200" ]; then
+  "${COMPOSE[@]}" logs --no-color --tail 100 web >&2 || true
+  die "Web 健康检查失败；公网入口与调度仍保持原状"
+fi
+SITE_CODE="000"
+for _ in {1..15}; do
+  SITE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${SITE_PORT}/healthz" || true)"
+  [ "$SITE_CODE" = "200" ] && break
+  sleep 2
+done
+echo "site /healthz        ：HTTP ${SITE_CODE:-000}（期望 200）"
+if [ "$SITE_CODE" != "200" ]; then
+  "${COMPOSE[@]}" logs --no-color --tail 100 site >&2 || true
+  die "Site 健康检查失败；公网入口与调度仍保持原状"
+fi
+# 未登录的 GET /admin/ 返回登录页（200）；生产模式无静态回落、HEAD 不保证实现，
+# 故用 -w 取状态码而不用 -I。
+ADMIN_CODE="000"
+for _ in {1..15}; do
+  ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/admin/" || true)"
+  [ "$ADMIN_CODE" = "200" ] && break
+  sleep 2
+done
+echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页）"
+if [ "$ADMIN_CODE" != "200" ]; then
+  "${COMPOSE[@]}" logs --no-color --tail 100 admin >&2 || true
+  die "Admin 健康检查失败；公网入口与调度仍保持原状"
+fi
+echo "Web/Site/Admin 回环健康门禁通过"
 
 # ---------------------------------------------------------------
 section "8/10 面板登录口令文件"
@@ -528,6 +609,7 @@ render_nginx_conf() {  # $1=源 $2=目标
   sed -e "s|news.example.com|${DOMAIN}|g" \
       -e "s|127.0.0.1:8618|127.0.0.1:${WEB_PORT}|g" \
       -e "s|127.0.0.1:8619|127.0.0.1:${ADMIN_PORT}|g" \
+      -e "s|127.0.0.1:8620|127.0.0.1:${SITE_PORT}|g" \
       "$1" > "$2"
 }
 
@@ -573,7 +655,7 @@ server {
     # 故意不代理 /admin/：登录口令与会话 Cookie 绝不能走明文 HTTP，面板只在
     # HTTPS 就绪后开放（此期间 /admin/ 落入本 location 由 web 容器返回 404，无泄露面）
     location / {
-        proxy_pass http://127.0.0.1:8618;
+    proxy_pass http://127.0.0.1:8620;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -631,35 +713,23 @@ else
 fi
 
 # ---------------------------------------------------------------
-section "10/10 收尾自检"
-HEALTH_CODE="000"
-for _ in {1..15}; do
-  HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${WEB_PORT}/healthz" || true)"
-  [ "$HEALTH_CODE" = "200" ] && break
-  sleep 2
-done
-echo "web /healthz         ：HTTP ${HEALTH_CODE:-000}（期望 200）"
-if [ "$HEALTH_CODE" != "200" ]; then
-  "${COMPOSE[@]}" logs --no-color --tail 100 web >&2 || true
-  die "Web 健康检查失败，拒绝报告部署完成"
+section "10/10 systemd 调度恢复与收尾自检"
+systemctl daemon-reload
+# Nginx 已成功 reload 后才恢复调度。合并 enable/start 并在任一失败时停止两者，
+# 防止只恢复一半或让未通过完整门禁的 worker 随 timer 运行。
+install -d -m 755 /var/lib/systemd/timers
+touch /var/lib/systemd/timers/stamp-news-digest.timer
+if ! systemctl enable --now news-digest.timer news-digest-wakeup.path; then
+  systemctl stop news-digest.timer news-digest-wakeup.path >/dev/null 2>&1 || true
+  die "timer/path 恢复失败，已保持调度停止"
 fi
-# 未登录的 GET /admin/ 返回登录页（200）；生产模式无静态回落、HEAD 不保证实现，
-# 故用 -w 取状态码而不用 -I
-ADMIN_CODE="000"
-for _ in {1..15}; do
-  ADMIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${ADMIN_PORT}/admin/" || true)"
-  [ "$ADMIN_CODE" = "200" ] && break
-  sleep 2
-done
-echo "admin 面板（回环）   ：HTTP ${ADMIN_CODE:-000}（期望 200 登录页）"
-if [ "$ADMIN_CODE" != "200" ]; then
-  "${COMPOSE[@]}" logs --no-color --tail 100 admin >&2 || true
-  die "Admin 健康检查失败，拒绝报告部署完成"
+if ! systemctl is-active --quiet news-digest.timer ||
+   ! systemctl is-active --quiet news-digest-wakeup.path; then
+  systemctl stop news-digest.timer news-digest-wakeup.path >/dev/null 2>&1 || true
+  die "timer/path 活动态核验失败，已重新停止调度"
 fi
-systemctl is-enabled --quiet news-digest-wakeup.path ||
-  die "翻译操作 wakeup path 未启用"
-systemctl is-active --quiet news-digest-wakeup.path ||
-  die "翻译操作 wakeup path 未运行"
+echo "下次触发（NEXT 列）："
+systemctl list-timers news-digest.timer --no-pager || true
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
 # 版本自检：核对实际拉到的 worker 镜像 OCI version label 是否等于本次部署 TAG（CI 用
@@ -689,6 +759,6 @@ Admin 管理面板：https://${DOMAIN}/admin/（网页登录，用户名 admin�
       ghcr.io/${OWNER}/news-digest-worker@sha256:…；
       上一版引用见 ${APP_DIR}/backups/DEPLOYED.log 或 compose.yaml.bak-* 备份）
   2. docker compose -f ${APP_DIR}/compose.yaml pull
-  3. docker compose -f ${APP_DIR}/compose.yaml up -d web admin
+  3. docker compose -f ${APP_DIR}/compose.yaml up -d web site admin
      （worker 无需操作：下次 timer 触发即按旧 digest 运行）
 DONEEOF

@@ -518,8 +518,9 @@ def test_single_article_schema_failure_uses_bounded_feedback_repair(tmp_path):
             feedback: str,
             *,
             cancel_requested=None,
+            previous_output=None,
         ) -> str:
-            del article, cancel_requested
+            del article, cancel_requested, previous_output
             self.feedback.append(feedback)
             if len(self.feedback) == 1:
                 return "still not json"

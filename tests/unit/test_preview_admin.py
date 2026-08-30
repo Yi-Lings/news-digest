@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import http.client
 import json
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from news_digest import accounts, payments
 from news_digest.admin_email import read_env
 from news_digest.admin_providers import (
     AdminConfigError,
@@ -61,6 +63,7 @@ PROVIDER = {
     "is_default": False,
 }
 FORM = {key: value for key, value in PROVIDER.items() if key != "is_default"}
+_SERVER_ORIGINS: dict[int, tuple[tuple[str, str, int], tuple[str, str, int]]] = {}
 
 
 def _default_body(root: Path, *, confirm: bool = False) -> dict[str, Any]:
@@ -77,11 +80,19 @@ def _default_body(root: Path, *, confirm: bool = False) -> dict[str, Any]:
 def _start(server):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return server.server_address[1]
+    port = server.server_address[1]
+    _SERVER_ORIGINS[port] = (server.admin_origin, server.public_origin)
+    return port
 
 
 def _origin(port: int) -> str:
     return f"http://127.0.0.1:{port}"
+
+
+def _origin_url(origin: tuple[str, str, int]) -> str:
+    scheme, host, port = origin
+    default_port = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + (f":{port}" if port != default_port else "")
 
 
 def _request(
@@ -103,7 +114,15 @@ def _request(
     else:
         payload = body
     request_headers = dict(headers or {})
-    request_headers["Origin"] = origin if origin is not None else _origin(port)
+    configured = _SERVER_ORIGINS.get(port)
+    is_public = path.startswith(("/subscribe/", "/unsubscribe/"))
+    expected_origin = (
+        _origin_url(configured[1 if is_public else 0])
+        if configured is not None
+        else _origin(port)
+    )
+    request_headers.setdefault("Host", urlsplit(expected_origin).netloc)
+    request_headers["Origin"] = origin if origin is not None else expected_origin
     if content_type is not None:
         request_headers["Content-Type"] = content_type
     if cookie:
@@ -242,7 +261,27 @@ def mail_admin_server(tmp_path):
         smtp_smoke_callback=smtp_smoke,
         delivery_callback=delivery,
         sensitive_limit=20,
+        site_env_path=tmp_path / "site-config" / ".env",
     )
+    conn = db.connect(tmp_path / "news.db")
+    user = db.upsert_pending_user(
+        conn,
+        email="saved@example.com",
+        email_key=db.delivery_recipient_key("saved@example.com"),
+        password_hash=accounts.hash_password("paid-recipient-password"),
+        now="2026-08-30T00:00:00+00:00",
+    )
+    user = db.activate_user(
+        conn, email_key=user.email_key, now="2026-08-30T00:00:01+00:00"
+    )
+    db.grant_paid_until(
+        conn,
+        user.id,
+        plan="yearly",
+        paid_until="2027-08-30T00:00:00+00:00",
+        now="2026-08-30T00:00:02+00:00",
+    )
+    conn.close()
     server.smtp_smoke_calls = smtp_smoke_calls
     port = _start(server)
     yield tmp_path, port, smtp_calls, delivery_calls, server
@@ -269,6 +308,20 @@ def _mail_form(**overrides):
         "layout": "digest",
         "summary_length": "standard",
         "catchup_window_hours": 6,
+    }
+    body.update(overrides)
+    return body
+
+
+def _payment_form(**overrides):
+    body = {
+        "enabled": True,
+        "api_base": "https://pay.example.com/submit.php",
+        "pid": "10001",
+        "pkey": "merchant-secret",
+        "payment_type": "alipay",
+        "order_ttl_seconds": 300,
+        "amount_hold_seconds": 3600,
     }
     body.update(overrides)
     return body
@@ -496,6 +549,7 @@ def prod_server(tmp_path):
         profiles_file="providers.json",
         serve_static=False,
         htpasswd_file=tmp_path / "htpasswd-admin",
+        db_path=tmp_path / "news.db",
         resolver=PUBLIC_IPS,
         probe_callback=probe,
         sensitive_limit=20,
@@ -506,8 +560,17 @@ def prod_server(tmp_path):
     server.server_close()
 
 
-def _public_csrf(port: int) -> tuple[str, str]:
-    status, data, headers = _request(port, "GET", "/subscribe/api/csrf", content_type=None)
+def _public_csrf(
+    port: int, *, origin: str = "https://news.example.com"
+) -> tuple[str, str]:
+    status, data, headers = _request(
+        port,
+        "GET",
+        "/subscribe/api/csrf",
+        content_type=None,
+        origin=origin,
+        headers={"Host": urlsplit(origin).netloc},
+    )
     assert status == 200
     return headers["set-cookie"].split(";", 1)[0], data["csrf_token"]
 
@@ -523,17 +586,19 @@ def _subscribe(
     content_type: str = "application/json",
     headers: dict[str, str] | None = None,
 ):
+    expected_origin = origin or "https://news.example.com"
+    request_headers = {"Host": urlsplit(expected_origin).netloc, **(headers or {})}
     if cookie is None or csrf is None:
-        cookie, csrf = _public_csrf(port)
+        cookie, csrf = _public_csrf(port, origin=expected_origin)
     return _request(
         port,
         "POST",
         "/subscribe/api/",
         {"email": email, "website": website, "csrf_token": csrf},
         cookie=cookie,
-        origin=origin,
+        origin=expected_origin,
         content_type=content_type,
-        headers=headers,
+        headers=request_headers,
     )
 
 
@@ -744,6 +809,8 @@ def test_login_requires_origin_host_json_and_body_limit(prod_server):
     body = {"username": "admin", "password": PANEL_PASSWORD}
     status, _, _ = _request(port, "POST", "/admin/api/login", body, origin="https://evil.test")
     assert status == 403
+    status, _, _ = _request(port, "POST", "/admin/api/login", body, origin="null")
+    assert status == 403
     status, _, _ = _request(
         port,
         "POST",
@@ -759,6 +826,81 @@ def test_login_requires_origin_host_json_and_body_limit(prod_server):
         b"x" * 20_000,
     )
     assert status == 413
+
+
+def test_production_admin_uses_configured_host_not_matching_rebinding_host(tmp_path):
+    htpasswd = tmp_path / "htpasswd-admin"
+    htpasswd.write_text(
+        f"admin:{apr1_hash(PANEL_PASSWORD)}\n",
+        encoding="utf-8",
+    )
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        htpasswd_file=htpasswd,
+        site_url="https://news.example.com",
+    )
+    port = _start(server)
+    body = {"username": "admin", "password": PANEL_PASSWORD}
+    try:
+        status, _, _ = _request(
+            port,
+            "POST",
+            "/admin/api/login",
+            body,
+            origin="https://news.example.com",
+            headers={"Host": "news.example.com"},
+        )
+        assert status == 200
+        status, _, _ = _request(
+            port,
+            "POST",
+            "/admin/api/login",
+            body,
+            origin="https://rebind.example",
+            headers={"Host": "rebind.example"},
+        )
+        assert status == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_admin_opaque_origin_requires_explicit_loopback_browser_compat(tmp_path):
+    htpasswd = tmp_path / "htpasswd-admin"
+    htpasswd.write_text(
+        f"admin:{apr1_hash(PANEL_PASSWORD)}\n",
+        encoding="utf-8",
+    )
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        htpasswd_file=htpasswd,
+        loopback_browser_compat=True,
+    )
+    port = _start(server)
+    try:
+        body = {"username": "admin", "password": PANEL_PASSWORD}
+        status, _, _ = _request(
+            port, "POST", "/admin/api/login", body, origin="null"
+        )
+        assert status == 200
+        status, _, _ = _request(
+            port,
+            "POST",
+            "/admin/api/login",
+            body,
+            origin="null",
+            headers={"Host": f"rebind.example:{port}"},
+        )
+        assert status == 403
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_mutating_post_requires_session_bound_csrf_and_origin(prod_server):
@@ -980,7 +1122,7 @@ def test_probe_mutex_rejects_overlapping_test(prod_server):
     assert "正在运行" in data["error"]
 
 
-def test_sensitive_actions_have_dedicated_rate_limit(tmp_path):
+def test_authenticated_admin_actions_are_not_rate_limited(tmp_path):
     (tmp_path / "htpasswd-admin").write_text(
         f"admin:{apr1_hash(PANEL_PASSWORD)}\n",
         encoding="utf-8",
@@ -1001,8 +1143,8 @@ def test_sensitive_actions_have_dedicated_rate_limit(tmp_path):
         auth = _login(port)
         status, _ = _post(port, "/admin/api/providers/test", FORM, auth)
         assert status == 200
-        status, data = _post(port, "/admin/api/providers/test", FORM, auth)
-        assert status == 429 and "频繁" in data["error"]
+        status, _data = _post(port, "/admin/api/providers/test", FORM, auth)
+        assert status == 200
         status, _ = _post(port, "/admin/api/providers", FORM, auth)
         assert status == 200
     finally:
@@ -1268,7 +1410,10 @@ def test_loopback_public_submission_confirms_against_same_preview_database(tmp_p
         assert status == 200 and data["csrf_token"]
         assert "Secure" not in headers["set-cookie"]
 
-        status, _, _ = _subscribe(port, "reader@example.com")
+        loopback_origin = f"http://127.0.0.1:{port}"
+        status, _, _ = _subscribe(
+            port, "reader@example.com", origin=loopback_origin
+        )
         assert status == 202
         assert len(sent) == 1
         confirmation_url = sent[0][2]
@@ -1326,7 +1471,9 @@ def test_loopback_public_submission_rejects_dns_rebinding_host(tmp_path):
         assert status == 403
         assert "set-cookie" not in headers
 
-        cookie, csrf = _public_csrf(port)
+        cookie, csrf = _public_csrf(
+            port, origin=f"http://127.0.0.1:{port}"
+        )
         status, _, _ = _subscribe(
             port,
             "reader@example.com",
@@ -1355,6 +1502,15 @@ def test_loopback_public_submission_requires_static_preview(tmp_path):
 
 def test_public_submission_requires_origin_json_and_bound_csrf(public_server):
     _, port, sent, _ = public_server
+    status, _, headers = _request(
+        port,
+        "GET",
+        "/subscribe/api/csrf",
+        content_type=None,
+        origin="https://rebind.example",
+        headers={"Host": "rebind.example"},
+    )
+    assert status == 403 and "set-cookie" not in headers
     cookie, csrf = _public_csrf(port)
     status, _, _ = _subscribe(
         port, "reader@example.com", cookie=cookie, csrf=csrf, origin="https://evil.test"
@@ -1477,6 +1633,592 @@ def test_confirmation_failure_removes_live_token_but_leaves_pending_for_retry(tm
         server.server_close()
 
 
+def test_site_admin_account_controls_require_auth_csrf_and_are_idempotent(
+    prod_server, monkeypatch
+):
+    root, port, _, server = prod_server
+    status, _data, _headers = _request(port, "GET", "/admin/api/site/overview", content_type=None)
+    assert status == 401
+    auth = _login(port)
+    conn = db.connect(root / "news.db")
+    try:
+        user = db.upsert_pending_user(
+            conn,
+            email="member@example.com",
+            email_key=db.delivery_recipient_key("member@example.com"),
+            password_hash="pbkdf2_sha256$1$00$00",
+            now="2026-08-30T12:00:00+00:00",
+        )
+    finally:
+        conn.close()
+    status, _data = _post(
+        port,
+        "/admin/api/site/user-status",
+        {"user_id": user.id, "status": "disabled"},
+        (auth[0], "wrong"),
+    )
+    assert status == 403
+    status, data = _post(
+        port, "/admin/api/site/user-status", {"user_id": user.id, "status": "disabled"}, auth
+    )
+    assert status == 200 and data["status"] == "disabled"
+    status, data = _post(
+        port, "/admin/api/site/user-status", {"user_id": user.id, "status": "active"}, auth
+    )
+    assert status == 200 and data["status"] == "active"
+    status, data = _post(
+        port,
+        "/admin/api/site/user-grant",
+        {"user_id": user.id, "plan": "monthly", "days": 31},
+        auth,
+    )
+    assert status == 200 and data["paid_until"]
+    first_paid_until = dt.datetime.fromisoformat(data["paid_until"])
+    status, data = _post(
+        port,
+        "/admin/api/site/user-grant",
+        {"user_id": user.id, "plan": "yearly", "days": 366},
+        auth,
+    )
+    assert status == 200 and data["plan"] == "yearly" and data["days_added"] == 366
+    second_paid_until = dt.datetime.fromisoformat(data["paid_until"])
+    assert second_paid_until == first_paid_until + dt.timedelta(days=366)
+    status, data = _post(
+        port,
+        "/admin/api/site/user-grant",
+        {"user_id": user.id, "plan": "yearly", "days": 366},
+        auth,
+    )
+    assert status == 200
+    assert dt.datetime.fromisoformat(data["paid_until"]) == second_paid_until + dt.timedelta(
+        days=366
+    )
+    status, _data = _post(
+        port,
+        "/admin/api/site/user-grant",
+        {"user_id": user.id, "plan": "yearly", "days": 31.5},
+        auth,
+    )
+    assert status == 409
+    status, data = _post(
+        port,
+        "/admin/api/site/user-subscription-clear",
+        {"user_id": user.id, "confirm": True},
+        auth,
+    )
+    assert status == 200 and data["plan"] is None and data["paid_until"] is None
+    status, _data = _post(
+        port,
+        "/admin/api/site/user-subscription-clear",
+        {"user_id": user.id, "confirm": False},
+        auth,
+    )
+    assert status == 409
+    conn = db.connect(root / "news.db")
+    try:
+        approved = db.create_order(
+            conn,
+            user_id=user.id,
+            plan="monthly",
+            amount_cents=990,
+            payment_ref="approval-test",
+            now="2026-08-30T12:01:00+00:00",
+        )
+        rejected = db.create_order(
+            conn,
+            user_id=user.id,
+            plan="yearly",
+            amount_cents=9900,
+            payment_ref="rejection-test",
+            now="2026-08-30T12:02:00+00:00",
+        )
+    finally:
+        conn.close()
+    status, data = _post(
+        port,
+        "/admin/api/site/order-decide",
+        {"order_id": approved.id, "approve": True},
+        auth,
+    )
+    assert status == 200 and data["status"] == "approved"
+    status, _data = _post(
+        port,
+        "/admin/api/site/order-decide",
+        {"order_id": approved.id, "approve": True},
+        auth,
+    )
+    assert status == 409
+    status, data = _post(
+        port,
+        "/admin/api/site/order-decide",
+        {"order_id": rejected.id, "approve": False},
+        auth,
+    )
+    assert status == 200 and data["status"] == "rejected"
+    status, _data = _post(
+        port,
+        "/admin/api/site/order-decide",
+        {"order_id": rejected.id, "approve": "false"},
+        auth,
+    )
+    assert status == 409
+    status, data = _post(
+        port,
+        "/admin/api/site/settings",
+        {
+            "paywall_enabled": True,
+            "monthly_price_cents": 1234,
+            "monthly_discount_percent": 25,
+            "yearly_discount_percent": 10,
+        },
+        auth,
+    )
+    assert status == 200 and data["ok"] is True
+    status, data = _post(port, "/admin/api/site/settings", {"monthly_price_cents": -1}, auth)
+    assert status == 409
+    status, data = _post(
+        port, "/admin/api/site/settings", {"monthly_price_cents": 12.5}, auth
+    )
+    assert status == 409
+    status, data = _post(
+        port, "/admin/api/site/settings", {"monthly_discount_percent": 101}, auth
+    )
+    assert status == 409
+    status, data = _post(
+        port, "/admin/api/site/settings", {"monthly_discount_percent": 12.5}, auth
+    )
+    assert status == 409
+    status, data = _post(
+        port, "/admin/api/site/settings", {"paywall_enabled": "true"}, auth
+    )
+    assert status == 409
+    valid_png = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+"
+        "A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    status, data = _post(
+        port, "/admin/api/site/settings", {"payment_qr_data_url": valid_png}, auth
+    )
+    assert status == 200 and data["ok"] is True
+    large_png = "data:image/png;base64," + base64.b64encode(
+        b"\x89PNG\r\n\x1a\n" + b"x" * (600 * 1024)
+    ).decode("ascii")
+    status, data = _post(
+        port, "/admin/api/site/settings", {"payment_qr_data_url": large_png}, auth
+    )
+    assert status == 200 and data["ok"] is True
+    for invalid_qr in (
+        "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+        "data:image/png;base64,bm90LWEtcG5n",
+        "data:image/png;base64,%%%",
+    ):
+        status, _data = _post(
+            port,
+            "/admin/api/site/settings",
+            {"payment_qr_data_url": invalid_qr},
+            auth,
+        )
+        assert status == 409
+    generated = iter(["ABCD-EFGH", "ABCD-EFGH", "JKLM-NPQR"])
+    monkeypatch.setattr(
+        "news_digest.preview_server.accounts.generate_redemption_code",
+        lambda: next(generated),
+    )
+    status, data = _post(port, "/admin/api/site/codes", {"plan": "monthly", "count": 1}, auth)
+    assert status == 200 and len(data["codes"]) == 1
+    first_code = data["codes"][0]
+    assert first_code == "ABCD-EFGH"
+    status, data = _post(port, "/admin/api/site/codes", {"plan": "monthly", "count": 1}, auth)
+    assert status == 200 and data["codes"] == ["JKLM-NPQR"]
+    conn = db.connect(root / "news.db")
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE redemption_codes SET status = 'revoked' WHERE prefix = ?",
+                (accounts.redemption_prefix(first_code),),
+            )
+    finally:
+        conn.close()
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200
+    assert all(item["status"] != "revoked" for item in overview["codes"])
+    visible_code = next(item for item in overview["codes"] if item["prefix"] == "JKLM-NPQ")
+    assert visible_code["code"] == "JKLM-NPQR"
+    code_id = next(
+        item["id"] for item in overview["codes"] if item["prefix"] == "JKLM-NPQ"
+    )
+    status, data = _post(
+        port, "/admin/api/site/code-delete", {"code_id": code_id}, auth
+    )
+    assert status == 200 and data["ok"] is True
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200
+    assert all(item["id"] != code_id for item in overview["codes"])
+    status, _data = _post(
+        port, "/admin/api/site/code-delete", {"code_id": code_id}, auth
+    )
+    assert status == 409
+    status, data = _post(port, "/admin/api/site/overview", {}, auth)
+    assert status == 404
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200
+    assert first_code not in json.dumps(overview)
+
+
+def test_site_payment_settings_require_auth_csrf_and_never_return_pkey(
+    mail_admin_server,
+):
+    root, port, _, _, _ = mail_admin_server
+    status, _data, _headers = _request(
+        port, "POST", "/admin/api/site/payment-settings", _payment_form()
+    )
+    assert status == 401
+
+    auth = _login(port)
+    status, _data = _post(
+        port,
+        "/admin/api/site/payment-settings",
+        _payment_form(),
+        (auth[0], "wrong"),
+    )
+    assert status == 403
+
+    status, data = _post(
+        port, "/admin/api/site/payment-settings", _payment_form(), auth
+    )
+    assert status == 200
+    assert data["payment"]["pkey_set"] is True
+    assert data["payment"]["notify_url"] == (
+        "https://news.example.com/subscribe/api/payment/easypay"
+    )
+    assert "merchant-secret" not in json.dumps(data)
+    saved = read_env(root / ".env")
+    encoded_pkey = saved["EPAY_PKEY"]
+    assert encoded_pkey.startswith("nd-b64-v1:")
+    assert saved["EPAY_API_BASE"] == "https://pay.example.com"
+
+    status, data = _post(
+        port,
+        "/admin/api/site/payment-settings",
+        _payment_form(pkey="", payment_type="wxpay"),
+        auth,
+    )
+    assert status == 200 and data["payment"]["payment_type"] == "wxpay"
+    assert read_env(root / ".env")["EPAY_PKEY"] == encoded_pkey
+
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200 and overview["payment"]["pkey_set"] is True
+    serialized = json.dumps(overview)
+    assert "merchant-secret" not in serialized
+    assert encoded_pkey not in serialized
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"api_base": "http://pay.example.com"},
+        {"pid": ""},
+        {"pkey": ""},
+        {"payment_type": "card&invalid"},
+        {"order_ttl_seconds": 59},
+        {"order_ttl_seconds": 300.0},
+        {"amount_hold_seconds": 299},
+    ],
+)
+def test_site_payment_settings_reject_invalid_configuration(
+    mail_admin_server, overrides
+):
+    _, port, _, _, _ = mail_admin_server
+    auth = _login(port)
+    status, data = _post(
+        port,
+        "/admin/api/site/payment-settings",
+        _payment_form(**overrides),
+        auth,
+    )
+    assert status == 409
+    assert data["category"] == "configuration"
+
+
+def test_site_payment_pkey_clear_requires_confirmation_and_disables_gateway(
+    mail_admin_server,
+):
+    root, port, _, _, _ = mail_admin_server
+    auth = _login(port)
+    status, _data = _post(
+        port, "/admin/api/site/payment-settings", _payment_form(), auth
+    )
+    assert status == 200
+    status, _data = _post(
+        port,
+        "/admin/api/site/payment-clear-pkey",
+        {"confirm": False},
+        auth,
+    )
+    assert status == 409
+    status, data = _post(
+        port,
+        "/admin/api/site/payment-clear-pkey",
+        {"confirm": True},
+        auth,
+    )
+    assert status == 200 and data == {
+        "ok": True,
+        "pkey_set": False,
+        "enabled": False,
+    }
+    saved = read_env(root / ".env")
+    assert saved["EPAY_ENABLED"] == "false"
+    assert saved["EPAY_PKEY"] == ""
+
+
+def test_unsettled_order_allows_disable_but_blocks_payment_identity_change_and_clear(
+    mail_admin_server,
+):
+    root, port, _, _, _ = mail_admin_server
+    auth = _login(port)
+    status, _data = _post(
+        port, "/admin/api/site/payment-settings", _payment_form(), auth
+    )
+    assert status == 200
+    env = read_env(root / ".env")
+    config = payments.settlement_config_from_mapping(
+        {**env, "NEWS_SITE_URL": "https://news.example.com"}
+    )
+    assert config is not None
+    conn = db.connect(root / "news.db")
+    now = dt.datetime.now(dt.UTC).isoformat()
+    user = db.upsert_pending_user(
+        conn,
+        email="locked-payment@example.com",
+        email_key=db.delivery_recipient_key("locked-payment@example.com"),
+        password_hash="hash",
+        now=now,
+    )
+    user = db.activate_user(conn, email_key=user.email_key, now=now)
+    db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_locked",
+        payment_type=config.payment_type,
+        payment_config_id=payments.config_identity(config),
+        now=now,
+        ttl_seconds=config.order_ttl_seconds,
+        amount_hold_seconds=config.amount_hold_seconds,
+    )
+    conn.close()
+
+    status, _data = _post(
+        port,
+        "/admin/api/site/payment-settings",
+        _payment_form(enabled=False, pkey=""),
+        auth,
+    )
+    assert status == 200
+    status, data = _post(
+        port,
+        "/admin/api/site/payment-settings",
+        _payment_form(enabled=False, pkey="replacement-secret"),
+        auth,
+    )
+    assert status == 409 and data["category"] == "configuration"
+    status, data = _post(
+        port,
+        "/admin/api/site/payment-clear-pkey",
+        {"confirm": True},
+        auth,
+    )
+    assert status == 409 and data["category"] == "configuration"
+
+
+def test_admin_reconciles_paid_order_through_shared_settlement_transaction(
+    mail_admin_server, monkeypatch
+):
+    root, port, _, _, _ = mail_admin_server
+    auth = _login(port)
+    status, _data = _post(
+        port, "/admin/api/site/payment-settings", _payment_form(), auth
+    )
+    assert status == 200
+    config = payments.settlement_config_from_mapping(
+        {**read_env(root / ".env"), "NEWS_SITE_URL": "https://news.example.com"}
+    )
+    assert config is not None
+    conn = db.connect(root / "news.db")
+    now = dt.datetime.now(dt.UTC).isoformat()
+    user = db.upsert_pending_user(
+        conn,
+        email="reconcile-admin@example.com",
+        email_key=db.delivery_recipient_key("reconcile-admin@example.com"),
+        password_hash="hash",
+        now=now,
+    )
+    user = db.activate_user(conn, email_key=user.email_key, now=now)
+    order, _ = db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_admin_reconcile",
+        payment_type=config.payment_type,
+        payment_config_id=payments.config_identity(config),
+        now=now,
+        ttl_seconds=config.order_ttl_seconds,
+        amount_hold_seconds=config.amount_hold_seconds,
+    )
+    db.record_payment_order_created(
+        conn,
+        order_id=order.id,
+        provider_trade_no="FASTPAY-ADMIN-1",
+        payment_url="https://pay.example.com/pay/FASTPAY-ADMIN-1",
+        now=now,
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        "news_digest.preview_server.payments.query_payment",
+        lambda _config, **kwargs: payments.PaymentQuery(
+            merchant_order_no=kwargs["merchant_order_no"],
+            provider_trade_no="FASTPAY-ADMIN-1",
+            amount_cents=kwargs["expected_amount_cents"],
+            trade_status="TRADE_SUCCESS",
+        ),
+    )
+    status, data = _post(
+        port, "/admin/api/site/payment-reconcile", {"order_id": order.id}, auth
+    )
+    assert status == 200 and data["status"] == "paid"
+    conn = db.connect(root / "news.db")
+    assert db.order_by_id(conn, order.id).status == "paid"
+    assert db.user_by_id(conn, user.id).paid_until is not None
+    conn.close()
+
+
+def test_site_settings_reject_price_below_gateway_minimum(mail_admin_server):
+    _, port, _, _, _ = mail_admin_server
+    auth = _login(port)
+    status, data = _post(
+        port,
+        "/admin/api/site/settings",
+        {
+            "monthly_price_cents": 10,
+            "yearly_price_cents": 9900,
+            "monthly_discount_percent": 0,
+            "yearly_discount_percent": 0,
+            "paywall_enabled": True,
+        },
+        auth,
+    )
+    assert status == 409 and data["category"] == "lifecycle"
+
+
+def test_site_overview_survives_invalid_saved_payment_intervals(mail_admin_server):
+    root, port, _, _, _ = mail_admin_server
+    with (root / ".env").open("a", encoding="utf-8") as handle:
+        handle.write(
+            "EPAY_ORDER_TTL_SECONDS=invalid\n"
+            "EPAY_AMOUNT_HOLD_SECONDS=invalid\n"
+        )
+    auth = _login(port)
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200
+    assert overview["payment"]["order_ttl_seconds"] == 300
+    assert overview["payment"]["amount_hold_seconds"] == 3600
+
+
+def test_site_account_can_be_promoted_and_revoked_as_admin(prod_server):
+    root, port, _, _ = prod_server
+    conn = db.connect(root / "news.db")
+    try:
+        user = db.upsert_pending_user(
+            conn,
+            email="editor@example.com",
+            email_key=db.delivery_recipient_key("editor@example.com"),
+            password_hash=accounts.hash_password("editor-password-123"),
+            now="2026-08-30T12:00:00+00:00",
+        )
+        db.activate_user(conn, email_key=user.email_key, now="2026-08-30T12:01:00+00:00")
+    finally:
+        conn.close()
+
+    root_auth = _login(port)
+    status, data = _post(
+        port,
+        "/admin/api/site/user-admin",
+        {"user_id": user.id, "is_admin": True, "confirm": True},
+        root_auth,
+    )
+    assert status == 200 and data["is_admin"] is True
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/site/overview", cookie=root_auth[0], content_type=None
+    )
+    assert status == 200
+    promoted = next(item for item in overview["users"] if item["id"] == user.id)
+    assert promoted["is_admin"] is True
+
+    status, _data, headers = _request(
+        port,
+        "POST",
+        "/admin/api/login",
+        {"username": "editor@example.com", "password": "editor-password-123"},
+    )
+    assert status == 200
+    site_admin_cookie = headers["set-cookie"].split(";", 1)[0]
+    status, provider_data, _headers = _request(
+        port,
+        "GET",
+        "/admin/api/providers",
+        cookie=site_admin_cookie,
+        content_type=None,
+    )
+    assert status == 200
+    status, _data, _headers = _request(
+        port,
+        "POST",
+        "/admin/api/password",
+        {"current_password": "editor-password-123", "password": "replacement-123"},
+        cookie=site_admin_cookie,
+        csrf=provider_data["csrf_token"],
+    )
+    assert status == 403
+
+    status, data = _post(
+        port,
+        "/admin/api/site/user-admin",
+        {"user_id": user.id, "is_admin": False, "confirm": True},
+        root_auth,
+    )
+    assert status == 200 and data["is_admin"] is False
+    status, _data, _headers = _request(
+        port,
+        "GET",
+        "/admin/api/providers",
+        cookie=site_admin_cookie,
+        content_type=None,
+    )
+    assert status == 401
+    status, _data, _headers = _request(
+        port,
+        "POST",
+        "/admin/api/login",
+        {"username": "editor@example.com", "password": "editor-password-123"},
+    )
+    assert status == 401
+
+
 def test_confirmation_unknown_keeps_latch_and_logs_only_safe_diagnostics(tmp_path, capsys):
     site = tmp_path / "site"
     site.mkdir()
@@ -1544,11 +2286,24 @@ def test_public_confirm_and_unsubscribe_http_are_uniform_idempotent_and_safe(pub
     root, port, sent, _ = public_server
     _subscribe(port, "reader@example.com")
     confirmation_token = sent[0][2].rsplit("/", 1)[1]
+    status_rebound, _page, _ = _request(
+        port,
+        "GET",
+        f"/subscribe/confirm/{confirmation_token}",
+        content_type=None,
+        headers={"Host": "rebind.example"},
+        decode_json=False,
+    )
+    assert status_rebound == 200
+    conn = db.connect(root / "news.db")
+    assert db.subscription_by_email(conn, "reader@example.com").status == "pending"
+    conn.close()
     status, valid_html, _ = _request(
         port,
         "GET",
         f"/subscribe/confirm/{confirmation_token}",
         content_type=None,
+        headers={"Host": "news.example.com"},
         decode_json=False,
     )
     status_bad, bad_html, _ = _request(
@@ -1556,6 +2311,7 @@ def test_public_confirm_and_unsubscribe_http_are_uniform_idempotent_and_safe(pub
         "GET",
         "/subscribe/confirm/tampered-token-value",
         content_type=None,
+        headers={"Host": "news.example.com"},
         decode_json=False,
     )
     assert status == status_bad == 200
@@ -1574,7 +2330,12 @@ def test_public_confirm_and_unsubscribe_http_are_uniform_idempotent_and_safe(pub
     conn.close()
 
     status, page, _ = _request(
-        port, "GET", f"/unsubscribe/{token}", content_type=None, decode_json=False
+        port,
+        "GET",
+        f"/unsubscribe/{token}",
+        content_type=None,
+        headers={"Host": "news.example.com"},
+        decode_json=False,
     )
     assert status == 200
     conn = db.connect(root / "news.db")
@@ -1588,6 +2349,7 @@ def test_public_confirm_and_unsubscribe_http_are_uniform_idempotent_and_safe(pub
             f"/unsubscribe/{token}",
             body,
             content_type="application/x-www-form-urlencoded",
+            headers={"Host": "news.example.com"},
             decode_json=False,
         )
         assert status == 200 and "reader@example.com" not in result
@@ -1606,6 +2368,7 @@ def test_public_pages_and_logs_never_expose_injected_markup_or_token(public_serv
         "GET",
         f"/unsubscribe/{raw_token}",
         content_type=None,
+        headers={"Host": "news.example.com"},
         decode_json=False,
     )
     assert status == 200
@@ -1616,6 +2379,7 @@ def test_public_pages_and_logs_never_expose_injected_markup_or_token(public_serv
         "/unsubscribe/not-a-token",
         b"wrong=body",
         content_type="application/x-www-form-urlencoded",
+        headers={"Host": "news.example.com"},
         decode_json=False,
     )
     assert status == 400
@@ -1636,7 +2400,9 @@ def test_static_frontend_compose_nginx_and_cli_wiring():
             "cli": "src/news_digest/cli.py",
         }.items()
     }
-    assert 'type="email"' in paths["home"] and 'name="website"' in paths["home"]
+    assert "data-subscribe-form" not in paths["home"]
+    assert "会员订阅与每日简报" in paths["home"]
+    assert 'href="/subscribe"' in paths["home"]
     assert 'fetch("/subscribe/api/' in paths["js"]
     assert "http://" not in paths["js"] and "https://" not in paths["js"]
     admin = paths["compose"].split("  admin:", 1)[1].split("\nvolumes:", 1)[0]
@@ -1700,6 +2466,11 @@ def test_mail_settings_get_is_redacted_and_save_does_not_connect(mail_admin_serv
     values = read_env(root / ".env")
     assert values["SMTP_HOST"] == "smtp.unsaved.example.com"
     assert values["SMTP_PASSWORD"] == "saved-secret"
+    site_values = read_env(root / "site-config" / ".env")
+    assert site_values["SMTP_HOST"] == "smtp.unsaved.example.com"
+    assert site_values["SMTP_PASSWORD"] == "saved-secret"
+    assert "SMTP_RECIPIENTS" not in site_values
+    assert "TRANSLATION_API_KEY" not in site_values
     assert smtp_calls == [] and delivery_calls == []
 
 
@@ -2605,6 +3376,49 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert "updateMailEstimate" in ADMIN_HTML
     assert "实际发送内容（HTML 更新通知）" in ADMIN_HTML
     assert "邮件 HTML 预览" in ADMIN_HTML
+    assert "月刊会员基准价(元)" in ADMIN_HTML
+    assert "年刊会员基准价(元)" in ADMIN_HTML
+    assert "包月" not in ADMIN_HTML
+    assert "包年" not in ADMIN_HTML
+    assert 'id="site-monthly" type="number" min="0.11" max="100000" step="0.01"' in ADMIN_HTML
+    assert 'id="site-yearly" type="number" min="0.11" max="100000" step="0.01"' in ADMIN_HTML
+    assert "function yuanToCents(value)" in ADMIN_HTML
+    assert "function centsToYuan(value)" in ADMIN_HTML
+    assert 'monthly_price_cents: monthlyPriceCents' in ADMIN_HTML
+    assert 'yearly_price_cents: yearlyPriceCents' in ADMIN_HTML
+    assert '"/admin/api/site/user-admin"' in ADMIN_HTML
+    assert '"/admin/api/site/user-subscription-clear"' in ADMIN_HTML
+    assert "设为管理员" in ADMIN_HTML
+    assert "撤销管理员" in ADMIN_HTML
+    assert "增加时长" in ADMIN_HTML
+    assert "清除订阅" in ADMIN_HTML
+    assert "剩余时长" in ADMIN_HTML
+    assert "remainingSubscriptionDays" in ADMIN_HTML
+    assert 'grantPlan.value === "yearly" ? "366" : "31"' in ADMIN_HTML
+    assert 'grantPlan.addEventListener("change"' in ADMIN_HTML
+    assert '"/admin/api/site/code-delete"' in ADMIN_HTML
+    assert 'button("删除"' in ADMIN_HTML
+    assert 'data.codes.join("\\n")' in ADMIN_HTML
+    assert 'data.codes.join("\\\\n")' not in ADMIN_HTML
+    assert 'item.code || item.prefix + "••••"' in ADMIN_HTML
+    assert "未使用卡密会在后台持续明文显示" in ADMIN_HTML
+    assert '<div class="stack" id="site-management-sections">' in ADMIN_HTML
+    assert '<h3>用户账号</h3>' in ADMIN_HTML
+    assert '<h3>支付订单</h3>' in ADMIN_HTML
+    assert "在线支付成功后由网关回调自动开通，无需人工审批" in ADMIN_HTML
+    assert "确认收款并开通" not in ADMIN_HTML
+    assert 'api("/admin/api/site/order-decide"' not in ADMIN_HTML
+    for payment_field in (
+        "item.merchant_order_no",
+        "item.base_amount_cents",
+        "item.amount_cents",
+        "item.amount_offset_cents",
+        "item.provider_trade_no",
+        "item.expires_at",
+        "item.last_error_code",
+    ):
+        assert payment_field in ADMIN_HTML
+    assert "#site-users, #site-orders, #site-codes" in ADMIN_HTML
     for field_name in (
         "run.run_id",
         "run.started_at",
@@ -2615,7 +3429,7 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
         "data.next_schedule",
     ):
         assert field_name in ADMIN_HTML
-    for label in ("模型接口", "邮件设置", "订阅管理", "翻译状态", "投递状态"):
+    for label in ("模型接口", "邮件设置", "订阅管理", "用户与付费", "翻译状态", "投递状态"):
         assert label in ADMIN_HTML
     for action in (
         "测试连接",
@@ -2630,11 +3444,12 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert "prefers-reduced-motion: no-preference" in lowered
     assert "aria-selected" in lowered
     assert 'role="tablist"' in lowered
-    assert lowered.count('role="tab"') == 5
-    assert lowered.count('role="tabpanel"') == 5
+    assert lowered.count('role="tab"') == 6
+    assert lowered.count('role="tabpanel"') == 6
     assert 'aria-controls="models"' in lowered
     assert 'aria-controls="mail"' in lowered
     assert 'aria-controls="subscriptions"' in lowered
+    assert 'aria-controls="site"' in lowered
     assert 'aria-controls="translations"' in lowered
     assert 'aria-controls="delivery"' in lowered
     assert 'node.classname = "data-table"' in lowered

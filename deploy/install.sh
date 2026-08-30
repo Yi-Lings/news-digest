@@ -27,6 +27,7 @@
 #   ND_DOMAIN         站点域名（nginx/certbot/站点URL） 必填
 #   ND_WEB_PORT       web 宿主回环端口               默认 8618
 #   ND_ADMIN_PORT     模型切换面板宿主回环端口        默认 8619
+#   ND_SITE_PORT      公开读者站点宿主回环端口        默认 8620
 #   ND_CERTBOT_EMAIL  证书到期通知邮箱               必填
 # 例：export ND_OWNER=example ND_APP_DIR=/opt/news-digest \
 #     ND_DOMAIN=news.example.com ND_CERTBOT_EMAIL=ops@example.com
@@ -48,14 +49,15 @@ if [[ ! "$ND_OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
 fi
 install_web_port="${ND_WEB_PORT:-8618}"
 install_admin_port="${ND_ADMIN_PORT:-8619}"
-for port_value in "$install_web_port" "$install_admin_port"; do
+install_site_port="${ND_SITE_PORT:-8620}"
+for port_value in "$install_web_port" "$install_admin_port" "$install_site_port"; do
     if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
         echo "部署端口非法：$port_value" >&2
         exit 1
     fi
 done
-if [[ "$install_web_port" == "$install_admin_port" ]]; then
-    echo "ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。" >&2
+if [[ "$install_web_port" == "$install_admin_port" || "$install_web_port" == "$install_site_port" || "$install_admin_port" == "$install_site_port" ]]; then
+    echo "ND_WEB_PORT、ND_ADMIN_PORT 与 ND_SITE_PORT 必须互不相同。" >&2
     exit 1
 fi
 

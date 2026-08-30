@@ -121,6 +121,32 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="含 .env 与 providers.json 的目录（容器内通常为 /config）",
     )
+    admin.add_argument(
+        "--site-config-dir",
+        default=None,
+        metavar="DIR",
+        help="公开 Site 的最小配置投影目录（生产容器内通常为 /site-config）",
+    )
+    site = subparsers.add_parser(
+        "site", help="启动面向读者的站点、登录与付费墙服务（仅 127.0.0.1）"
+    )
+    site.add_argument("--port", type=int, default=8620)
+    site.add_argument(
+        "--config-dir",
+        default="/config",
+        metavar="DIR",
+        help="含 .env 与 site-secret 的目录（容器内通常为 /config）",
+    )
+    site_admin = subparsers.add_parser(
+        "site-admin", help="授予或撤销已注册站点账号的管理员权限（需 --yes）"
+    )
+    site_admin.add_argument("--email", required=True, help="已注册并激活的站点账号邮箱")
+    site_admin.add_argument(
+        "--revoke", action="store_true", help="撤销管理员权限；缺省为授予"
+    )
+    site_admin.add_argument(
+        "--yes", action="store_true", help="确认写入；缺省只显示操作计划"
+    )
     return parser
 
 
@@ -142,7 +168,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "preview-email":
         return _run_preview_email(args.date)
     if args.command == "admin":
-        return _run_admin(args.port, Path(args.config_dir))
+        return _run_admin(
+            args.port,
+            Path(args.config_dir),
+            Path(args.site_config_dir) if args.site_config_dir else None,
+        )
+    if args.command == "site":
+        return _run_site(args.port, Path(args.config_dir))
+    if args.command == "site-admin":
+        return _run_site_admin(args.email, revoke=args.revoke, yes=args.yes)
     if args.command == "import-edition":
         return _run_import(Path(args.file))
     if args.command == "send-email":
@@ -720,6 +754,15 @@ def _run_automation_daily(
     try:
         while True:
             now = clock()
+            # 每轮自愈:过期租约回收、滞留动作超时、死亡投递认领回收。
+            # 单进程串行循环中不会误伤在跑任务;唤醒链断裂时任务回到自然态。
+            maintenance_conn = db.connect(fetch_config.database)
+            try:
+                db.run_worker_maintenance(
+                    maintenance_conn, now=now.astimezone(dt.UTC).isoformat()
+                )
+            finally:
+                maintenance_conn.close()
             result = runner.run_ready(now=now, owner=owner, max_tasks=1)
             built = runner.flush_build(now=clock(), owner=owner)
             delivered = runner.flush_delivery(edition_date=date, now=clock())
@@ -826,7 +869,135 @@ def _run_import(file: Path) -> int:
     return 0
 
 
-def _run_admin(port: int, config_dir: Path) -> int:
+def _run_site(port: int, config_dir: Path) -> int:
+    """启动公开站点服务;SMTP 仅在注册验证码发送时按需使用。"""
+    from news_digest.admin_email import read_env
+    from news_digest.config import load_env_file, smtp_config_from_env
+    from news_digest.delivery.mailer import send_verification_code
+    from news_digest.payments import (
+        PaymentError,
+        config_from_mapping,
+        settlement_config_from_mapping,
+    )
+    from news_digest.site_server import create_site_server
+
+    if not config_dir.is_dir():
+        print(f"配置目录不存在：{config_dir}")
+        return 1
+    load_env_file(config_dir / ".env")
+    configured_database = os.environ.get("NEWS_DATABASE_PATH", "")
+    configured_output = os.environ.get("NEWS_OUTPUT_PATH", "")
+    database = Path("/data/news.db") if Path("/data").is_dir() else Path(
+        configured_database or "var/data/news.db"
+    )
+    output_root = Path("/site") if Path("/site").is_dir() else Path(
+        configured_output or "var/site"
+    )
+    site_dir = output_root / "current"
+    def send_code(email: str, code: str, purpose: str) -> None:
+        try:
+            smtp = smtp_config_from_env(read_env(config_dir / ".env"))
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("SMTP 验证码服务尚未配置") from error
+        send_verification_code(smtp, email, code, purpose)
+
+    secret_file = Path(
+        os.environ.get("NEWS_SITE_SECRET_FILE", str(config_dir / "site-secret"))
+    )
+    def load_payment_config():
+        return config_from_mapping(read_env(config_dir / ".env"))
+
+    def load_payment_settlement_config():
+        return settlement_config_from_mapping(read_env(config_dir / ".env"))
+
+    try:
+        payment_config = load_payment_config()
+    except PaymentError as error:
+        print(f"EasyPay 配置无效：{error}")
+        return 1
+    server = create_site_server(
+        site_dir=site_dir,
+        db_path=database,
+        secret_file=secret_file,
+        port=port,
+        secure_cookies=True,
+        scheme="https",
+        site_url=os.environ.get("NEWS_SITE_URL", "").strip().rstrip("/"),
+        code_sender=send_code,
+        admin_notify=lambda: None,
+        payment_config=payment_config,
+        payment_config_loader=load_payment_config,
+        payment_settlement_config_loader=load_payment_settlement_config,
+    )
+    print(f"公开站点服务：http://127.0.0.1:{port}/")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+def _run_site_admin(email: str, *, revoke: bool, yes: bool) -> int:
+    """Bootstrap or revoke one site administrator without bypassing registration."""
+    import datetime as dt
+
+    from news_digest import accounts
+    from news_digest.config import load_env_file
+    from news_digest.storage import db
+
+    load_env_file()
+    configured_database = os.environ.get("NEWS_DATABASE_PATH", "")
+    container_database = Path("/data/news.db")
+    database = (
+        container_database
+        if container_database.is_file()
+        else Path(configured_database or "var/data/news.db")
+    )
+    if not database.is_file():
+        print(f"账号数据库不存在：{database}")
+        return 1
+    try:
+        normalized = accounts.normalize_email(email)
+    except accounts.AccountError as error:
+        print(str(error))
+        return 1
+
+    conn = db.connect(database)
+    try:
+        user = db.user_by_email_key(conn, accounts.email_key(normalized))
+        if user is None:
+            print("站点账号不存在；请先完成邮箱验证码注册。")
+            return 1
+        desired = not revoke
+        if desired and user.status != "active":
+            print("只有已激活账号可以成为管理员。")
+            return 1
+        if user.is_admin is desired:
+            print("管理员权限已经是目标状态，无需修改。")
+            return 0
+        action = "撤销" if revoke else "授予"
+        if not yes:
+            print(f"预览模式：将{action}该站点账号的管理员权限；未写入数据库。")
+            return 0
+        db.set_user_admin(
+            conn,
+            user.id,
+            is_admin=desired,
+            now=dt.datetime.now(dt.UTC).isoformat(),
+        )
+    finally:
+        conn.close()
+    print(f"已{action}管理员权限；该账号的旧会话已失效，请重新登录。")
+    return 0
+
+
+def _run_admin(
+    port: int,
+    config_dir: Path,
+    site_config_dir: Path | None = None,
+) -> int:
     from news_digest.config import (
         load_env_file,
         public_subscription_enabled_from_env,
@@ -835,10 +1006,19 @@ def _run_admin(port: int, config_dir: Path) -> int:
     from news_digest.delivery import subscriptions
     from news_digest.delivery.mailer import MailError, validate_smtp
     from news_digest.preview_server import create_server
+    from news_digest.site_config import sync_site_environment
 
     if not config_dir.is_dir():
         print(f"配置目录不存在：{config_dir}")
         return 1
+    site_env_path = None
+    if site_config_dir is not None:
+        site_env_path = site_config_dir / ".env"
+        try:
+            sync_site_environment(config_dir / ".env", site_env_path)
+        except (OSError, ValueError) as error:
+            print(f"Site 配置投影失败：{error}")
+            return 1
     load_env_file(config_dir / ".env")
     site_url = os.environ.get("NEWS_SITE_URL", "").rstrip("/")
     if not site_url:
@@ -890,6 +1070,7 @@ def _run_admin(port: int, config_dir: Path) -> int:
         translation_wakeup_callback=lambda: _signal_translation_worker(
             config_dir / "automation.wake"
         ),
+        site_env_path=site_env_path,
     )
     try:
         server.serve_forever()

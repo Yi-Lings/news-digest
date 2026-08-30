@@ -7,12 +7,30 @@ from news_digest import __version__
 ROOT = Path(__file__).parents[2]
 
 
-def test_phase_8_release_version_is_v1_2_19():
-    assert __version__ == "1.2.19"
+def test_phase_8_release_version_is_v1_4_0():
+    assert __version__ == "1.4.0"
 
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_admin_nginx_csp_allows_validated_qr_preview_images():
+    nginx = _read("deploy/nginx/news.conf")
+    admin_location = nginx.split("location /admin/", 1)[1].split("location = /admin", 1)[0]
+    assert "img-src 'self' data:" in admin_location
+
+
+def test_public_nginx_csp_allows_generated_registration_captcha():
+    nginx = _read("deploy/nginx/news.conf")
+    server_headers = nginx.split("server {", 1)[1].split("location /admin/", 1)[0]
+
+    assert "img-src 'self' data: https:" in server_headers
+
+
+def test_public_site_does_not_write_to_read_only_config_mount():
+    cli = _read("src/news_digest/cli.py")
+    assert "site-orders.wake" not in cli
 
 
 def _backup_python(bootstrap: str) -> str:
@@ -32,6 +50,35 @@ def test_release_bundle_carries_exact_version_and_image_digests():
     assert "sha256sum news-digest-deploy.tgz" in workflow
     assert "news-digest-deploy.tgz.sha256" in workflow
     assert not re.search(r"uses:\s+[^\s#]+@v\d+", workflow)
+
+
+def test_release_workflow_distinguishes_stable_and_candidate_tags():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert 'stable_tag="v${pkg_version}"' in workflow
+    assert 'candidate_prefix="${stable_tag}t"' in workflow
+    assert "^v[0-9]+\\.[0-9]+\\.[0-9]+t[1-9][0-9]*$" in workflow
+    assert 'echo "release_channel=stable"' in workflow
+    assert 'echo "release_channel=prerelease"' in workflow
+    assert "needs: [test, build]" in workflow
+    assert "RELEASE_CHANNEL: ${{ needs.test.outputs.release_channel }}" in workflow
+    assert "--prerelease --latest=false" in workflow
+    assert "--prerelease=false --latest" in workflow
+
+
+def test_candidate_release_docs_require_server_push_and_immutable_digests():
+    docs = "\n".join(
+        _read(path)
+        for path in ("README.md", "HANDOFF.md", "PLAN.md", "CHANGELOG.md", "deploy/README.md")
+    )
+
+    assert "v1.4.0t1" in docs
+    assert "生产环境仍为 `v1.2.19`" in docs
+    assert "prerelease" in docs
+    assert "不成为 `releases/latest`" in docs
+    assert "server-push.ps1" in docs
+    assert "immutable digest" in docs
+    assert "不补发历史" in docs
 
 
 def test_windows_release_path_refuses_dirty_or_detached_tag_and_passes_digests():
@@ -76,6 +123,7 @@ def test_deploy_targets_are_explicit_validated_and_forwarded():
             "[string]$AppDir = $env:ND_APP_DIR",
             "[string]$Domain = $env:ND_DOMAIN",
             "[string]$CertbotEmail = $env:ND_CERTBOT_EMAIL",
+            "[string]$SitePort = $env:ND_SITE_PORT",
         ):
             assert declaration in script
         assert "Missing deployment targets" in script
@@ -109,6 +157,7 @@ def test_deploy_targets_are_explicit_validated_and_forwarded():
     assert 'CERTBOT_EMAIL="$ND_CERTBOT_EMAIL"' in bootstrap
     assert 'WEB_PORT="${ND_WEB_PORT:-8618}"' in preflight
     assert 'ADMIN_PORT="${ND_ADMIN_PORT:-8619}"' in preflight
+    assert 'SITE_PORT="${ND_SITE_PORT:-8620}"' in preflight
     assert "existing_service_owns_port()" in preflight
     assert 'docker compose -f "${APP_DIR}/compose.yaml" ps -q "$role"' in preflight
     assert 'existing_service_owns_port "$role" "$port"' in preflight
@@ -134,6 +183,38 @@ def test_deploy_targets_are_explicit_validated_and_forwarded():
     assert "仓库外的本地 powershell wrapper" in deploy_docs.lower()
 
 
+def test_deploy_requires_all_runtime_units_to_be_inactive_before_mutation():
+    preflight = _read("deploy/preflight.sh")
+    bootstrap = _read("deploy/bootstrap.sh")
+    units = (
+        "news-digest.timer",
+        "news-digest.service",
+        "news-digest-resume.service",
+        "news-digest-wakeup.path",
+    )
+
+    for script in (preflight, bootstrap):
+        assert "LoadState" in script
+        assert "ActiveState" in script
+        for unit in units:
+            assert unit in script
+
+    assert preflight.index("\ncheck_deployment_unit_quiescence\n") < preflight.index(
+        "# --- CPU 架构"
+    )
+    assert bootstrap.index("\nrequire_deployment_units_quiescent\n") < bootstrap.index(
+        'section "2/10 目录与配置工件就位"'
+    )
+
+
+def test_all_deploy_ports_must_be_pairwise_distinct():
+    preflight = _read("deploy/preflight.sh")
+
+    assert '"$WEB_PORT" = "$ADMIN_PORT"' in preflight
+    assert '"$WEB_PORT" = "$SITE_PORT"' in preflight
+    assert '"$ADMIN_PORT" = "$SITE_PORT"' in preflight
+
+
 def test_bootstrap_requires_exact_release_version_and_both_digests():
     bootstrap = _read("deploy/bootstrap.sh")
 
@@ -145,11 +226,46 @@ def test_bootstrap_requires_exact_release_version_and_both_digests():
     assert "ND_ALLOW_TAG_DOWNGRADE" not in bootstrap
 
 
+def test_public_site_does_not_mount_provider_configuration():
+    compose = _read("deploy/compose.yaml")
+    site_section = compose.split("\n  site:\n", 1)[1].split("\n  admin:\n", 1)[0]
+    assert "/site-config:/site-config:ro" in site_section
+    assert "/config" not in site_section
+    assert "news-site-secret:/site-secret" in site_section
+    assert "NEWS_SITE_SECRET_FILE: /site-secret/site-secret" in site_section
+
+
+def test_bootstrap_site_projection_excludes_worker_and_recipient_configuration():
+    bootstrap = _read("deploy/bootstrap.sh")
+    projection = bootstrap.split(
+        "# Site 不得读取 providers.json 或整份管理配置。", 1
+    )[1].split("if ! awk", 1)[0]
+
+    assert 'SITE_CONFIG_DIR="${APP_DIR}/site-config"' in bootstrap
+    assert "NEWS_SITE_URL" in projection
+    assert "SMTP_PASSWORD" in projection
+    assert "EPAY_PKEY" in projection
+    assert "TRANSLATION_API_KEY" not in projection
+    assert "SMTP_RECIPIENTS" not in projection
+    assert "EMAIL_DELIVERY_ENABLED" not in projection
+
+
 def test_reverse_proxy_timeout_exceeds_side_effect_deadlines():
     nginx = _read("deploy/nginx/news.conf")
 
     assert "proxy_read_timeout 45m;" in nginx
     assert "proxy_read_timeout 35s;" in nginx
+
+
+def test_payment_callback_exact_route_reaches_site_before_subscription_prefix():
+    nginx = _read("deploy/nginx/news.conf")
+    exact_marker = "location = /subscribe/api/payment/easypay {"
+    subscription_marker = "location /subscribe/api/ {"
+    assert nginx.index(exact_marker) < nginx.index(subscription_marker)
+    exact = nginx.split(exact_marker, 1)[1].split("}", 1)[0]
+    subscription = nginx.split(subscription_marker, 1)[1].split("}", 1)[0]
+    assert "proxy_pass http://127.0.0.1:8620;" in exact
+    assert "proxy_pass http://127.0.0.1:8619;" in subscription
 
 
 def test_release_installer_binds_latest_metadata_to_bundle_digests():
@@ -216,7 +332,7 @@ def test_bootstrap_backs_up_sqlite_before_starting_database_consumers():
         'install_file ' + dq + '${TMP_DIR}/compose.yaml' + dq, call
     )
     record = bootstrap.index('\nrecord_deployed\n', call)
-    admin = bootstrap.index(dq + '${COMPOSE[@]}' + dq + ' up -d web admin')
+    admin = bootstrap.index(dq + '${COMPOSE[@]}' + dq + ' up -d web site admin')
 
     assert max(worker_pull, web_pull) < call < compose_install < record < admin
     assert 'DATA_VOLUME=' + dq + 'news-digest_news-data' + dq in function_body
@@ -251,7 +367,7 @@ def test_deployment_never_runs_the_content_pipeline():
     assert 'run --rm worker run --yes' not in bootstrap
     assert 'run --rm worker run --yes' not in deploy_all
     assert "current_release_is_today" not in bootstrap
-    assert bootstrap.index('"${COMPOSE[@]}" up -d web admin') < bootstrap.index(
+    assert bootstrap.index('"${COMPOSE[@]}" up -d web site admin') < bootstrap.index(
         "systemctl enable --now news-digest.timer"
     )
     stamp = "touch /var/lib/systemd/timers/stamp-news-digest.timer"
@@ -263,6 +379,41 @@ def test_deployment_never_runs_the_content_pipeline():
     assert 'if [ "$HEALTH_CODE" != "200" ]' in bootstrap
     assert 'if [ "$ADMIN_CODE" != "200" ]' in bootstrap
     assert '"${COMPOSE[@]}" logs --no-color --tail 100 admin' in bootstrap
+
+
+def test_public_switch_and_scheduling_follow_all_local_health_checks():
+    bootstrap = _read("deploy/bootstrap.sh")
+
+    services_started = bootstrap.index('"${COMPOSE[@]}" up -d web site admin')
+    web_health = bootstrap.index('if [ "$HEALTH_CODE" != "200" ]', services_started)
+    site_health = bootstrap.index('if [ "$SITE_CODE" != "200" ]', web_health)
+    admin_health = bootstrap.index('if [ "$ADMIN_CODE" != "200" ]', site_health)
+    nginx_section = bootstrap.index('section "9/10 宿主机 Nginx 与 HTTPS"')
+    scheduling_section = bootstrap.index(
+        'section "10/10 systemd 调度恢复与收尾自检"'
+    )
+    enable = bootstrap.index(
+        "systemctl enable --now news-digest.timer news-digest-wakeup.path",
+        scheduling_section,
+    )
+
+    assert services_started < web_health < site_health < admin_health < nginx_section
+    assert nginx_section < scheduling_section < enable
+    scheduling = bootstrap[scheduling_section:]
+    assert scheduling.count(
+        "systemctl stop news-digest.timer news-digest-wakeup.path"
+    ) >= 2
+    assert "systemctl is-active --quiet news-digest.timer" in scheduling
+    assert "systemctl is-active --quiet news-digest-wakeup.path" in scheduling
+
+
+def test_worker_digest_is_documented_at_all_three_compose_consumers():
+    compose = _read("deploy/compose.yaml")
+    bootstrap = _read("deploy/bootstrap.sh")
+
+    assert compose.count("image: ghcr.io/OWNER/news-digest-worker:VERSION") == 3
+    assert "worker、site 与 admin" in compose
+    assert "worker 镜像三处" in bootstrap
 
 
 def test_admin_translation_actions_activate_a_resume_worker():
@@ -285,7 +436,9 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert "WantedBy=multi-user.target" in wake_path
     assert "news-digest-resume.service" in bootstrap
     assert "news-digest-wakeup.path" in bootstrap
-    assert "systemctl enable --now news-digest-wakeup.path" in bootstrap
+    assert (
+        "systemctl enable --now news-digest.timer news-digest-wakeup.path" in bootstrap
+    )
     assert "news-digest-resume.service" in server_push
     assert "news-digest-wakeup.path" in server_push
 
@@ -325,9 +478,9 @@ def test_manual_deploy_docs_cover_permissions_digests_and_database_recovery():
     )[0]
 
     assert 'sudo chown root:10001 /srv/news-digest/config' in readme
-    assert digest_section.count('news-digest-worker@sha256:DIGEST') == 2
+    assert digest_section.count('news-digest-worker@sha256:DIGEST') == 3
     assert digest_section.count('news-digest-web@sha256:DIGEST') == 1
-    assert 'worker 与 admin' in digest_section
+    assert 'worker、site 与 admin' in digest_section
     freeze = digest_section.index('sudo systemctl stop news-digest.timer')
     backup = digest_section.index('完成迁移前 SQLite online backup')
     edit = digest_section.index('编辑 `/srv/news-digest/compose.yaml`')

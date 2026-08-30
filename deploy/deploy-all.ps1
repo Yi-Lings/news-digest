@@ -16,12 +16,14 @@ param(
     [string]$Domain = $env:ND_DOMAIN,
     [string]$CertbotEmail = $env:ND_CERTBOT_EMAIL,
     [string]$WebPort = $env:ND_WEB_PORT,
-    [string]$AdminPort = $env:ND_ADMIN_PORT
+    [string]$AdminPort = $env:ND_ADMIN_PORT,
+    [string]$SitePort = $env:ND_SITE_PORT
 )
 $NoPrompt = -not $Interactive
 
 if (-not $WebPort) { $WebPort = "8618" }
 if (-not $AdminPort) { $AdminPort = "8619" }
+if (-not $SitePort) { $SitePort = "8620" }
 # $Version is single-sourced from the package below (not hardcoded), so a release
 # version only ever changes in src/news_digest/__init__.py.
 
@@ -66,14 +68,14 @@ if ($CertbotEmail -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$'
     Write-Host "[FAIL] Invalid certificate email." -ForegroundColor Red
     exit 1
 }
-foreach ($port in @($WebPort, $AdminPort)) {
+foreach ($port in @($WebPort, $AdminPort, $SitePort)) {
     if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
         Write-Host "[FAIL] Invalid deploy port: $port" -ForegroundColor Red
         exit 1
     }
 }
-if ($WebPort -eq $AdminPort) {
-    Write-Host "[FAIL] WebPort and AdminPort must differ." -ForegroundColor Red
+if (($WebPort -eq $AdminPort) -or ($WebPort -eq $SitePort) -or ($AdminPort -eq $SitePort)) {
+    Write-Host "[FAIL] WebPort, AdminPort and SitePort must differ." -ForegroundColor Red
     exit 1
 }
 
@@ -427,7 +429,7 @@ Write-Host "[5/6] Running server-push (upload + preflight + bootstrap)..."
 & (Join-Path $PSScriptRoot "server-push.ps1") -AutoYes -NoPrompt:$NoPrompt `
     -Version $Version -WorkerDigest $WorkerDigest -WebDigest $WebDigest `
     -Server $Server -KeyPath $KeyPath -Owner $Owner -AppDir $AppDir `
-    -Domain $Domain -CertbotEmail $CertbotEmail -WebPort $WebPort -AdminPort $AdminPort
+    -Domain $Domain -CertbotEmail $CertbotEmail -WebPort $WebPort -AdminPort $AdminPort -SitePort $SitePort
 Stop-OnError $LASTEXITCODE "server-push"
 
 # ---- [6/6] smoke check: every failure is fatal; print DONE only after all checks ----

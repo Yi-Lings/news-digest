@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import html
 import queue
+import re
 import smtplib
 import socket
 import ssl
@@ -982,6 +983,64 @@ def send_confirmation(
     if result.status == "failed":
         raise MailError(result.error_category or "smtp_protocol", report)
     return report
+
+
+def verification_message(
+    config: SmtpConfig, recipient: str, code: str, purpose: Literal["register", "reset"]
+) -> EmailMessage:
+    """Build a purpose-specific account code message outside edition delivery state."""
+    normalized = normalize_email_address(recipient, "account email")
+    if not re.fullmatch(r"\d{6}", code):
+        raise ValueError("verification code must be six digits")
+    if purpose == "register":
+        subject = "[注册验证码] Cheapcoding News"
+        action = "完成账号注册"
+    elif purpose == "reset":
+        subject = "[重置密码验证码] Cheapcoding News"
+        action = "重置账号密码"
+    else:
+        raise ValueError("verification purpose must be register or reset")
+    return compose(
+        subject,
+        f"你正在{action}。验证码是：{code}\n\n验证码 10 分钟内有效，请勿转发。",
+        f"<p>你正在{action}。</p><p>验证码：<strong>{html.escape(code)}</strong></p>"
+        "<p>验证码 10 分钟内有效，请勿转发。</p>",
+        config.sender,
+        (normalized,),
+    )
+
+
+def send_verification_code(
+    config: SmtpConfig,
+    recipient: str,
+    code: str,
+    purpose: Literal["register", "reset"],
+    smtp_factory=None,
+    *,
+    resolver: Callable[[str, int], Iterable[str]] | None = None,
+) -> DeliveryReport:
+    """Send one account verification code under the normal SMTP deadline."""
+    deadline = time.monotonic() + _SMTP_TOTAL_TIMEOUT_SECONDS
+    target = _validate_smtp_with_deadline(
+        config,
+        deadline=deadline,
+        require_recipients=False,
+        resolver=resolver,
+        validate_target=smtp_factory is None or resolver is not None,
+    )
+    result = _deliver_one(
+        verification_message(config, recipient, code, purpose),
+        config,
+        normalize_email_address(recipient, "account email"),
+        smtp_factory,
+        pinned_addresses=target[1] if target else (),
+        deadline=deadline,
+    )
+    report = DeliveryReport((result,))
+    if result.status == "failed":
+        raise MailError(result.error_category or "smtp_protocol", report)
+    return report
+
 
 
 def send_test_email(

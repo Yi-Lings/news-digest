@@ -5,6 +5,7 @@ article bodies, provider endpoints, and raw responses never enter automation sta
 """
 
 import datetime as dt
+import json
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -15,7 +16,10 @@ from typing import Literal
 from news_digest.models import Article, DailyEdition
 from news_digest.storage import db
 from news_digest.translation.client import TranslationError
-from news_digest.translation.schema import InvalidTranslation
+from news_digest.translation.schema import (
+    InvalidTranslation,
+    expected_sentence_counts,
+)
 from news_digest.translation.service import Translator, translate_article_once
 
 FailureStage = Literal[
@@ -72,6 +76,10 @@ def classify_translation_failure(
             "TASK_DATA_MISSING", "data_integrity", "content_failure", False, None
         )
     if isinstance(error, InvalidTranslation):
+        if getattr(error, "code", None) == "CONTENT_NUMBER_MISSING":
+            return TranslationFailure(
+                "CONTENT_NUMBER_MISSING", "schema", "content_failure", False, None
+            )
         return TranslationFailure(
             "SCHEMA_VALIDATION_FAILED", "schema", "content_failure", False, None
         )
@@ -322,6 +330,11 @@ class TranslationAutomationRunner:
                 conn, edition.date, target_count=len(edition.articles), now=timestamp
             )
             for article in edition.articles:
+                # 任务创建即冻结逐段句数快照:校验只与快照比对,原文重抓或
+                # 分句规则调整都不会让同一任务的验收标准漂移。
+                counts = expected_sentence_counts(
+                    [paragraph.en for paragraph in article.paragraphs]
+                )
                 db.ensure_translation_task(
                     conn,
                     edition_date=edition.date,
@@ -329,6 +342,7 @@ class TranslationAutomationRunner:
                     article_title=article.title_en,
                     provider_id=self.provider_id,
                     now=timestamp,
+                    segmentation_json=json.dumps(counts),
                 )
         finally:
             conn.close()
@@ -341,6 +355,27 @@ class TranslationAutomationRunner:
                 if article.url == task.article_id:
                     return article
         raise TranslationTaskDataError("translation task article is missing")
+
+    @staticmethod
+    def _frozen_counts(task: db.TranslationTask, article: Article) -> list[int] | None:
+        """解出任务冻结的句数快照;快照与文章段落数不一致视为数据完整性错误。"""
+        if not task.segmentation_json:
+            return None
+        try:
+            counts = json.loads(task.segmentation_json)
+        except json.JSONDecodeError as error:
+            raise TranslationTaskDataError(
+                "translation task segmentation snapshot is invalid"
+            ) from error
+        if (
+            not isinstance(counts, list)
+            or len(counts) != len(article.paragraphs)
+            or any(not isinstance(value, int) or value < 1 for value in counts)
+        ):
+            raise TranslationTaskDataError(
+                "translation task segmentation snapshot does not match the article"
+            )
+        return counts
 
     def run_ready(
         self,
@@ -401,8 +436,10 @@ class TranslationAutomationRunner:
                     continue
                 result.claimed += 1
                 result.probes += int(claim.is_probe)
+                frozen: list[int] | None = None
                 try:
                     article = self._article_for_task(conn, claim.task)
+                    frozen = self._frozen_counts(claim.task, article)
                 except TranslationTaskDataError as error:
                     missing_article = error
                 else:
@@ -435,6 +472,7 @@ class TranslationAutomationRunner:
                     cancel_requested=lambda task_id=candidate.task_id: self._cancel_requested(
                         task_id
                     ),
+                    frozen_counts=frozen,
                 )
             except Exception as error:
                 completed_at = self._completion_timestamp(now)
@@ -545,9 +583,8 @@ class TranslationAutomationRunner:
         timestamp = self._iso(now)
         conn = db.connect(self.database)
         try:
-            db.expire_automation_deliveries_before(
-                conn, edition_date, now=timestamp
-            )
+            db.expire_stale_delivery_claims(conn, now=timestamp)
+            db.expire_automation_deliveries_before(conn, edition_date, now=timestamp)
             delivery_key = db.claim_automation_delivery(
                 conn, edition_date, now=timestamp
             )

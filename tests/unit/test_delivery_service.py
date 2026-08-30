@@ -76,6 +76,32 @@ def _smtp(recipients=("admin@example.com",), *, enabled=True):
     )
 
 
+def _add_paid_users(database, recipients):
+    conn = db.connect(database)
+    try:
+        for recipient in recipients:
+            email_key = db.delivery_recipient_key(recipient)
+            user = db.user_by_email_key(conn, email_key)
+            if user is None:
+                user = db.upsert_pending_user(
+                    conn,
+                    email=recipient,
+                    email_key=email_key,
+                    password_hash="test-password-hash",
+                    now=NOW.isoformat(),
+                )
+                db.activate_user(conn, email_key=email_key, now=NOW.isoformat())
+            db.grant_paid_until(
+                conn,
+                user.id,
+                plan="monthly",
+                paid_until=(NOW + dt.timedelta(days=31)).isoformat(),
+                now=NOW.isoformat(),
+            )
+    finally:
+        conn.close()
+
+
 class FakeSMTP:
     messages = []
     fail_for = set()
@@ -135,7 +161,18 @@ class FakeSMTP:
 
 
 @pytest.fixture(autouse=True)
-def reset_fake():
+def reset_fake(monkeypatch):
+    for name in (
+        "EMAIL_MAINS_ENABLED",
+        "EMAIL_BRIEFS_ENABLED",
+        "EMAIL_MAIN_LIMIT",
+        "EMAIL_BRIEF_LIMIT",
+        "EMAIL_LANGUAGE",
+        "EMAIL_SOURCE_FILTERS",
+        "EMAIL_LAYOUT",
+        "EMAIL_SUMMARY_LENGTH",
+    ):
+        monkeypatch.delenv(name, raising=False)
     FakeSMTP.messages = []
     FakeSMTP.fail_for = set()
     FakeSMTP.unknown_for = set()
@@ -150,6 +187,8 @@ def _deliver(tmp_path, mode="manual", *, smtp=None, archive_dir=None, **kwargs):
         for recipient in smtp_config.recipients:
             db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
         conn.close()
+    else:
+        _add_paid_users(tmp_path / "news.db", smtp_config.recipients)
     report = deliver_published(
         mode,
         output_root=root,
@@ -348,6 +387,7 @@ def test_partial_translation_records_degraded_status(tmp_path):
     )
     root = tmp_path / "site"
     build_editions([edition], BuildConfig(root, "http://unused"))
+    _add_paid_users(tmp_path / "news.db", _smtp().recipients)
     report = deliver_published(
         "manual",
         output_root=root,
@@ -507,6 +547,7 @@ def test_unsubscribed_tombstone_excludes_saved_admin_and_public_is_merged(tmp_pa
     conn.execute("UPDATE subscriptions SET source = 'public' WHERE email = 'public@example.com'")
     conn.commit()
     conn.close()
+    _add_paid_users(database, ("admin@example.com", "public@example.com"))
 
     report = deliver_published(
         "manual",
@@ -534,6 +575,7 @@ def test_concurrent_claim_sends_only_once(tmp_path):
     db.ensure_delivery_recipients(conn, DATE, ("reader@example.com",), NOW.isoformat())
     assert db.claim_delivery(conn, DATE, "reader@example.com", NOW.isoformat(), run_id="other")
     conn.close()
+    _add_paid_users(database, ("reader@example.com",))
     report = deliver_published(
         "manual",
         output_root=root,
@@ -552,6 +594,7 @@ def test_concurrent_claim_sends_only_once(tmp_path):
 def test_unsubscribe_after_claim_is_rechecked_immediately_before_data(tmp_path):
     root, _ = _published(tmp_path)
     database = tmp_path / "news.db"
+    _add_paid_users(database, ("reader@example.com",))
 
     def unsubscribe_during_smtp_setup():
         FakeSMTP.on_ehlo = None
@@ -585,6 +628,7 @@ def test_unsubscribe_after_claim_is_rechecked_immediately_before_data(tmp_path):
 def test_unsubscribe_after_rcpt_prevents_data_and_cancels_claim(tmp_path):
     root, _ = _published(tmp_path)
     database = tmp_path / "news.db"
+    _add_paid_users(database, ("reader@example.com",))
 
     class RcptUnsubscribeSMTP(FakeSMTP):
         data_calls = 0
@@ -623,6 +667,7 @@ def test_unsubscribe_after_rcpt_prevents_data_and_cancels_claim(tmp_path):
 
 def test_archive_failure_fails_service_without_changing_sent(tmp_path, monkeypatch):
     root, _ = _published(tmp_path)
+    _add_paid_users(tmp_path / "news.db", _smtp().recipients)
 
     def fail_archive(*args, **kwargs):
         raise OSError("disk full")

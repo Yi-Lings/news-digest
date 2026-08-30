@@ -70,6 +70,19 @@
     });
   }
 
+  /* ── 刊期日期选择（首页与归档页） ── */
+  var editionPickers = document.querySelectorAll("[data-edition-picker]");
+  editionPickers.forEach(function (picker) {
+    picker.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var select = picker.querySelector("select[name='edition']");
+      var target = select ? select.value : "";
+      if (/^\/issues\/\d{4}-\d{2}-\d{2}\/$/.test(target)) {
+        window.location.assign(target);
+      }
+    });
+  });
+
   /* ── 首页订阅（仅同源端点） ── */
   var subscribeForm = document.querySelector("[data-subscribe-form]");
   if (subscribeForm && window.fetch) {

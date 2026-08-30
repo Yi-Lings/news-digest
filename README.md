@@ -4,7 +4,9 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前版本：`v1.2.10`。本版本修复翻译响应失败的无限退避与任务数据缺失遗留问题；本地自动化与浏览器人工验收已通过，并已部署到生产环境。
+当前源码版本：`1.4.0`；首个测试候选为 `v1.4.0t1`，正式 `v1.4.0` 尚未发布。测试候选包含翻译质量与任务恢复、账号注册/邮箱验证码、会员简报与付费墙、EasyPay 兼容自动支付、卡密兑换及 Admin 用户管理。生产环境仍为 `v1.2.19`，只有候选门禁与生产闭环通过后才会另行发布稳定版。
+
+v1.4.0 的付费设置支持以元输入月付/年付基准价格（最多两位小数）和独立折扣百分比；有折扣时订阅页显示划线原价、绿色折扣标识与折后现价，订单保存创建时的折后金额。
 
 ## 产品能力
 
@@ -13,7 +15,7 @@
 - 每天 `08:00 Asia/Shanghai` 启动自动流程，聚合 BBC News、The Guardian、NPR、DW、Al Jazeera、France 24 等来源。
 - 从最近 24 小时内容中去重、评分和选题，默认发布 6 篇主文章，并将其余合适内容编为简讯。
 - 每篇内容保留来源、作者、发布时间和原文链接；正文抓取失败时降级为来源摘要，不影响其他文章。
-- 首页采用编辑部报纸排版，支持来源筛选、往期归档和稳定刊期链接。
+- 首页采用编辑部报纸排版，支持来源筛选、刊期日期选择、往期归档和稳定刊期链接；归档页也可直接选择已有日期跳转。
 - 桌面与移动端均支持英文、双语、中文三种阅读模式，选择会在浏览器内保留。
 
 ![新版首页：双语刊物、订阅入口与管理后台入口](docs/screenshots/home.png)
@@ -29,31 +31,49 @@
 
 ### 订阅与邮件
 
-- 公开订阅使用 double opt-in：提交邮箱后必须点击确认链接，未确认账号不会收到正式刊物。
-- 公开订阅与 Admin 手工新增账号使用同一名单；正式投递只选择 `active` 账号。
+- “会员订阅”和“每日简报”合并为统一页面；每日简报只向状态正常、付费未到期且主动开启简报的会员开放，收件地址固定为已验证注册邮箱。
+- 会员到期后自动停止投递；续费后保留原简报选择并恢复投递资格。Admin 手工管理与会员自助选择使用同一名单。
 - 支持一键退订、`List-Unsubscribe` 和 RFC 8058 one-click unsubscribe。
-- Admin 可新增、停用、启用和删除账号，并且只显示脱敏邮箱和短标识。
+- Admin 可管理会员简报状态；读者只能为自己的已验证注册邮箱启停，会员到期后自动失去投递资格。
 - 正式刊物全部翻译、构建完成后才发送；调度重启、重复 build 或重复 worker 不会重复投递成功收件人。
 - SMTP 支持 implicit TLS 与 STARTTLS。连接测试不发信，测试邮件和正式投递需要显式确认。
 - DATA 阶段结果不确定时记录为 `unknown` 并停止自动重发，避免邮件可能已被服务端接受后再次投递。
 
-![公开订阅区：确认后投递、随时退订](docs/screenshots/subscription.png)
+![会员简报区：付费会员主动启停、随时退订](docs/screenshots/subscription.png)
 
 ![Admin 订阅管理：统一名单、状态统计和生命周期操作](docs/screenshots/admin-subscriptions.png)
 
+### 账号、会员与付费阅读
+
+- 注册与登录使用独立页面：注册依次填写邮箱、两遍密码和随机图形验证码，获取邮箱验证码后提交完成激活；验证码不会建立登录会话，激活后仅支持邮箱与密码登录。邮箱验证码也用于忘记/修改密码，密码重置会撤销该账号全部旧会话。
+- 付费墙关闭时全站免费；开启后，匿名或免费用户在确认页主动确认后，才会把当日免费额度用于最新一期中的一篇主文章；其他主文章与归档正文显示开通引导，付费用户可完整阅读。
+- Admin 可分别以元设置月付/年付基准价（如 `9.9`）与折扣；接口和数据库仍以整数分保存。折扣金额向下取整到分；订单创建时冻结当时的折后金额，后续改价不影响已有订单。
+- 开通方式支持 EasyPay 兼容网关自动支付和卡密兑换。站点按 `sub2api` 的 API 模式向 `mapi.php` 发起服务端 POST，下单成功后再跳转网关返回的支付页；订单号固定使用 `news_` 命名空间，异步回调固定为 `/subscribe/api/payment/easypay`。站内订单使用基准价 `±0.10`、步长 `0.01` 的唯一尾差，网关回调验签、核对商户号/支付类型/订单号/网关交易号及精确金额后原子开通；重复回调不会重复加时。
+- 正常支付无需 Admin 人工审批。订单过期后金额继续冻结，避免迟付匹配到新用户；Admin 可查看支付状态、商户订单号、实付金额、尾差、网关交易号和错误代码。
+
 ### Admin 编辑台
 
-生产环境的 `/admin/` 由登录页和会话 Cookie 保护。编辑台沿用主站的冷纸白、墨黑与朱砂红视觉，按职责分为五个工作区：
+生产环境的 `/admin/` 由登录页和会话 Cookie 保护。编辑台沿用主站的冷纸白、墨黑与朱砂红视觉，按职责分为六个工作区：
 
 | 工作区 | 主要功能 |
 |---|---|
 | 模型接口 | 管理 OpenAI Chat / Anthropic Messages 兼容档案，启停档案并设置唯一默认项；可执行固定 `Hi` 连接测试和小型正式 schema 兼容测试 |
 | 邮件设置 | 配置 SMTP、安全模式、发件人、主文章/简讯数量、语言、来源、摘要长度和版式；预览内容、测试连接和发送单账号测试邮件 |
 | 订阅管理 | 查看统一订阅名单的脱敏状态；新增、停用、启用、删除账号；按单个 active 账号发送验证或测试刊物 |
+| 用户与付费 | 管理登录用户、管理员角色、自动支付订单和卡密；配置 EasyPay API Base、PID、PKey、支付类型、付费墙、月付/年付基准价与独立折扣；查看基准/实付金额、尾差、网关交易号和错误代码 |
 | 翻译状态 | 实时查看逐篇任务、队列、worker、重试倒计时、provider 熔断和增量 build；支持单篇重试、终止和受控探测 |
 | 投递状态 | 查看每个刊期和收件人的 `sent` / `failed` / `unknown`，只重试确定失败项，不混入翻译错误 |
 
 所有配置写入服务器受限目录，不进入源码、镜像或页面响应；API key 与 SMTP 密码不会在 Admin 回显。
+运维管理员可把任意 active 站点账号设为管理员；只有管理员账号登录主站后才显示“管理后台”，点击可直接进入 `/admin/`。停用、撤权或密码重置会立即使其 Admin 会话失效，且站点管理员不能修改运维管理员口令。
+
+服务器命令行也可授予或撤销管理员权限；账号必须先完成注册并激活。缺少 `--yes` 时只显示计划，不写数据库：
+
+```bash
+docker compose -f /srv/news-digest/compose.yaml run --rm worker site-admin --email ACCOUNT_EMAIL
+docker compose -f /srv/news-digest/compose.yaml run --rm worker site-admin --email ACCOUNT_EMAIL --yes
+docker compose -f /srv/news-digest/compose.yaml run --rm worker site-admin --email ACCOUNT_EMAIL --revoke --yes
+```
 
 ### 自动化翻译监控
 
@@ -172,6 +192,7 @@ uv run news-digest preview --port 8618 --automation-demo
 | `ND_CERTBOT_EMAIL` | 是 | `ops@example.com` | HTTPS 证书通知邮箱 |
 | `ND_WEB_PORT` | 否 | `8618` | Web 回环端口，默认 `8618` |
 | `ND_ADMIN_PORT` | 否 | `8619` | Admin 回环端口，默认 `8619`，不得与 Web 相同 |
+| `ND_SITE_PORT` | 否 | `8620` | 动态读者站点回环端口，默认 `8620`，不得与其他端口相同 |
 
 #### 安装步骤
 
@@ -198,9 +219,9 @@ unset GH_TOKEN
 
 只有在自己的 fork 已经发布对应 GitHub Release 和 GHCR 镜像时，才把 `ND_OWNER=yi-lings` 改为 fork 的小写 owner，并同时将下载 URL 中的 `Yi-Lings/news-digest` 改为 fork 路径。
 
-需要避开服务器已有端口时，在同一行增加 `ND_WEB_PORT=9000 ND_ADMIN_PORT=9001`。若镜像为私有且脚本提示缺少 GHCR 权限，执行 `docker login ghcr.io -u 你的GitHub用户名`，在密码提示中粘贴只读 PAT，再原样重跑安装命令；不要把 PAT 写进命令参数或仓库。
+需要避开服务器已有端口时，在同一行增加 `ND_WEB_PORT=9000 ND_ADMIN_PORT=9001 ND_SITE_PORT=9002`。若镜像为私有且脚本提示缺少 GHCR 权限，执行 `docker login ghcr.io -u 你的GitHub用户名`，在密码提示中粘贴只读 PAT，再原样重跑安装命令；不要把 PAT 写进命令参数或仓库。
 
-安装器会校验 Release、部署包和镜像 digest，执行服务器体检，创建配置目录与持久化 volume，启动 Web/Admin，安装每天 `08:00 Asia/Shanghai` 的 systemd timer，并配置 Nginx、HTTPS 和证书续期。安装阶段不会接收 API/SMTP 密钥，也不会获取 RSS、翻译、构建或投递。
+安装器会校验稳定 Release、部署包和镜像 digest，执行服务器体检，创建配置目录与持久化 volume，启动 Web/Site/Admin，安装每天 `08:00 Asia/Shanghai` 的 systemd timer，并配置 Nginx、HTTPS 和证书续期。安装阶段不会接收 API/SMTP 密钥，也不会获取 RSS、翻译、构建或投递。`v1.4.0t1` 是 prerelease，不成为 `releases/latest`，因此不能通过“最新稳定版”安装器误装；维护者按[部署手册](deploy/README.md)使用 `server-push.ps1` 和同一候选 Release 的 immutable digest 受控部署。
 
 #### 部署后配置与首次运行
 
@@ -229,7 +250,7 @@ journalctl -fu news-digest.service
 
 #### Linux 注意事项
 
-- `8618` 和 `8619` 是仅绑定服务器回环地址的内部端口。公网用户只访问同一个 HTTPS 域名：`/` 由 Nginx 转发到 Web，`/admin/` 转发到 Admin。
+- `8618`、`8619`、`8620` 都是服务器内部端口。公网用户只访问同一个 HTTPS 域名：`/` 由 Nginx 转发到 Site（8620），`/admin/` 转发到 Admin（8619）；Web（8618）作为 compose 中保留的静态/健康服务，不是动态读者入口。
 - HTTPS 未成功时 Admin 不会通过明文 HTTP 开放。先检查 DNS 与公网 `80`，修复后原样重跑安装命令。
 - 部署结束时主站可能返回 `404`，因为尚无刊物；完成第一次内容流程后才生成首页。
 - bootstrap 可幂等重跑，不会覆盖 Admin 中保存的 provider、SMTP 或历史数据。不要并发启动多个 worker。
@@ -297,7 +318,7 @@ Windows 前置条件：
 ssh -i C:\keys\deploy_ed25519 root@server.example.com "bash -lc 'ND_OWNER=yi-lings ND_APP_DIR=/opt/news-digest ND_DOMAIN=news.example.com ND_CERTBOT_EMAIL=ops@example.com bash <(curl -fsSL https://raw.githubusercontent.com/Yi-Lings/news-digest/main/deploy/install.sh)'"
 ```
 
-需要自定义 Web/Admin 回环端口时，在远程命令的 `ND_CERTBOT_EMAIL` 后增加 `ND_WEB_PORT=9000 ND_ADMIN_PORT=9001`。私有 GitHub 仓库或私有 GHCR 需要隐藏输入 token，建议先用 SSH 登录服务器，再按“Linux 服务器部署”的私有认证步骤操作。
+需要自定义 Web/Admin/Site 回环端口时，在远程命令的 `ND_CERTBOT_EMAIL` 后增加 `ND_WEB_PORT=9000 ND_ADMIN_PORT=9001 ND_SITE_PORT=9002`。私有 GitHub 仓库或私有 GHCR 需要隐藏输入 token，建议先用 SSH 登录服务器，再按“Linux 服务器部署”的私有认证步骤操作。
 
 部署完成后，先查看初始口令：
 
@@ -326,12 +347,11 @@ ssh -i C:\keys\deploy_ed25519 root@server.example.com "journalctl -fu news-diges
 
 完整参数、私有仓库认证、手工部署、升级和回滚见[部署手册](deploy/README.md)。
 
-### 生产热更新：v1.2.5
+### 生产升级与邮件边界
 
-`v1.2.5` 修复旧刊投递失败后持续阻塞新刊的问题。正确顺序为：当日目标文章全部翻译成功、
-全部上线且最终 build 完成后，只投递当日刊物一次；更早刊期不会自动补发，也不会继续进入
-恢复 worker。被关闭自动投递资格的旧刊保留全部审计记录，并在 Admin 显示
-`DELIVERY_EXPIRED`。
+当前正确顺序为：当日目标文章全部翻译成功、全部上线且最终 build 完成后，只投递当日刊物一次；
+更早刊期不会自动补发，也不会继续进入恢复 worker。被关闭自动投递资格的旧刊保留全部审计记录，
+并在 Admin 显示 `DELIVERY_EXPIRED`。版本升级本身绝不触发抓取、翻译、构建或邮件投递。
 
 升级前先冻结每日和恢复入口，确认没有 worker 正在运行：
 
@@ -344,6 +364,8 @@ systemctl is-active news-digest.service news-digest-resume.service
 两个 service 都应为 `inactive`。然后按“Linux 服务器部署”的同一条安装命令升级到最新
 Release；安装器会做 SQLite online backup、按不可变 digest 更新镜像、重装 systemd unit，
 并恢复 timer 与 wakeup path，但不会在部署过程中抓取、翻译、构建或投递。
+timer/path 可以继续保持 `enabled`；preflight 与 bootstrap 只要求四个 unit 的 `ActiveState`
+均非活动态，并在状态未知时 fail closed。
 
 升级后只做无副作用核对：
 
@@ -355,8 +377,8 @@ systemctl cat news-digest.service | grep SuccessExitStatus
 systemctl cat news-digest-resume.service | grep -E 'SuccessExitStatus|RestartPreventExitStatus|flock -E 75'
 ```
 
-期望版本为 `v1.2.5`，timer/path 为 `enabled`，wakeup path 为 `active`，resume service 为
-`inactive`；两个 service 都把应用终态 `10` 视为已处理，恢复 worker 不再每 15 秒重启。
+期望版本应与本次部署的 Release 一致；timer/path 为 `enabled`，wakeup path 为 `active`，
+resume service 为 `inactive`；两个 service 都把应用终态 `10` 视为已处理，恢复 worker 不应每 15 秒重启。
 
 不要直接启动恢复 worker 来“补齐”历史邮件。`DELIVERY_EXPIRED` 表示刊物内容仍保留在线，
 但其自动投递资格已过期。只有当天刊期需要补投时，才在核对订阅者逐账号投递状态、SMTP
@@ -380,6 +402,7 @@ journalctl -u news-digest.service -n 100 --no-pager
 cd /opt/news-digest
 docker compose ps
 curl http://127.0.0.1:8618/healthz
+curl http://127.0.0.1:8620/healthz
 ```
 
 不要手工改 `current`、release manifest 或内容哈希。构建器会在校验通过后原子切换，并保留最近有效版本。
@@ -394,7 +417,7 @@ curl http://127.0.0.1:8618/healthz
 
 ## 数据、安全与可靠性
 
-- SQLite 保存文章、译文、逐篇任务、订阅状态、投递状态和幂等记录；schema 迁移前执行一致性备份。
+- SQLite 保存文章、译文、逐篇任务、用户、会员权益、订单、订阅状态、投递状态和幂等记录；schema 迁移前执行一致性备份。
 - 静态 release 使用临时构建、完整校验、manifest 内容哈希和原子 `current` 切换；失败不破坏上一版。
 - provider 档案、SMTP 密码、Admin 口令和会话密钥只保存在权限受限的服务器配置目录。
 - 外部抓取限制协议、来源、重定向、响应大小和私网目标，避免 SSRF 与异常资源消耗。

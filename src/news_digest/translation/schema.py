@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from news_digest.models import Article, Collocation, Paragraph, SentenceNote, VocabularyItem
 
 PROMPT_VERSION = "p7"
+# 分句器独立版本:分句规则变更只升 SPLITTER_VERSION,不牵连 PROMPT_VERSION;
+# 缓存读取时会校验该版本(见 service),防止正则热修静默按新规则重验旧缓存。
+SPLITTER_VERSION = "s1"
 
 SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与教学助理。
 文风要求：规范的新闻书面语（参照通讯社译文风格），正式、克制、准确；
@@ -60,7 +63,15 @@ SYSTEM_PROMPT = """你是一名服务于中文英语学习者的新闻翻译与�
 
 
 class InvalidTranslation(ValueError):
-    """模型响应非法或不完整。"""
+    """模型响应非法或不完整。
+
+    ``code`` 为可选的封闭错误码(如 CONTENT_NUMBER_MISSING),由质量门标注,
+    供任务失败分类使用;缺省时按 SCHEMA_VALIDATION_FAILED 处理。
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -184,10 +195,22 @@ def split_sentences(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
+def expected_sentence_counts(paragraphs: list[str]) -> list[int]:
+    """对每个段落分句并返回句数快照;seed 时冻结进任务,校验时复用。"""
+    return [len(split_sentences(paragraph)) for paragraph in paragraphs]
+
+
 def parse_translation(
-    raw_text: str, paragraph_count: int, source_paragraphs: list[str] | None = None
+    raw_text: str,
+    paragraph_count: int,
+    source_paragraphs: list[str] | None = None,
+    frozen_counts: list[int] | None = None,
 ) -> TranslationResult:
-    """解析并严格校验模型输出；任何缺失、错位、空值都视为非法。"""
+    """解析并严格校验模型输出;任何缺失、错位、空值都视为非法。
+
+    frozen_counts 是任务 seed 时冻结的逐段句数快照;提供时校验只与快照比对,
+    不再对原文重新分句——分句规则变更不会让同一任务的验收标准漂移。
+    """
     data = _load_response_json(raw_text)
     if not isinstance(data, dict):
         raise InvalidTranslation("响应顶层必须是 JSON 对象")
@@ -201,14 +224,20 @@ def parse_translation(
         )
     if source_paragraphs is not None and len(source_paragraphs) != paragraph_count:
         raise ValueError("source_paragraphs 数量必须与 paragraph_count 一致")
+    if frozen_counts is not None and len(frozen_counts) != paragraph_count:
+        raise ValueError("frozen_counts 数量必须与 paragraph_count 一致")
     cleaned_paragraphs = []
     cleaned_sentences: list[list[str]] = []
     for index, sentences in enumerate(sentences_zh):
         if not isinstance(sentences, list) or not sentences:
             raise InvalidTranslation(f"sentences_zh 第 {index + 1} 段为空或不是数组")
-        if source_paragraphs is not None and len(sentences) != len(
-            split_sentences(source_paragraphs[index])
-        ):
+        if frozen_counts is not None:
+            expected = frozen_counts[index]
+        elif source_paragraphs is not None:
+            expected = len(split_sentences(source_paragraphs[index]))
+        else:
+            expected = None
+        if expected is not None and len(sentences) != expected:
             raise InvalidTranslation(f"sentences_zh 第 {index + 1} 段句子数量与原文不一致")
         if any(not isinstance(item, str) or not item.strip() for item in sentences):
             raise InvalidTranslation(f"sentences_zh 第 {index + 1} 段含空句")
@@ -260,6 +289,7 @@ def result_to_dict(result: TranslationResult) -> dict:
         "vocabulary": [vars(v) for v in result.vocabulary],
         "collocations": [vars(c) for c in result.collocations],
         "sentence_notes": [vars(s) for s in result.sentence_notes],
+        "splitter_version": SPLITTER_VERSION,
     }
 
 

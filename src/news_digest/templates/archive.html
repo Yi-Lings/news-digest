@@ -8,6 +8,18 @@
 {% block content %}
 <section class="archive" aria-label="往期归档">
   <h2 class="section-title">全部日期</h2>
+  <form class="edition-picker archive-picker" data-edition-picker aria-label="选择往期刊期">
+    <label class="edition-picker-field">
+      <span class="filter-label">选择日期</span>
+      <select name="edition" aria-label="选择往期刊期日期" required>
+        <option value="" selected disabled>选择日期</option>
+        {% for entry in entries %}
+        <option value="/issues/{{ entry.date }}/">{{ entry.date }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">查看刊期</button>
+  </form>
   <ul class="archive-list">
     {% for entry in entries %}
     <li class="archive-entry">

@@ -39,17 +39,13 @@
     <div class="topnav-links">
       <a href="/"{% if nav_active == "today" %} class="is-active" aria-current="page"{% endif %}>今日</a>
       <a href="/archive/"{% if nav_active == "archive" %} class="is-active" aria-current="page"{% endif %}>往期归档</a>
+      <a class="member-entry" href="/subscribe">会员订阅</a>
+      <a class="account-entry" href="/account">登录 / 账户</a>
       {% if nav_active == "today" %}
-      {% if is_root and public_subscription_enabled %}
-      <a class="subscribe-entry" href="#subscribe">订阅简报</a>
-      {% endif %}
       {% if is_root %}
       <a class="support-entry" href="#support">支持本站</a>
       {% endif %}
-      <a class="admin-entry" href="/admin/">
-        <span>管理后台</span>
-        <span class="admin-entry-arrow" aria-hidden="true">→</span>
-      </a>
+      <!--ADMIN_NAV-->
       {% endif %}
     </div>
     <div class="mode-switch" role="group" aria-label="阅读模式">

@@ -882,7 +882,7 @@ def test_complete_edition_delivery_claim_is_persistent_and_single(tmp_path):
     assert db.claim_automation_delivery(reopened, "2026-07-28", now=_at(7)) is None
 
 
-def test_v4_to_v7_migration_writes_verified_online_backups(tmp_path):
+def test_v4_to_v9_migration_writes_verified_online_backups(tmp_path):
     path = tmp_path / "digest.db"
     conn = db.connect(path)
     conn.executescript(
@@ -899,8 +899,11 @@ def test_v4_to_v7_migration_writes_verified_online_backups(tmp_path):
     migrated = db.connect(path)
     assert migrated.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "7"
+    ).fetchone()["value"] == "9"
     assert migrated.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert "is_admin" in {
+        row["name"] for row in migrated.execute("PRAGMA table_info(users)")
+    }
     migrated.close()
 
     backup_path = path.with_name("digest.db.pre-v5.bak")
@@ -913,6 +916,7 @@ def test_v4_to_v7_migration_writes_verified_online_backups(tmp_path):
         ).fetchone()[0] == "4"
     finally:
         backup.close()
+
     v6_backup = path.with_name("digest.db.pre-v6.bak")
     assert v6_backup.is_file()
     backup = db.sqlite3.connect(v6_backup)
@@ -934,3 +938,90 @@ def test_v4_to_v7_migration_writes_verified_online_backups(tmp_path):
         ).fetchone()[0] == "6"
     finally:
         backup.close()
+
+    v9_backup = path.with_name("digest.db.pre-v9.bak")
+    assert v9_backup.is_file()
+    backup = db.sqlite3.connect(v9_backup)
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "8"
+    finally:
+        backup.close()
+
+
+def test_v8_to_v9_migration_removes_legacy_login_codes(tmp_path):
+    path = tmp_path / "digest.db"
+    conn = db.connect(path)
+    conn.executescript(
+        """
+        DROP TABLE email_codes;
+        CREATE TABLE email_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email_key TEXT NOT NULL,
+            code_digest TEXT NOT NULL,
+            purpose TEXT NOT NULL CHECK(purpose IN ('register', 'login', 'reset')),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_email_codes_email_purpose
+            ON email_codes(email_key, purpose, created_at DESC);
+        INSERT INTO email_codes
+            (email_key, code_digest, purpose, expires_at, created_at)
+        VALUES (
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'login', '2026-08-30T12:10:00+00:00', '2026-08-30T12:00:00+00:00'
+        );
+        UPDATE meta SET value = '8' WHERE key = 'schema_version';
+        """
+    )
+    conn.close()
+
+    migrated = db.connect(path)
+    table_sql = migrated.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'email_codes'"
+    ).fetchone()["sql"]
+    assert "'login'" not in table_sql
+    assert migrated.execute(
+        "SELECT COUNT(*) FROM email_codes WHERE purpose = 'login'"
+    ).fetchone()[0] == 0
+    assert migrated.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()["value"] == "9"
+    migrated.close()
+
+    v9_backup = path.with_name("digest.db.pre-v9.bak")
+    assert v9_backup.is_file()
+    backup = db.sqlite3.connect(v9_backup)
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "8"
+    finally:
+        backup.close()
+
+
+def test_v9_migration_rejects_invalid_existing_backup(tmp_path):
+    path = tmp_path / "digest.db"
+    conn = db.connect(path)
+    conn.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+    backup_path = path.with_name("digest.db.pre-v9.bak")
+    backup_path.touch()
+
+    with pytest.raises(RuntimeError, match="schema v9 迁移前数据库备份"):
+        db.connect(path)
+
+    unchanged = db.sqlite3.connect(path)
+    try:
+        assert unchanged.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "8"
+    finally:
+        unchanged.close()

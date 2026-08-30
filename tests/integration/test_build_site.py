@@ -9,7 +9,7 @@ from news_digest.config import BuildConfig
 from news_digest.pipeline import build_site
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "demo"
-RUNTIME_ROUTES = frozenset({"/admin/"})
+RUNTIME_ROUTES = frozenset({"/admin/", "/account", "/subscribe"})
 
 
 @pytest.fixture(scope="module")
@@ -66,12 +66,15 @@ def test_home_shows_lead_and_demo_stamp(site):
     assert "Cheapcoding News" in html
     assert "简讯" in html
     assert "data-subscribe-form" not in html
-    assert html.count('href="/admin/"') == 1
-    assert 'class="admin-entry"' in html
+    assert 'href="/admin/"' not in html
+    assert "<!--ADMIN_NAV-->" in html
+    assert 'class="member-entry" href="/subscribe"' in html
+    assert 'class="account-entry" href="/account"' in html
     assert "本站完全用爱发电" in html
     assert "data-support-panel" in html
     assert 'src="/assets/alipay-support-qr.jpg"' in html
     assert 'href="#support"' in html
+    assert 'src="/assets/demo/demo-city.svg"' in html
 
 
 def test_home_dateline_uses_two_semantic_mobile_rows(site):
@@ -87,7 +90,7 @@ def test_home_dateline_uses_two_semantic_mobile_rows(site):
     assert ".front > * { min-width: 0; }" in css
 
 
-def test_subscription_form_is_limited_to_the_current_root_homepage(tmp_path):
+def test_home_uses_one_membership_and_newsletter_entry(tmp_path):
     output_root = tmp_path / "site"
     build_site(
         FIXTURES,
@@ -99,8 +102,9 @@ def test_subscription_form_is_limited_to_the_current_root_homepage(tmp_path):
     )
     current = output_root / "current"
     root_html = (current / "index.html").read_text(encoding="utf-8")
-    assert "data-subscribe-form" in root_html
-    assert 'href="#subscribe"' in root_html
+    assert "data-subscribe-form" not in root_html
+    assert "会员订阅与每日简报" in root_html
+    assert 'href="/subscribe"' in root_html
     dated_pages = sorted((current / "issues").glob("*/index.html"))
     assert dated_pages
     for page in dated_pages:
@@ -152,7 +156,24 @@ def test_archive_lists_all_dates(site):
     html = (output_root / "current" / "archive" / "index.html").read_text(encoding="utf-8")
     assert "2026-07-26" in html
     assert "2026-07-25" in html
+    assert 'class="edition-picker archive-picker"' in html
+    assert 'data-edition-picker' in html
+    assert 'value="/issues/2026-07-26/"' in html
+    assert 'value="/issues/2026-07-25/"' in html
     assert 'href="/admin/"' not in html
+
+
+def test_home_date_browser_only_uses_the_edition_picker(site):
+    output_root, _ = site
+    current = output_root / "current"
+    html = (current / "index.html").read_text(encoding="utf-8")
+    script = (current / "assets" / "app.js").read_text(encoding="utf-8")
+    assert html.count('data-edition-picker') == 1
+    assert 'value="/issues/2026-07-26/" selected' in html
+    assert 'value="/issues/2026-07-25/"' in html
+    assert 'class="issue-link' not in html
+    assert "全部归档 →" not in html
+    assert 'querySelectorAll("[data-edition-picker]")' in script
 
 
 def test_internal_links_resolve_and_resources_are_local(site):

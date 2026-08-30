@@ -16,6 +16,7 @@ from news_digest.delivery.mailer import (
     inject_unsubscribe,
     send_confirmation,
     unsubscribe_headers,
+    verification_message,
 )
 from news_digest.storage import db
 
@@ -44,6 +45,25 @@ def _activate(conn, email="Reader@Example.com", token="c" * 43):
     result = subscriptions.confirm_subscription(conn, token, LATER)
     assert result.accepted
     return submission
+
+
+def _grant_paid(conn, email="Reader@Example.com", *, now=NOW, days=31):
+    email_key = db.delivery_recipient_key(email)
+    user = db.upsert_pending_user(
+        conn,
+        email=email,
+        email_key=email_key,
+        password_hash="test-password-hash",
+        now=now.isoformat(),
+    )
+    db.activate_user(conn, email_key=email_key, now=now.isoformat())
+    return db.grant_paid_until(
+        conn,
+        user.id,
+        plan="monthly",
+        paid_until=(now + dt.timedelta(days=days)).isoformat(),
+        now=now.isoformat(),
+    )
 
 
 def test_public_submission_is_pending_and_stores_only_token_digest(tmp_path):
@@ -211,9 +231,10 @@ def test_resubscribe_after_unsubscribe_requires_fresh_confirmation(tmp_path):
 def test_unsubscribe_immediately_excludes_existing_pending_and_failed_delivery_rows(tmp_path):
     conn = _connect(tmp_path)
     _activate(conn)
+    _grant_paid(conn)
     now = "2026-07-27T00:02:00+00:00"
     db.ensure_delivery_recipients(conn, "2026-07-27", ("reader@example.com",), now)
-    assert subscriptions.delivery_recipients(conn, "2026-07-27") == (
+    assert subscriptions.delivery_recipients(conn, "2026-07-27", NOW) == (
         "Reader@Example.com",
     )
     assert db.claim_delivery(conn, "2026-07-27", "reader@example.com", now)
@@ -226,7 +247,7 @@ def test_unsubscribe_immediately_excludes_existing_pending_and_failed_delivery_r
         "recipient_rejected",
     )
     assert subscriptions.delivery_recipients(
-        conn, "2026-07-27", retry_failed_only=True
+        conn, "2026-07-27", NOW, retry_failed_only=True
     ) == ("Reader@Example.com",)
 
     token = "unsubscribe-token-with-at-least-thirty-two-bytes-005"
@@ -238,10 +259,34 @@ def test_unsubscribe_immediately_excludes_existing_pending_and_failed_delivery_r
         token_factory=lambda: token,
     )
     subscriptions.unsubscribe_one_click(conn, token, LATER)
-    assert subscriptions.delivery_recipients(conn, "2026-07-27") == ()
+    assert subscriptions.delivery_recipients(conn, "2026-07-27", NOW) == ()
     assert subscriptions.delivery_recipients(
-        conn, "2026-07-27", retry_failed_only=True
+        conn, "2026-07-27", NOW, retry_failed_only=True
     ) == ()
+    conn.close()
+
+
+def test_daily_delivery_requires_active_unexpired_paid_account(tmp_path):
+    conn = _connect(tmp_path)
+    _activate(conn)
+    assert db.paid_subscription_recipients(conn, NOW.isoformat()) == ()
+
+    paid = _grant_paid(conn)
+    assert db.paid_subscription_recipients(conn, NOW.isoformat()) == (
+        "Reader@Example.com",
+    )
+    assert db.paid_subscription_recipient_active(
+        conn, "reader@example.com", NOW.isoformat()
+    )
+
+    db.grant_paid_until(
+        conn,
+        paid.id,
+        plan="monthly",
+        paid_until=(NOW - dt.timedelta(seconds=1)).isoformat(),
+        now=NOW.isoformat(),
+    )
+    assert db.paid_subscription_recipients(conn, NOW.isoformat()) == ()
     conn.close()
 
 
@@ -533,6 +578,24 @@ def test_confirmation_message_is_private_escaped_and_has_no_unsubscribe_or_editi
     assert report.sent_count == 1
     assert str(FakeSMTP.messages[0]["To"]) == "reader@example.com"
     assert "admin@example.com" not in FakeSMTP.messages[0].as_string()
+
+
+def test_registration_and_reset_code_messages_use_distinct_templates():
+    config = SmtpConfig(
+        host="smtp.example.com",
+        port=587,
+        username="",
+        password="",
+        sender="news@example.com",
+        recipients=(),
+        security="starttls",
+    )
+    register = verification_message(config, "reader@example.com", "123456", "register")
+    reset = verification_message(config, "reader@example.com", "123456", "reset")
+    assert str(register["Subject"]).startswith("[注册验证码]")
+    assert str(reset["Subject"]).startswith("[重置密码验证码]")
+    assert "完成账号注册" in register.get_body(preferencelist=("plain",)).get_content()
+    assert "重置账号密码" in reset.get_body(preferencelist=("plain",)).get_content()
 
 
 def test_connect_migrates_schema_v1_without_losing_delivery_data(tmp_path):

@@ -109,26 +109,14 @@
 </section>
 {% endif %}
 
-{% if is_root and is_today and public_subscription_enabled %}
+{% if is_root and is_today %}
 <section id="subscribe" class="subscribe" aria-labelledby="subscribe-title">
   <div class="subscribe-copy">
-    <p class="subscribe-kicker">每日一封 · 随时退订</p>
-    <h2 id="subscribe-title">把双语简报送到邮箱</h2>
-    <p>提交后请到邮箱点击确认链接；未经确认不会开始投递。</p>
-    <p><a href="/privacy/">查看订阅隐私说明</a></p>
+    <p class="subscribe-kicker">会员阅读 · 每日邮件</p>
+    <h2 id="subscribe-title">会员订阅与每日简报</h2>
+    <p>开通付费会员后，可阅读完整正文与往期归档，并为注册邮箱开启每日简报。</p>
+    <p><a href="/subscribe">查看会员方案与简报权益</a> · <a href="/privacy/">隐私说明</a></p>
   </div>
-  <form class="subscribe-form" data-subscribe-form>
-    <label for="subscribe-email">邮箱地址</label>
-    <div class="subscribe-fields">
-      <input id="subscribe-email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" required placeholder="you@example.com">
-      <button type="submit">订阅每日简报</button>
-    </div>
-    <div class="subscribe-honeypot" aria-hidden="true">
-      <label for="subscribe-website">网站</label>
-      <input id="subscribe-website" name="website" type="text" tabindex="-1" autocomplete="off">
-    </div>
-    <p class="subscribe-status" data-subscribe-status role="status" aria-live="polite"></p>
-  </form>
 </section>
 {% endif %}
 
@@ -150,15 +138,19 @@
 </section>
 {% endif %}
 
-<nav class="issue-nav" aria-label="日期导航">
-  <span class="filter-label">按日期浏览</span>
+<form class="edition-picker" data-edition-picker aria-label="按日期浏览">
+  <label class="edition-picker-field">
+    <span class="filter-label">按日期浏览</span>
+    <select name="edition" aria-label="选择刊期日期">
   {% for date in all_dates %}
   {% if date == edition.date %}
-  <span class="issue-link is-current" aria-current="date">{{ date }}</span>
+      <option value="/issues/{{ date }}/" selected>{{ date }}</option>
   {% else %}
-  <a class="issue-link" href="/issues/{{ date }}/">{{ date }}</a>
+      <option value="/issues/{{ date }}/">{{ date }}</option>
   {% endif %}
   {% endfor %}
-  <a class="issue-link" href="/archive/">全部归档 →</a>
-</nav>
+    </select>
+  </label>
+  <button type="submit">查看刊期</button>
+</form>
 {% endblock %}

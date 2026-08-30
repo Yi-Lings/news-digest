@@ -5,8 +5,9 @@
 > 任何与服务器实测冲突之处，以实测结果为准并回写本目录。
 
 服务器上不保存 Git 仓库与源码（PLAN 发布链路）：应用代码只存在于 GHCR 预构建镜像内，
-服务器只保留 Compose manifest、`config/` 配置子目录（`.env`、`providers.json`、
-面板口令，admin 容器唯一可触及的宿主路径）、systemd 单元、宿主机 Nginx 配置与持久化卷。
+服务器只保留 Compose manifest、`config/` 管理配置子目录（`.env`、`providers.json`、
+面板口令）、只含 Site 白名单字段的 `site-config/` 投影目录、systemd 单元、宿主机 Nginx
+配置与持久化卷。Site 不读取 `providers.json` 或整个管理配置目录。
 
 ## 一键部署（类 sub2api）
 
@@ -22,13 +23,15 @@ bash <(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
   https://raw.githubusercontent.com/Yi-Lings/news-digest/main/deploy/install.sh)
 ```
 
-自动完成：下载最新 Release 部署包 → 只读体检（preflight）→ 幂等部署（bootstrap：镜像、
-Web/Admin、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `$ND_APP_DIR/config/.env`
-生成 API/SMTP 为空、邮件投递和公开订阅关闭的安全配置，然后直接完成。部署过程不接收
+自动完成：下载最新**稳定** Release 部署包 → 只读体检（preflight）→ 幂等部署（bootstrap：镜像、
+Web/Site/Admin、每日 08:00 定时器、Nginx、HTTPS）。首次运行会在 `$ND_APP_DIR/config/.env`
+生成 API/SMTP/EasyPay 为空、邮件投递关闭的安全配置，然后直接完成。部署过程不接收
 API/SMTP 密钥，也不运行抓取、翻译、构建或投递；运行配置在部署后通过 Admin 设置。部署包
-（`news-digest-deploy.tgz`）由 CI 在每次推送 `v*` 标签时自动附到 Release，并携带该
+（`news-digest-deploy.tgz`）由 CI 在每次推送合法版本标签时自动附到 Release，并携带该
 Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 digest 部署，不回退到默认 tag；
 已解包场景直接 `sudo bash deploy/install.sh`。
+`v1.4.0tN` 是测试候选 prerelease，不成为 `releases/latest`，因此本节的一键安装器不会误装
+候选；候选部署必须按 §1 使用 `server-push.ps1` 和同一 Release 的 immutable digest。
 换域名/换端口/换目录部署：执行命令前 export 对应 `ND_*` 环境变量即可，全表见 §0。
 普通用户保留官方 Release owner `ND_OWNER=yi-lings`；只有自己的 fork 已发布对应 Release
 和 GHCR 镜像时，才改为 fork 的小写 owner，并同时改用该 fork 的 `install.sh` 下载地址。
@@ -40,7 +43,7 @@ Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 diges
 | 占位符 | 含义 | 如何得到 |
 |---|---|---|
 | `OWNER` | GHCR 命名空间（GitHub 用户名，全小写） | 仓库地址 `github.com/OWNER/news-digest` 中的用户名；GHCR 要求小写 |
-| `VERSION` | 可读版本 tag（如 `v0.1.0`） | 本地验收后打的 Git tag；仅注释可读性用，生产必须换 digest |
+| `VERSION` | 可读版本 tag（稳定版如 `v1.4.0`，候选如 `v1.4.0t1`） | 本地验收后打的新 Git tag；仅注释可读性用，生产必须换 digest |
 | `DIGEST` | 镜像不可变摘要 `sha256:…` | release.yml 运行摘要（Actions → 对应 run → Summary），或 `docker buildx imagetools inspect ghcr.io/OWNER/news-digest-worker:VERSION` |
 | `GHCR_USER` | 用于服务器登录 GHCR 的 GitHub 用户名 | 与 OWNER 相同或被授权的账号 |
 
@@ -51,7 +54,7 @@ Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 diges
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `ND_OWNER` | 必填 | GitHub/GHCR 命名空间；下载对应仓库 Release，并渲染 compose 中三处 image 引用 |
+| `ND_OWNER` | 必填 | GitHub/GHCR 命名空间；下载对应仓库 Release，并渲染 compose 中四处 image 引用 |
 | `ND_VERSION` | 必填 | Release tag；下载模式由 Release 元数据提供 |
 | `ND_WORKER_DIGEST` | 必填 | worker 不可变镜像摘要；正式 Release 由 `digests.env` 自动提供 |
 | `ND_WEB_DIGEST` | 必填 | web 不可变镜像摘要；必须与 worker digest 同时提供 |
@@ -59,6 +62,7 @@ Release 的准确 tag 与两个镜像 digest；安装器严格校验后按 diges
 | `ND_DOMAIN` | 必填 | 站点域名；渲染 nginx 配置、certbot 签发与 `.env` 模板的 `NEWS_SITE_URL` |
 | `ND_WEB_PORT` | `8618` | web 容器宿主回环端口；渲染 compose 与 nginx |
 | `ND_ADMIN_PORT` | `8619` | Admin 管理面板宿主回环端口；渲染 compose 与 nginx |
+| `ND_SITE_PORT` | `8620` | 公开读者站点宿主回环端口；渲染 compose 与 nginx |
 | `ND_CERTBOT_EMAIL` | 必填 | 证书到期/吊销通知邮箱 |
 
 示例：先设置 `ND_OWNER`、`ND_APP_DIR`、`ND_DOMAIN`、`ND_CERTBOT_EMAIL`，再按需
@@ -82,12 +86,33 @@ Windows 发布入口 `deploy.bat` 原样透传 PowerShell 参数。例如：
 ## 1. 发布一个部署候选（本地 → GHCR）
 
 1. 本地验收通过后，确认工作树完全 clean、`HEAD` 已合入且等于本地 `main`，并确认
-   `src/news_digest/__init__.py` 的 `__version__` 与将要打的**新 tag**一致；发布脚本要求
-   tag 严格指向 HEAD，禁止复用或移动旧 tag。
-2. 创建 annotated tag 并推送：`git tag -a v1.1.1 -m "v1.1.1" && git push origin v1.1.1`。
-3. 等待 Actions `release` 工作流通过（先复跑离线测试，再构建推送两个镜像）。
-4. 从该 run 的 Summary 复制两条 digest 引用（形如
-   `ghcr.io/OWNER/news-digest-worker@sha256:…`），记入发布记录。
+   `src/news_digest/__init__.py` 的 `__version__`。稳定 tag 必须精确为 `v` + 包版本；同一
+   包版本的测试候选只允许追加 `tN`，例如包版本 `1.4.0` 对应 `v1.4.0t1`。tag 必须严格
+   指向 HEAD，禁止复用或移动旧 tag。
+2. 创建并单独推送 annotated 候选 tag：
+
+   ```powershell
+   git tag -a v1.4.0t1 -m "v1.4.0t1"
+   git push origin v1.4.0t1
+   ```
+
+3. 等待 Actions `release` 工作流通过。`v1.4.0tN` 必须显示为 GitHub prerelease 且不成为
+   `releases/latest`；正式 `v1.4.0` 仍严格匹配包版本并可成为 Latest。
+4. 从该候选 Release 下载 `digests.env`，核对 worker/web digest 均为 `sha256:` 引用并来自
+   同一 tag。不要混用 Actions run、Release 或手工查询所得的不同批次 digest。
+5. 在该 tag 的干净工作树中单独调用 `server-push.ps1`；稳定版的 `deploy-all.ps1` 行为保持
+   不变，不用于候选：
+
+   ```powershell
+   .\deploy\server-push.ps1 -Version v1.4.0t1 `
+     -WorkerDigest sha256:WORKER_DIGEST -WebDigest sha256:WEB_DIGEST `
+     -Server deploy@server.example.com -KeyPath D:\keys\deploy_ed25519 `
+     -Owner your-github-owner -AppDir /srv/news-digest `
+     -Domain news.example.com -CertbotEmail ops@example.com
+   ```
+
+   脚本先执行远端 preflight，再等待人工确认后运行 bootstrap。已有数据卷必须先由 bootstrap
+   完成 SQLite online backup、`PRAGMA integrity_check` 与 SHA-256 校验；任一门禁失败立即停止。
 
 ## 2. 服务器前置核对（一次性）
 
@@ -107,16 +132,18 @@ free -m && df -h /          # 内存、磁盘余量核对（worker 峰值目标 
 ## 3. 创建部署目录与配置
 
 ```bash
-sudo mkdir -p /srv/news-digest/backups /srv/news-digest/config
+sudo mkdir -p /srv/news-digest/backups /srv/news-digest/config /srv/news-digest/site-config
 sudo chown root:10001 /srv/news-digest/config          # worker 需穿越目录读取 providers.json
 sudo chmod 750 /srv/news-digest/config                 # 密钥配置子目录：admin 容器唯一可写宿主路径
+sudo chown root:10001 /srv/news-digest/site-config
+sudo chmod 750 /srv/news-digest/site-config            # 仅投影 Site 所需 SMTP/EasyPay/站点字段
 sudo cp compose.yaml /srv/news-digest/compose.yaml     # 从本目录 scp 上传后拷贝
 sudo touch /srv/news-digest/config/.env
 sudo chown root:root /srv/news-digest/config/.env
 sudo chmod 600 /srv/news-digest/config/.env            # 密钥文件：600，root 所有
 ```
 
-手工部署未运行 bootstrap 时，先写入以下安全初始配置。API/SMTP 密钥在 Web/Admin 启动后设置，
+手工部署未运行 bootstrap 时，先写入以下安全初始配置。API/SMTP/EasyPay 密钥在 Web/Site/Admin 启动后设置，
 不通过部署命令、Git、CI 或镜像传递：
 
 ```dotenv
@@ -130,6 +157,14 @@ TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
+
+EPAY_ENABLED=false
+EPAY_API_BASE=
+EPAY_PID=
+EPAY_PKEY=
+EPAY_PAYMENT_TYPE=alipay
+EPAY_ORDER_TTL_SECONDS=300
+EPAY_AMOUNT_HOLD_SECONDS=3600
 
 EMAIL_DELIVERY_ENABLED=false
 SMTP_HOST=
@@ -155,10 +190,14 @@ Admin 保存后，`SMTP_PASSWORD` 会改写为 `nd-b64-v1:` 开头的 UTF-8 Base
 Compose `env_file` 对 `$`、引号、空格和 `#` 不做破坏性解释；这只是传输编码，不是加密。
 旧明文值仍兼容，Admin 下次保存时会统一迁移。
 
+bootstrap/Admin 会把 `NEWS_SITE_URL`、SMTP、EasyPay 等 Site 必需字段原子投影到
+`/srv/news-digest/site-config/.env`。Site 以目录只读 bind 读取该投影，既能看到原子替换后的
+新 inode，又不会接触 provider 配置或整份 `/config`；不得改回单文件 bind。
+
 `TRANSLATION_API_TYPE` 只能是 `openai_chat` 或 `anthropic_messages`；`SMTP_SECURITY`
 只能是 `implicit_tls`（通常 465）或 `starttls`（通常 587/2525）。先保持两个 enable
 开关为 `false`，通过 Admin 的真实 provider 测试、SMTP 连接测试和测试邮件后再开启。
-公开订阅还要求公网 HTTPS 站点就绪。正式版的 timer 固定为 `Asia/Shanghai` 每日
+账号注册、会员简报和 EasyPay 回调都要求公网 HTTPS 站点就绪。正式版的 timer 固定为 `Asia/Shanghai` 每日
 08:00；bootstrap 要求 `.env` 中唯一的 `NEWS_TIMEZONE` 与之完全一致，否则停止部署。
 
 部署完成后在 Admin 新增翻译档案，执行受控连接测试并设为唯一默认。Admin 会创建
@@ -171,13 +210,13 @@ Compose `env_file` 对 `$`、引号、空格和 `#` 不做破坏性解释；这�
 
 ## 4. 固定镜像 digest
 
-**已有实例升级不得先改 live compose。** 推荐直接使用 bootstrap：它只渲染候选 compose，
-先按旧 live compose 保持现有 timer，再拉取新 digest、完成迁移前备份，最后才切换。
-确需手工升级时，必须先冻结数据库写入：
+**已有实例升级不得先改 live compose。** 无论使用 `server-push.ps1`、bootstrap 还是手工升级，
+都必须先冻结下面四个运行入口；preflight 与 bootstrap 会读取 `ActiveState` 并在任一入口仍活动时
+fail closed。unit 保持 `enabled` 不影响部署，升级结束后 bootstrap 会重新启动 timer 与 wakeup path。
 
 ```bash
 cd /srv/news-digest
-sudo systemctl stop news-digest.timer news-digest-wakeup.path
+sudo systemctl stop news-digest.timer news-digest-wakeup.path news-digest-resume.service
 if sudo systemctl is-active --quiet news-digest.service; then
   echo 'worker 仍在运行；等待其结束后重新执行本步骤' >&2
   exit 1
@@ -189,12 +228,12 @@ fi
 sudo docker compose stop admin
 ```
 
-保持三处旧 digest 不变，按 §9 使用旧 worker 镜像完成迁移前 SQLite online backup，核验
+保持四处旧 digest 不变，按 §9 使用旧 worker 镜像完成迁移前 SQLite online backup，核验
 `PRAGMA integrity_check` 与 SHA-256 后，才可继续编辑 live compose。备份失败时应恢复旧
 Admin 与 timer 并终止升级。首次安装不存在旧 timer、Admin 和数据卷，可直接执行下文。
 
-编辑 `/srv/news-digest/compose.yaml`，替换三处 `image:`：worker 与 admin 两处使用同一个
-worker digest，web 使用 web digest；三处必须来自同一 Release：
+编辑 `/srv/news-digest/compose.yaml`，替换四处 `image:`：worker、site 与 admin 三处使用
+同一个 worker digest，web 使用 web digest；四处必须来自同一 Release：
 
 ```yaml
 services:
@@ -202,6 +241,8 @@ services:
     image: ghcr.io/OWNER/news-digest-worker@sha256:DIGEST
   web:
     image: ghcr.io/OWNER/news-digest-web@sha256:DIGEST
+  site:
+    image: ghcr.io/OWNER/news-digest-worker@sha256:DIGEST
   admin:
     image: ghcr.io/OWNER/news-digest-worker@sha256:DIGEST
 ```
@@ -223,8 +264,10 @@ sudo docker compose pull
 
 ## 6. 首次启动与验证
 
-bootstrap 只启动 Web/Admin，不运行 worker；部署验收使用 `/healthz` 和 Admin 登录页，
-不以首页已有刊物为前提。重复部署同样不会夹带抓取、翻译、构建或投递。
+bootstrap 只启动 Web/Site/Admin，不运行 worker；它先在回环地址验证 Web/Site `/healthz` 与
+Admin 登录页，三项全过后才 reload 公网 Nginx，最后才恢复 timer 与 wakeup path。任一回环
+健康门禁失败都不会切换公网或恢复调度。验收不以首页已有刊物为前提；重复部署同样不会夹带
+抓取、翻译、构建或投递。
 
 已有 `news-digest_news-data` 卷时，bootstrap 会在启动 Admin/worker 前使用已拉取的 worker
 镜像执行 SQLite online backup：源库按只读 URI 打开，备份通过 `PRAGMA integrity_check`
@@ -236,12 +279,54 @@ bootstrap 只启动 Web/Admin，不运行 worker；部署验收使用 `/healthz`
 
 ```bash
 cd /srv/news-digest
-sudo docker compose up -d web admin            # admin 为配置与投递面板常驻服务（§13）
+sudo docker compose up -d web site admin       # site 为公开读者/付费墙服务，admin 为管理面板
 curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
+curl -fsS http://127.0.0.1:8620/healthz        # 公开读者站点，期望输出 ok
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
-sudo docker compose ps                         # web 应为 healthy，admin 应为 running
+sudo docker compose ps                         # web healthy，site/admin running
 sudo systemctl start news-digest.timer news-digest-wakeup.path
 ```
+
+v1.4.0 首次启用账号与付费阅读时，先在服务器
+`/srv/news-digest/config/.env` 配置已部署的 EasyPay 兼容网关：
+
+```dotenv
+EPAY_ENABLED=true
+EPAY_API_BASE=https://pays.example.com/epay
+EPAY_PID=YOUR_MERCHANT_ID
+EPAY_PKEY=YOUR_MERCHANT_KEY
+EPAY_PAYMENT_TYPE=alipay
+EPAY_ORDER_TTL_SECONDS=300
+EPAY_AMOUNT_HOLD_SECONDS=3600
+```
+
+`EPAY_PKEY` 只保存在 root 所有、权限 `600` 的服务器配置文件中，不得写入
+Git 或命令行历史；Admin 只显示是否已保存，不回显明文。`EPAY_API_BASE` 与 `NEWS_SITE_URL`
+在生产环境必须使用 HTTPS。站点按 `sub2api` 的 API 模式向 `${EPAY_API_BASE}/mapi.php`
+发送服务端 POST，不使用会在 URL 暴露签名参数的 `submit.php` popup 模式。异步通知地址为
+`${NEWS_SITE_URL}/subscribe/api/payment/easypay`，同步返回地址为
+`${NEWS_SITE_URL}/payment/return`。若使用 `fastpay-adapter`，还必须在 adapter 配置中加入精确
+allowlist：
+
+```dotenv
+EPAY_ADDITIONAL_NOTIFY_URLS=https://news.example.com/subscribe/api/payment/easypay
+```
+
+金额匹配使用折后基准价 `±0.10`、步长 `0.01` 的 21 个唯一尾差槽位，优先顺序为
+`0,-0.01,+0.01,...,-0.10,+0.10`。订单默认 5 分钟过期，过期金额继续冻结 1 小时；
+同一网关交易号只能开通一张订单，重复回调不会重复增加会员时长。21 个槽位占满时
+站点明确提示稍后重试，不会复用仍在冻结期的金额。
+
+随后在 Admin 的“用户与付费”工作区完成以下配置：
+
+1. 分别填写月刊会员、年刊会员基准价（单位为元）和 `0–100%` 折扣；保存后从公网 `/subscribe` 核对划线原价、绿色折扣标识和折后现价。
+2. 先保持付费墙关闭，使用测试账号验收注册验证码、登录、忘记密码、支付跳转、自动回调开通、重复回调幂等和卡密兑换。
+3. 在 Admin“支付订单”核对商户订单号、基准/实付金额、尾差、网关交易号、截止时间和错误代码；正常订单没有人工审批按钮。
+4. 核对付费账号可读全部正文、免费账号仅可读最新一期首篇且归档正文锁定后，再开启付费墙。
+
+每日简报只允许有效付费会员为自己的已验证注册邮箱启停；会员到期会自动失去投递资格，
+续费后保留原有选择。验证码邮件与刊物邮件复用已保存的 SMTP 服务但使用不同模板；真实发送前
+应先在“邮件设置”完成连接和测试邮件验收。
 
 登录 Admin 新增并测试翻译档案、设为唯一默认后，可等待 08:00 timer，或由操作员另行执行
 `sudo docker compose run --rm worker` 生成首刊。该命令属于运行操作，不属于部署步骤。
@@ -356,9 +441,9 @@ sudo docker run --rm -v news-digest_news-site:/site:ro -v /srv/news-digest/backu
 
 ```bash
 cd /srv/news-digest
-sudoedit compose.yaml                 # 把三处 image 的 digest 改回上一条（worker 与 admin 共用 worker 镜像引用，须一并改）
+sudoedit compose.yaml                 # 把四处 image 的 digest 改回上一条（worker、site、admin 共用 worker digest）
 sudo docker compose pull
-sudo docker compose up -d web admin   # web 与面板立即回滚
+sudo docker compose up -d web site admin   # web、公开站点与面板立即回滚
 # worker 无需额外操作：下次 timer 触发即按 compose 中的（旧）digest 运行
 ```
 
@@ -372,7 +457,8 @@ SHA-256 与 `PRAGMA integrity_check` 后再手工恢复；不得自动选择“�
 ```bash
 journalctl -u news-digest.service --since today     # 每日任务结果（退出码非 0 即失败）
 sudo docker compose -f /srv/news-digest/compose.yaml logs web --tail 50
-sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
+sudo docker compose -f /srv/news-digest/compose.yaml logs site --tail 50
+sudo docker compose -f /srv/news-digest/compose.yaml ps   # web healthy，site/admin running
 ```
 
 容器日志已限量轮转（json-file 10m x 3）；宿主机 Nginx 日志走发行版自带 logrotate。
@@ -392,8 +478,8 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
   挂载，以及预览/指定刊期投递读取同一 release manifest。
 - 在 Admin 中由用户明确确认一次真实 provider 固定 `Hi` 测试、SMTP 连接测试和测试邮件；
   默认离线验收不访问这些真实服务。
-- 公开订阅仅在 HTTPS、SMTP 和 `EMAIL_DELIVERY_ENABLED=true` 均就绪时开启；验证
-  double opt-in、`/privacy/`、RFC 8058 one-click 退订及 token 路径不写 access log。
+- 会员简报仅在 HTTPS、SMTP 和 `EMAIL_DELIVERY_ENABLED=true` 均就绪时开放；验证只有
+  active 且未到期会员可启停、到期停止投递、续费恢复资格，以及 RFC 8058 one-click 退订。
 - 首次 `docker compose run` 的 GHCR 拉取、DNS、出网代理等网络实况。
 
 ## 13. Admin 管理面板
@@ -418,15 +504,15 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web 应 healthy
   worker 明确失败，不回退到残留 `.env`。设默认前若未测试或结果过期，Admin 强确认。
 - **测试连接**：确认后只发送一次固定 `Hi`、2 字符输入、最多 8 output tokens 的真实
   生成请求，可能计费；正式翻译与测试复用同一 URL/header/payload/parser adapter。
-- **邮件与订阅**：配置 SMTP、订阅名单和内容组合，执行不发信的连接测试、需确认的测试
-  邮件、预览、指定刊期人工投递及 failed/unknown 状态处理；公开订阅默认关闭。
+- **邮件与订阅**：配置 SMTP、会员简报名单和内容组合，执行不发信的连接测试、需确认的测试
+  邮件、预览、指定刊期人工投递及 failed/unknown 状态处理；非付费账号不得进入正式投递。
 - **正式邮件语义**：刊物与刊物测试邮件仅发送 UTF-8 `text/plain`，Admin 的 HTML 仅用于页面预览，不进入 SMTP；正式订阅刊物同时带 `List-Unsubscribe` 与 RFC 8058 one-click 头。SMTP 部分拒收逐人记
   `failed`，DATA 后断连等可能已送达情形记 `unknown` 且不自动重试；全部拒收或归档失败
   使本次 run 失败，归档失败不回滚已经成功的收件人状态。
-- **开启公开订阅**：完成 HTTPS、SMTP、发件身份、测试邮件和 `/privacy/` 核验后，在
-  `config/.env` 设置 `PUBLIC_SUBSCRIPTION_ENABLED=true`；提交端点逐请求读取该开关，Admin
-  无需重启。再执行 `docker compose run --rm worker build` 让首页生成订阅表单。Admin
-  不管理该生产就绪门。
+- **开启会员简报**：完成 HTTPS、SMTP、发件身份、测试邮件和 `/privacy/` 核验后开启
+  `EMAIL_DELIVERY_ENABLED=true`。读者在会员订阅/账户页为已验证注册邮箱启停；服务端再次
+  校验账号 active 且会员未到期。配置保存后新请求即时生效，Admin 无需重启；匿名 public
+  double opt-in 不再是 v1.4 的订阅入口。
 - **密钥展示保护**：页面与接口响应不返回密钥；密钥经 HTTPS + 登录会话提交，
   只落 `${APP_DIR}/config/providers.json`（root:10001，权限 640）。也可登录服务器直接编辑该
   文件，保存后刷新面板即可见，同样无需重启。格式：

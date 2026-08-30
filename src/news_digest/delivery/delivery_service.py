@@ -219,7 +219,11 @@ def preview_published(
     if smtp_config is not None:
         conn = db.connect(database)
         try:
-            recipients = db.active_subscription_recipients(conn)
+            recipients = (
+                db.active_subscription_recipients(conn)
+                if test
+                else db.paid_subscription_recipients(conn, _utc_iso(now))
+            )
         finally:
             conn.close()
     message = build_email_message(
@@ -262,16 +266,19 @@ def _recipient_selection(
             if (state := db.subscription_by_email(conn, address)) is not None
             and state.status == "active"
         )
-    db.ensure_delivery_recipients(conn, release_date, all_recipients, now_iso)
     if mode == "retry_failed":
-        return db.eligible_delivery_recipients(conn, release_date, retry_failed_only=True)
+        return db.eligible_delivery_recipients(
+            conn, release_date, now_iso, retry_failed_only=True
+        )
     if mode == "retry_unknown":
-        recipients = db.unknown_delivery_recipients(conn, release_date)
+        recipients = db.unknown_delivery_recipients(conn, release_date, now_iso)
         if not recipients:
             return ()
         db.reset_unknown_deliveries(conn, release_date, recipients, now_iso)
         return recipients
-    return db.eligible_delivery_recipients(conn, release_date)
+    recipients = db.eligible_delivery_recipients(conn, release_date, now_iso)
+    db.ensure_delivery_recipients(conn, release_date, recipients, now_iso)
+    return recipients
 
 
 def _outcome(results: list[RecipientDeliveryResult], skipped: int) -> str:
@@ -506,8 +513,12 @@ def deliver_published(
                     smtp_factory=smtp_factory,
                     resolver=resolver,
                     pre_send_check=lambda recipient=recipient: (
-                        (state := db.subscription_by_email(conn, recipient)) is not None
-                        and state.status == "active"
+                        (
+                            (state := db.subscription_by_email(conn, recipient)) is not None
+                            and state.status == "active"
+                        )
+                        if mode == "test"
+                        else db.paid_subscription_recipient_active(conn, recipient, now_iso)
                     ),
                 )
             except BaseException:

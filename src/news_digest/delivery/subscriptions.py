@@ -334,10 +334,12 @@ def active_recipients(conn) -> tuple[str, ...]:
 
 
 def delivery_recipients(
-    conn, edition_date: str, *, retry_failed_only: bool = False
+    conn, edition_date: str, now: dt.datetime, *, retry_failed_only: bool = False
 ) -> tuple[str, ...]:
-    """Select active recipients while respecting per-edition sent/failed/unknown state."""
-    return db.eligible_delivery_recipients(conn, edition_date, retry_failed_only=retry_failed_only)
+    """Select paid active recipients while respecting per-edition delivery state."""
+    return db.eligible_delivery_recipients(
+        conn, edition_date, _utc_iso(now), retry_failed_only=retry_failed_only
+    )
 
 
 def admin_subscription_list(conn) -> list[db.AdminSubscriptionState]:

@@ -74,13 +74,21 @@ class FakeTranslator:
     def translate(self, article) -> str:
         import json
 
+        from news_digest.translation.quality import extract_en_values
+
+        def zh_sentence(sentence: str) -> str:
+            # 内容质量门要求原文数值保值保留;替身译文按句回显数值。
+            numbers = extract_en_values(sentence)
+            digits = "、".join(f"{value:g}" for _unit, value in numbers)
+            return f"中文句子（{digits}）。" if digits else "中文句子。"
+
         self.calls += 1
         return json.dumps(
             {
                 "title_zh": "中文标题：测试",
                 "summary_zh": "中文摘要。",
                 "sentences_zh": [
-                    ["中文句子。"] * len(split_sentences(paragraph.en))
+                    [zh_sentence(sentence) for sentence in split_sentences(paragraph.en)]
                     for paragraph in article.paragraphs
                 ],
                 "vocabulary": [

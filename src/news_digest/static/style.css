@@ -136,6 +136,11 @@ a:hover { text-decoration-color: var(--cinnabar); }
 .topnav-links .subscribe-entry, .topnav-links .support-entry {
   color: var(--cinnabar); font-weight: 700; border-bottom-color: rgba(174, 47, 36, 0.28);
 }
+.topnav-links .member-entry {
+  color: #116b39;
+  border-bottom-color: #178447;
+  font-weight: 700;
+}
 .topnav-links .subscribe-entry:hover, .topnav-links .support-entry:hover {
   border-bottom-color: var(--cinnabar);
 }
@@ -385,13 +390,32 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
   to { opacity: 1; transform: translateY(0); }
 }
 
-.issue-nav {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem;
-  margin-top: 2rem; font-family: var(--font-data); font-size: 0.8125rem;
+.edition-picker {
+  display: flex; align-items: end; gap: 0.65rem; max-width: 24rem;
+  margin-top: 2rem; padding-top: 1rem; border-top: 3px double var(--ink);
+  font-family: var(--font-ui);
 }
-.issue-link { padding: 0.15rem 0.4rem; transition: background 0.18s ease, color 0.18s ease; }
-.issue-link:hover { background: var(--panel); }
-.issue-link.is-current { background: var(--ink); color: var(--paper); }
+.edition-picker-field { display: grid; flex: 1; min-width: 0; gap: 0.35rem; }
+.edition-picker .filter-label { margin: 0; }
+.edition-picker select, .edition-picker button {
+  min-height: 2.65rem; border: 1px solid var(--rule); border-radius: 0;
+  font: 0.875rem/1.2 var(--font-data);
+}
+.edition-picker select {
+  width: 100%; min-width: 0; padding: 0.55rem 2rem 0.55rem 0.7rem;
+  background: #fff; color: var(--ink);
+}
+.edition-picker button {
+  padding: 0.55rem 0.9rem; background: var(--ink); color: var(--paper);
+  border-color: var(--ink); cursor: pointer; font-family: var(--font-ui); font-weight: 700;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.1s ease;
+}
+.edition-picker button:hover { background: var(--cinnabar); border-color: var(--cinnabar); }
+.edition-picker button:active { transform: translateY(1px); }
+.edition-picker select:focus-visible, .edition-picker button:focus-visible {
+  outline: 3px solid rgba(174, 47, 36, 0.25); outline-offset: 2px;
+}
+.archive-picker { margin: 0 0 1.5rem; }
 
 /* ── 文章页 ─────────────────────────────────────────── */
 .story { max-width: var(--measure); margin: 0 auto; }
@@ -618,4 +642,6 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   .issue-meta-line { min-width: 0; }
   .subscribe { padding: 1.3rem 1rem; }
   .subscribe-fields { display: grid; gap: 0.5rem; }
+  .edition-picker { display: grid; max-width: none; }
+  .edition-picker button { width: 100%; }
 }

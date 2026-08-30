@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime as dt
 import hashlib
 import hmac
@@ -22,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from news_digest import accounts, admin_payments, payments
 from news_digest.admin_email import (
     AdminEmailError,
     clear_password,
@@ -87,11 +90,100 @@ _APR1_CHARS = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _SESSION_TTL_SECONDS = 7 * 24 * 3600
 _SESSION_COOKIE = "nd_admin_session"
 _PUBLIC_CSRF_COOKIE = "nd_public_csrf"
+_SITE_ADMIN_DUMMY_PASSWORD_HASH = accounts.hash_password("admin-login-timing-equalizer")
+
+_QR_DATA_HEADERS = {
+    "data:image/png;base64": b"\x89PNG\r\n\x1a\n",
+    "data:image/jpeg;base64": b"\xff\xd8\xff",
+    "data:image/webp;base64": b"RIFF",
+}
+
+
+def _validated_qr_data_url(value: object) -> str:
+    qr = str(value)
+    if not qr:
+        return ""
+    header, separator, encoded = qr.partition(",")
+    signature = _QR_DATA_HEADERS.get(header.lower())
+    if not separator or signature is None:
+        raise ValueError("QR 仅支持 PNG、JPEG 或 WebP 数据 URL")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("QR 数据不是有效的 Base64 图片") from None
+    if not payload:
+        raise ValueError("QR 图片不能为空")
+    if not payload.startswith(signature):
+        raise ValueError("QR 图片内容与声明的 MIME 类型不一致")
+    if header.lower() == "data:image/webp;base64" and (
+        len(payload) < 12 or payload[8:12] != b"WEBP"
+    ):
+        raise ValueError("QR 图片内容与声明的 MIME 类型不一致")
+    return qr
 _PUBLIC_CSRF_TTL_SECONDS = 2 * 3600
 _PUBLIC_BODY_LIMIT = 1_024
 _PUBLIC_EMAIL_LIMIT = 254
+
+
+def _request_origin(value: str) -> tuple[str, str, int]:
+    if not value or "\\" in value or any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
+        raise ValueError("request origin is invalid")
+    parts = urlsplit(value)
+    if (
+        parts.scheme not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError("request origin is invalid")
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError("request origin is invalid") from None
+    return (
+        parts.scheme,
+        parts.hostname.casefold(),
+        port or (443 if parts.scheme == "https" else 80),
+    )
+
+
+def _request_host(host: str, scheme: str) -> tuple[str, str, int] | None:
+    if (
+        not host
+        or "," in host
+        or "/" in host
+        or "\\" in host
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in host)
+    ):
+        return None
+    try:
+        parts = urlsplit(f"{scheme}://{host}")
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+    ):
+        return None
+    return (
+        scheme,
+        parts.hostname.casefold(),
+        port or (443 if scheme == "https" else 80),
+    )
 _PUBLIC_TOKEN_LIMIT = 512
 _BODY_LIMIT = 16_384
+_SITE_SETTINGS_BODY_LIMIT = 20 * 1024 * 1024
 _TEST_MAX_AGE_SECONDS = 24 * 3600
 _PREVIEW_TEXT_LIMIT = 40_000
 _PREVIEW_HTML_LIMIT = 120_000
@@ -266,6 +358,8 @@ class _AdminServer(ThreadingHTTPServer):
     db_path: Path | None
     translation_db_path: Path | None
     site_url: str
+    admin_origin: tuple[str, str, int]
+    public_origin: tuple[str, str, int]
     output_root: Path | None
     timezone: str
     public_secret: bytes
@@ -285,12 +379,23 @@ class _AdminServer(ThreadingHTTPServer):
     smtp_lock: threading.Lock
     state_lock: threading.Lock
     manual_previews: dict[str, tuple[float, str, str]]
+    site_env_path: Path | None
 
 
 class PreviewHandler(SimpleHTTPRequestHandler):
     """Static site plus authenticated ``/admin`` HTML and JSON API."""
 
     server: _AdminServer
+
+    def _sync_site_environment(self) -> None:
+        if self.server.site_env_path is None:
+            return
+        from news_digest.site_config import sync_site_environment
+
+        try:
+            sync_site_environment(self._env_path(), self.server.site_env_path)
+        except OSError:
+            raise ValueError("Site 配置投影写入失败") from None
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         pass
@@ -313,11 +418,34 @@ class PreviewHandler(SimpleHTTPRequestHandler):
     def _authed(self) -> bool:
         if not self._login_required:
             return True
+        return self._root_session_subject() is not None or self._site_admin_user() is not None
+
+    def _root_session_subject(self) -> str | None:
         token = self._session_token()
-        if not token:
-            return False
+        if not token or self.server.htpasswd_file is None:
+            return None
         secret_file = self.server.htpasswd_file.parent / "session-secret"
-        return _verify_session(_session_secret(secret_file), token)
+        if not _verify_session(_session_secret(secret_file), token):
+            return None
+        return token.partition("|")[0] or None
+
+    def _site_admin_user(self) -> db.User | None:
+        token = self._session_token()
+        if self.server.db_path is None or not 32 <= len(token) <= 256:
+            return None
+        conn = db.connect(self.server.db_path)
+        try:
+            user_id = db.user_session_owner(
+                conn,
+                token_digest=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                now=dt.datetime.now(dt.UTC).isoformat(),
+            )
+            user = db.user_by_id(conn, user_id) if user_id is not None else None
+        finally:
+            conn.close()
+        if user is None or user.status != "active" or not user.is_admin:
+            return None
+        return user
 
     def _valid_csrf(self) -> bool:
         if not self._login_required:
@@ -331,24 +459,39 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     def _same_origin(self) -> bool:
         origin = self.headers.get("Origin", "")
-        host = self.headers.get("Host", "")
-        if not origin or not host or "," in origin or "," in host:
+        if not origin or not self._admin_request_host_valid():
             return False
+        if origin == "null":
+            return (
+                self.server.loopback_browser_compat
+                and self.server.admin_origin[1] == "127.0.0.1"
+            )
         try:
-            parts = urlsplit(origin)
-            _ = parts.port
+            return _request_origin(origin) == self.server.admin_origin
         except ValueError:
             return False
-        return (
-            parts.scheme in {"http", "https"}
-            and bool(parts.hostname)
-            and parts.username is None
-            and parts.password is None
-            and not parts.path
-            and not parts.query
-            and not parts.fragment
-            and parts.netloc.casefold() == host.casefold()
-        )
+
+    def _admin_request_host_valid(self) -> bool:
+        values = self.headers.get_all("Host", [])
+        if len(values) != 1:
+            return False
+        if self.server.admin_origin[1] == "127.0.0.1":
+            return values[0] == f"127.0.0.1:{self.server.server_port}"
+        return _request_host(values[0], self.server.admin_origin[0]) == self.server.admin_origin
+
+    def _public_same_origin(self) -> bool:
+        origin = self.headers.get("Origin", "")
+        if not origin or not self._public_request_host_valid():
+            return False
+        if origin == "null":
+            return (
+                self.server.loopback_browser_compat
+                and self.server.public_origin[1] == "127.0.0.1"
+            )
+        try:
+            return _request_origin(origin) == self.server.public_origin
+        except ValueError:
+            return False
 
     def _csrf_for_response(self) -> str:
         if not self._login_required:
@@ -358,11 +501,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         return _csrf_token(_session_secret(secret_file), token)
 
     def _admin_actor(self) -> str:
-        token = self._session_token()
-        if token:
-            username = token.partition("|")[0]
-            if username:
-                return username[:128]
+        root_subject = self._root_session_subject()
+        if root_subject:
+            return root_subject[:128]
+        user = self._site_admin_user()
+        if user is not None:
+            return f"site-user:{user.id}"
         return "local-admin"
 
     def _valid_public_csrf(self, token: str) -> bool:
@@ -417,7 +561,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-            "object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            "img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
         )
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -445,6 +589,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         if path == "/admin/api/subscriptions":
             self._handle_subscriptions_get()
+            return
+        if path == "/admin/api/site/overview":
+            self._handle_site_overview()
             return
         if path == "/admin/api/translations":
             self._handle_translations_get(parse_qs(urlsplit(self.path).query).get("edition", [None])[0])
@@ -487,7 +634,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self._json(411, {"error": "Content-Length 无效"})
             return
-        if length < 0 or length > _BODY_LIMIT:
+        body_limit = (
+            _SITE_SETTINGS_BODY_LIMIT if path == "/admin/api/site/settings" else _BODY_LIMIT
+        )
+        if length < 0 or length > body_limit:
             self._json(413, {"error": "请求过大"})
             return
         try:
@@ -511,6 +661,18 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(403, {"error": "CSRF token 无效"})
             return
         if path == "/admin/api/logout":
+            if self.server.db_path is not None:
+                conn = db.connect(self.server.db_path)
+                try:
+                    db.revoke_user_session(
+                        conn,
+                        token_digest=hashlib.sha256(
+                            self._session_token().encode("utf-8")
+                        ).hexdigest(),
+                        now=dt.datetime.now(dt.UTC).isoformat(),
+                    )
+                finally:
+                    conn.close()
             self._set_session_cookie("", 0)
         elif path == "/admin/api/password":
             self._limited("password", lambda: self._handle_password(body))
@@ -540,10 +702,43 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._limited("subscription-enable", lambda: self._handle_subscription_enable(body))
         elif path == "/admin/api/subscriptions/delete":
             self._limited("subscription-delete", lambda: self._handle_subscription_delete(body))
+        elif path == "/admin/api/site/user-status":
+            self._limited("site-user-status", lambda: self._handle_site_user_status(body))
+        elif path == "/admin/api/site/user-admin":
+            self._limited("site-user-admin", lambda: self._handle_site_user_admin(body))
+        elif path == "/admin/api/site/user-grant":
+            self._limited("site-user-grant", lambda: self._handle_site_user_grant(body))
+        elif path == "/admin/api/site/user-subscription-clear":
+            self._limited(
+                "site-user-subscription-clear",
+                lambda: self._handle_site_user_subscription_clear(body),
+            )
+        elif path == "/admin/api/site/order-decide":
+            self._limited("site-order", lambda: self._handle_site_order_decide(body))
+        elif path == "/admin/api/site/codes":
+            self._limited("site-codes", lambda: self._handle_site_codes_create(body))
+        elif path == "/admin/api/site/code-delete":
+            self._limited("site-codes", lambda: self._handle_site_code_delete(body))
+        elif path == "/admin/api/site/settings":
+            self._limited("site-settings", lambda: self._handle_site_settings(body))
+        elif path == "/admin/api/site/payment-settings":
+            self._limited(
+                "site-payment-settings", lambda: self._handle_site_payment_settings(body)
+            )
+        elif path == "/admin/api/site/payment-clear-pkey":
+            self._limited(
+                "site-payment-settings", lambda: self._handle_site_payment_clear_pkey(body)
+            )
+        elif path == "/admin/api/site/payment-reconcile":
+            self._limited(
+                "site-payment-reconcile", lambda: self._handle_site_payment_reconcile(body)
+            )
         elif path == "/admin/api/translations/dispatch":
             self._limited("translation-dispatch", lambda: self._handle_translation_dispatch(body))
         elif path == "/admin/api/translations/retry":
             self._limited("translation-retry", lambda: self._handle_translation_retry(body))
+        elif path == "/admin/api/translations/retry-edition":
+            self._limited("translation-retry", lambda: self._handle_translation_retry_edition(body))
         elif path == "/admin/api/translations/cancel":
             self._limited("translation-cancel", lambda: self._handle_translation_cancel(body))
         elif path == "/admin/api/translations/probe":
@@ -585,7 +780,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "providers": providers,
                 "active": defaults[0] if defaults else "",
                 "csrf_token": self._csrf_for_response(),
-                "can_change_password": self.server.htpasswd_file is not None,
+                "can_change_password": self._root_session_subject() is not None,
             },
         )
 
@@ -600,12 +795,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         return subscriptions.public_https_base(self.server.site_url)
 
     def _public_request_host_valid(self) -> bool:
-        host = self.headers.get("Host", "")
-        if not host or "," in host:
+        values = self.headers.get_all("Host", [])
+        if len(values) != 1:
             return False
+        host = values[0]
         if self.server.loopback_public_subscription:
             return host == f"127.0.0.1:{self.server.server_port}"
-        return True
+        return _request_host(host, self.server.public_origin[0]) == self.server.public_origin
 
     def _public_submission_ready(self) -> bool:
         if not self.server.public_subscription_enabled or not self._public_endpoint_ready():
@@ -673,7 +869,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if not self._public_request_host_valid():
             self._json(403, {"message": _PUBLIC_SUBMISSION_MESSAGE})
             return
-        if not self._same_origin():
+        if not self._public_same_origin():
             self._json(403, {"message": _PUBLIC_SUBMISSION_MESSAGE})
             return
         content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
@@ -915,6 +1111,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 published_brief_count=brief_count,
                 resolver=self.server.resolver,
             )
+            self._sync_site_environment()
         except (AdminEmailError, DeliveryServiceError, ValueError) as error:
             self._safe_error(error)
             return
@@ -926,6 +1123,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             clear_password(self._env_path(), confirm=body.get("confirm") is True)
+            self._sync_site_environment()
         except AdminEmailError as error:
             self._safe_error(error)
             return
@@ -1328,6 +1526,448 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         self._json(200, self._preview_payload(preview))
 
+    def _site_db(self):
+        if self.server.db_path is None:
+            self._json(503, {"error": "站点数据库未配置", "category": "configuration"})
+            return None
+        return db.connect(self.server.db_path)
+
+    def _handle_site_overview(self) -> None:
+        if not self._authed():
+            self._json(401, {"error": "未登录"})
+            return
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            db.expire_payment_orders(conn, now=dt.datetime.now(dt.UTC).isoformat())
+            users = db.list_users(conn)
+            orders = db.list_orders(conn)
+            codes = db.list_redemption_codes(conn)
+            settings = {
+                key: (
+                    db.get_setting(conn, key)
+                    if db.get_setting(conn, key) is not None
+                    else default
+                )
+                for key, default in accounts.DEFAULT_SETTINGS.items()
+            }
+        finally:
+            conn.close()
+        try:
+            payment = admin_payments.settings_payload(
+                read_env(self._env_path()), self.server.site_url
+            )
+        except (TypeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "configuration"})
+            return
+        self._json(
+            200,
+            {
+                "users": [
+                    {
+                        "id": user.id,
+                        "email": user.email,
+                        "status": user.status,
+                        "is_admin": user.is_admin,
+                        "plan": user.plan,
+                        "paid_until": user.paid_until,
+                        "created_at": user.created_at,
+                    }
+                    for user in users
+                ],
+                "orders": [
+                    {
+                        "id": order.id,
+                        "user_id": order.user_id,
+                        "plan": order.plan,
+                        "base_amount_cents": order.base_amount_cents,
+                        "amount_cents": order.amount_cents,
+                        "amount_offset_cents": order.amount_offset_cents,
+                        "merchant_order_no": order.merchant_order_no,
+                        "provider_trade_no": order.provider_trade_no,
+                        "expires_at": order.expires_at,
+                        "settlement_expires_at": order.settlement_expires_at,
+                        "payment_type": order.payment_type,
+                        "paid_at": order.paid_at,
+                        "last_error_code": order.last_error_code,
+                        "status": order.status,
+                        "admin_actor": order.admin_actor,
+                        "created_at": order.created_at,
+                    }
+                    for order in orders
+                ],
+                "codes": [
+                    {
+                        "id": code.id,
+                        "prefix": code.prefix,
+                        "code": code.code_plaintext if code.status == "unused" else None,
+                        "plan": code.plan,
+                        "status": code.status,
+                        "note": code.note,
+                        "created_at": code.created_at,
+                    }
+                    for code in codes
+                ],
+                "settings": settings,
+                "payment": payment,
+                "csrf_token": self._csrf_for_response(),
+            },
+        )
+
+    def _handle_site_user_status(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            user_id = int(body.get("user_id"))
+            status = body.get("status")
+            if status not in {"active", "disabled"}:
+                raise ValueError("status 只能是 active 或 disabled")
+            user = db.set_user_status(
+                conn, user_id, status=status, now=dt.datetime.now(dt.UTC).isoformat()
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "status": user.status})
+
+    def _handle_site_user_admin(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            if set(body) != {"user_id", "is_admin", "confirm"}:
+                raise ValueError("user_id、is_admin 与 confirm 为必填字段")
+            if type(body.get("user_id")) is not int or type(body.get("is_admin")) is not bool:
+                raise ValueError("user_id 或 is_admin 非法")
+            if body.get("confirm") is not True:
+                raise ValueError("管理员角色变更需要 confirm=true")
+            user = db.set_user_admin(
+                conn,
+                body["user_id"],
+                is_admin=body["is_admin"],
+                now=dt.datetime.now(dt.UTC).isoformat(),
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "is_admin": user.is_admin})
+
+    def _handle_site_user_grant(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            if set(body) != {"user_id", "plan", "days"}:
+                raise ValueError("user_id、plan 与 days 为必填字段")
+            user_id = body.get("user_id")
+            plan = body.get("plan")
+            days = body.get("days")
+            if (
+                type(user_id) is not int
+                or plan not in accounts.PLANS
+                or type(days) is not int
+                or not 1 <= days <= 3660
+            ):
+                raise ValueError("plan 或 days 非法")
+            now = dt.datetime.now(dt.UTC)
+            existing = db.user_by_id(conn, user_id)
+            if existing is None:
+                raise RuntimeError("user does not exist")
+            current_expiry = accounts.parse_paid_until(existing.paid_until)
+            base = current_expiry if current_expiry is not None and current_expiry > now else now
+            until = (base + dt.timedelta(days=days)).isoformat()
+            user = db.grant_paid_until(
+                conn, user_id, plan=plan, paid_until=until, now=now.isoformat()
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(
+            200,
+            {"ok": True, "plan": user.plan, "days_added": days, "paid_until": user.paid_until},
+        )
+
+    def _handle_site_user_subscription_clear(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            if set(body) != {"user_id", "confirm"}:
+                raise ValueError("user_id 与 confirm 为必填字段")
+            if type(body.get("user_id")) is not int or body.get("confirm") is not True:
+                raise ValueError("清除订阅需要合法 user_id 与 confirm=true")
+            user = db.clear_user_subscription(
+                conn, body["user_id"], now=dt.datetime.now(dt.UTC).isoformat()
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "plan": user.plan, "paid_until": user.paid_until})
+
+    def _handle_site_order_decide(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            if set(body) != {"order_id", "approve"} or not isinstance(
+                body.get("approve"), bool
+            ):
+                raise ValueError("order_id 与布尔 approve 为必填字段")
+            order_id = int(body.get("order_id"))
+            approve = body["approve"]
+            order = db.decide_order(
+                conn,
+                order_id,
+                approve=approve,
+                admin_actor=self._admin_actor(),
+                now=dt.datetime.now(dt.UTC).isoformat(),
+                plan_days=accounts.PLAN_DAYS,
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "status": order.status})
+
+    def _handle_site_codes_create(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            plan = body.get("plan")
+            count = int(body.get("count", 1))
+            note = (body.get("note") or "")[:200] or None
+            if plan not in accounts.PLANS or not 1 <= count <= 50:
+                raise ValueError("plan 或 count 非法")
+            plaintext = []
+            attempts = 0
+            while len(plaintext) < count and attempts < count * 20:
+                attempts += 1
+                code = accounts.generate_redemption_code()
+                created = db.create_redemption_code_if_available(
+                    conn,
+                    code_digest=accounts.redemption_digest(code),
+                    prefix=accounts.redemption_prefix(code),
+                    code_plaintext=code,
+                    plan=plan,
+                    note=note,
+                    created_by=self._admin_actor(),
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                )
+                if created:
+                    plaintext.append(code)
+            if len(plaintext) != count:
+                raise RuntimeError("卡密生成冲突过多，请稍后重试")
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "codes": plaintext})
+
+    def _handle_site_code_delete(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            code_id = int(body.get("code_id"))
+            db.delete_redemption_code(conn, code_id)
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True})
+
+    def _handle_site_settings(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            entries = {}
+            if "paywall_enabled" in body:
+                if type(body["paywall_enabled"]) is not bool:
+                    raise ValueError("paywall_enabled 非法")
+                entries["paywall_enabled"] = (
+                    "true" if body["paywall_enabled"] is True else "false"
+                )
+            for key in ("monthly_price_cents", "yearly_price_cents"):
+                if key in body:
+                    value = body[key]
+                    if type(value) is not int or not 0 <= value <= 10_000_000:
+                        raise ValueError(f"{key} 非法")
+                    entries[key] = str(value)
+            for key in ("monthly_discount_percent", "yearly_discount_percent"):
+                if key in body:
+                    value = body[key]
+                    if type(value) is not int or not 0 <= value <= 100:
+                        raise ValueError(f"{key} 非法")
+                    entries[key] = str(value)
+            if "payment_info" in body:
+                entries["payment_info"] = str(body["payment_info"])[:500]
+            if "payment_qr_data_url" in body:
+                entries["payment_qr_data_url"] = _validated_qr_data_url(
+                    body["payment_qr_data_url"]
+                )
+            if not entries:
+                raise ValueError("没有需要保存的设置")
+            current_settings = {
+                key: db.get_setting(conn, key) or default
+                for key, default in accounts.DEFAULT_SETTINGS.items()
+            }
+            candidate_settings = {**current_settings, **entries}
+            for plan in accounts.PLANS:
+                if accounts.price_cents(candidate_settings, plan) <= 10:
+                    raise ValueError("折后价格必须至少为 0.11 元")
+            db.set_settings(conn, entries, now=dt.datetime.now(dt.UTC).isoformat())
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True})
+
+    def _handle_site_payment_settings(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        now = dt.datetime.now(dt.UTC).isoformat()
+        try:
+            settlement_locked = db.begin_payment_config_update(conn, now=now)
+            payload = admin_payments.save_settings(
+                self._env_path(),
+                body,
+                self.server.site_url,
+                settlement_locked=settlement_locked,
+            )
+            config = payments.settlement_config_from_mapping(
+                {**read_env(self._env_path()), "NEWS_SITE_URL": self.server.site_url}
+            )
+            db.set_active_payment_config_id(
+                conn,
+                payment_config_id=(
+                    payments.config_identity(config) if config is not None else None
+                ),
+                now=now,
+            )
+            self._sync_site_environment()
+            conn.commit()
+        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError) as error:
+            conn.rollback()
+            self._json(409, {"error": str(error), "category": "configuration"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "payment": payload})
+
+    def _handle_site_payment_clear_pkey(self, body: dict[str, Any]) -> None:
+        if set(body) != {"confirm"} or body.get("confirm") is not True:
+            self._json(409, {"error": "必须明确确认清除 PKey", "category": "configuration"})
+            return
+        conn = self._site_db()
+        if conn is None:
+            return
+        now = dt.datetime.now(dt.UTC).isoformat()
+        try:
+            settlement_locked = db.begin_payment_config_update(conn, now=now)
+            admin_payments.clear_pkey(
+                self._env_path(), settlement_locked=settlement_locked
+            )
+            db.set_active_payment_config_id(
+                conn, payment_config_id=None, now=now
+            )
+            self._sync_site_environment()
+            conn.commit()
+        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError) as error:
+            conn.rollback()
+            self._json(409, {"error": str(error), "category": "configuration"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True, "pkey_set": False, "enabled": False})
+
+    def _handle_site_payment_reconcile(self, body: dict[str, Any]) -> None:
+        if set(body) != {"order_id"} or type(body.get("order_id")) is not int:
+            self._json(409, {"error": "订单参数无效", "category": "lifecycle"})
+            return
+        now = dt.datetime.now(dt.UTC).isoformat()
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            order = db.order_by_id(conn, body["order_id"])
+        finally:
+            conn.close()
+        if (
+            order is None
+            or order.status not in {"pending", "expired", "failed"}
+            or not order.merchant_order_no
+            or not order.settlement_expires_at
+            or order.settlement_expires_at <= now
+        ):
+            self._json(409, {"error": "订单已不可对账", "category": "lifecycle"})
+            return
+        try:
+            config = payments.settlement_config_from_mapping(
+                {**read_env(self._env_path()), "NEWS_SITE_URL": self.server.site_url}
+            )
+            if config is None or (
+                order.payment_config_id is not None
+                and payments.config_identity(config) != order.payment_config_id
+            ):
+                raise payments.PaymentError("订单结算配置不匹配")
+            result = payments.query_payment(
+                config,
+                merchant_order_no=order.merchant_order_no,
+                expected_amount_cents=order.amount_cents,
+            )
+            conn = self._site_db()
+            if conn is None:
+                return
+            try:
+                if result.trade_status == "TRADE_SUCCESS":
+                    order = db.confirm_payment_order(
+                        conn,
+                        merchant_order_no=result.merchant_order_no,
+                        provider_trade_no=result.provider_trade_no,
+                        amount_cents=result.amount_cents,
+                        now=now,
+                        amount_hold_seconds=config.amount_hold_seconds,
+                        plan_days=accounts.PLAN_DAYS,
+                    )
+                else:
+                    order = db.record_payment_query_status(
+                        conn,
+                        order_id=order.id,
+                        trade_status=result.trade_status,
+                        now=now,
+                    )
+            finally:
+                conn.close()
+        except (payments.PaymentError, RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "payment"})
+            return
+        self._json(
+            200,
+            {
+                "ok": True,
+                "order_id": order.id,
+                "status": order.status,
+                "last_error_code": order.last_error_code,
+            },
+        )
+
     def _handle_subscriptions_get(self) -> None:
         if not self._authed():
             self._json(401, {"error": "未登录"})
@@ -1611,33 +2251,20 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             )
 
             def available_actions(task: db.TranslationTask) -> list[str]:
+                # db.task_capabilities 是调度器与 Admin 的同一资格来源;
+                # 这里只做展示转换,不再自行维护判定逻辑。
                 task_provider = task_circuit(task)
                 task_circuit_state = task_provider.state if task_provider else "closed"
-                if (
-                    task.status == "running"
-                    and task.cancel_requested_at is not None
-                    and task.lease_expires_at is not None
-                    and task.lease_expires_at <= now.isoformat()
-                ):
-                    return ["recover"]
-                if task.status == "running":
-                    return ["cancel"] if task.cancel_requested_at is None else []
-                if task.status == "pending" and task_circuit_state == "closed":
-                    return ["dispatch"]
-                if task.status in {"failed", "retry_wait", "cancelled"} and task_circuit_state == "closed":
-                    return ["retry"]
-                if task_circuit_state == "configuration_blocked":
-                    return ["unblock"]
-                if task.status == "configuration_blocked" and task_circuit_state == "closed":
-                    return ["retry"]
-                if (
-                    task.status in {
-                        "pending", "failed", "retry_wait", "cancelled", "configuration_blocked"
-                    }
-                    and task_circuit_state in {"open", "half_open"}
-                ):
-                    return ["probe"]
-                return []
+                capabilities = db.task_capabilities(
+                    status=task.status,
+                    cancel_requested_at=task.cancel_requested_at,
+                    lease_expires_at=task.lease_expires_at,
+                    auto_retry=task.auto_retry,
+                    next_retry_at=task.next_retry_at,
+                    circuit_state=task_circuit_state,
+                    now=now.isoformat(),
+                )
+                return list(capabilities.actions)
 
             summary = {
                 "total": len(tasks),
@@ -1668,6 +2295,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "edition": {
                     "date": edition.edition_date,
                     "status": edition.status,
+                    # partial/build_failed 刊期提供一键批量恢复入口。
+                    "retry_edition_available": (
+                        edition.status in {"partial", "build_failed"} and summary["failed"] > 0
+                    ),
                     "error_code": (
                         edition.last_error_code
                         if edition.last_error_code in _AUTOMATION_EDITION_ERROR_CODES
@@ -1828,6 +2459,35 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "action_id": task.manual_action_id,
             },
         )
+
+    def _handle_translation_retry_edition(self, body: dict[str, Any]) -> None:
+        """刊期级一键恢复:把该刊期全部终态任务批量重新入队(消灭 partial 死端)。"""
+        if self.server.translation_db_path is None:
+            self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
+            return
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            self._json(400, {"error": "需要 confirm 确认", "category": "lifecycle"})
+            return
+        edition_date = body.get("edition_date")
+        if not isinstance(edition_date, str):
+            self._json(400, {"error": "edition_date 缺失", "category": "lifecycle"})
+            return
+        try:
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                counts = db.retry_edition_failed_tasks(
+                    conn,
+                    edition_date,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    actor=self._admin_actor(),
+                )
+            finally:
+                conn.close()
+        except (RuntimeError, ValueError) as error:
+            self._json(409, {"error": str(error), "category": "lifecycle"})
+            return
+        self.server.translation_wakeup_callback()
+        self._json(202, {"ok": True, "queued": counts["queued"], "skipped": counts["skipped"]})
 
     def _handle_translation_dispatch(self, body: dict[str, Any]) -> None:
         if self.server.translation_db_path is None:
@@ -2263,7 +2923,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     def _handle_public_confirm(self, raw_token: str) -> None:
         token = self._public_token(raw_token)
-        if self._public_endpoint_ready() and token:
+        if self._public_endpoint_ready() and self._public_request_host_valid() and token:
             conn = db.connect(self.server.db_path)
             try:
                 subscriptions.confirm_subscription(conn, token, dt.datetime.now(dt.UTC))
@@ -2283,6 +2943,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     def _handle_unsubscribe_post(self, raw_token: str) -> None:
         token = self._public_token(raw_token)
+        if not self._public_request_host_valid():
+            self._html(_public_result_page("退订", _PUBLIC_UNSUBSCRIBE_MESSAGE), 403)
+            return
         content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
         length, length_error = self._public_length(64)
         valid_body = False
@@ -2307,10 +2970,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 conn.close()
         self._html(_public_result_page("退订", _PUBLIC_UNSUBSCRIBE_MESSAGE))
 
-    def _limited(self, action: str, callback: Callable[[], None]) -> None:
-        if not self._consume_sensitive_limit(action):
-            self._json(429, {"error": "敏感操作过于频繁，请稍后重试"})
-            return
+    def _limited(self, _action: str, callback: Callable[[], None]) -> None:
         callback()
 
     def _set_session_cookie(self, token: str, max_age: int) -> None:
@@ -2336,18 +2996,53 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         username = str(body.get("username", "")).strip()
         password = str(body.get("password", ""))
-        if not verify_htpasswd(self.server.htpasswd_file, username, password):
-            time.sleep(0.1)
-            self._json(401, {"error": "用户名或口令不正确"})
+        if verify_htpasswd(self.server.htpasswd_file, username, password):
+            secret_file = self.server.htpasswd_file.parent / "session-secret"
+            secret = _session_secret(secret_file)
+            expires_at = int(time.time()) + _SESSION_TTL_SECONDS
+            self._set_session_cookie(
+                _sign_session(secret, username, expires_at), _SESSION_TTL_SECONDS
+            )
             return
-        secret_file = self.server.htpasswd_file.parent / "session-secret"
-        secret = _session_secret(secret_file)
-        expires_at = int(time.time()) + _SESSION_TTL_SECONDS
-        self._set_session_cookie(_sign_session(secret, username, expires_at), _SESSION_TTL_SECONDS)
+
+        user = None
+        if self.server.db_path is not None:
+            try:
+                key = accounts.email_key(accounts.normalize_email(username))
+            except accounts.AccountError:
+                key = ""
+            conn = db.connect(self.server.db_path)
+            try:
+                user = db.user_by_email_key(conn, key) if key else None
+            finally:
+                conn.close()
+        stored = user.password_hash if user is not None else _SITE_ADMIN_DUMMY_PASSWORD_HASH
+        password_ok = accounts.verify_password(password, stored)
+        if user is None or user.status != "active" or not user.is_admin or not password_ok:
+            time.sleep(0.1)
+            self._json(401, {"error": "管理员账号或口令不正确"})
+            return
+        now = dt.datetime.now(dt.UTC)
+        token = secrets.token_urlsafe(32)
+        conn = db.connect(self.server.db_path)
+        try:
+            db.create_user_session(
+                conn,
+                token_digest=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                user_id=user.id,
+                expires_at=(now + dt.timedelta(seconds=_SESSION_TTL_SECONDS)).isoformat(),
+                now=now.isoformat(),
+            )
+        finally:
+            conn.close()
+        self._set_session_cookie(token, _SESSION_TTL_SECONDS)
 
     def _handle_password(self, body: dict[str, Any]) -> None:
         if self.server.htpasswd_file is None:
             self._json(404, {"error": "本模式不提供网页改密"})
+            return
+        if self._root_session_subject() is None:
+            self._json(403, {"error": "站点管理员不能修改运维管理员口令"})
             return
         if set(body) != {"current_password", "password"}:
             self._json(400, {"error": "改密字段无效"})
@@ -2671,6 +3366,8 @@ def create_server(
     sensitive_window: float = 60.0,
     public_subscription_enabled: bool = True,
     loopback_public_subscription: bool = False,
+    loopback_browser_compat: bool = False,
+    site_env_path: Path | None = None,
 ) -> ThreadingHTTPServer:
     if loopback_public_subscription and not serve_static:
         raise ValueError("loopback public subscriptions require static preview mode")
@@ -2681,12 +3378,24 @@ def create_server(
     server.profiles_file = profiles_file
     server.serve_static_files = serve_static
     server.loopback_public_subscription = loopback_public_subscription
+    server.loopback_browser_compat = loopback_browser_compat
     server.htpasswd_file = Path(htpasswd_file) if htpasswd_file is not None else None
     server.db_path = Path(db_path) if db_path is not None else None
     server.translation_db_path = (
         Path(translation_db_path) if translation_db_path is not None else server.db_path
     )
     server.site_url = site_url
+    loopback_origin = ("http", "127.0.0.1", server.server_port)
+    server.admin_origin = (
+        _request_origin(site_url)
+        if server.htpasswd_file is not None and site_url
+        else loopback_origin
+    )
+    server.public_origin = (
+        loopback_origin
+        if loopback_public_subscription or not site_url
+        else _request_origin(site_url)
+    )
     server.output_root = Path(output_root) if output_root is not None else None
     server.timezone = timezone
     server.public_secret = secrets.token_bytes(32)
@@ -2707,6 +3416,7 @@ def create_server(
     server.smtp_lock = threading.Lock()
     server.state_lock = threading.Lock()
     server.manual_previews = {}
+    server.site_env_path = Path(site_env_path) if site_env_path is not None else None
     if server.db_path is not None:
         database_existed = server.db_path.exists()
         conn = db.connect(server.db_path)
@@ -2795,7 +3505,7 @@ input:focus-visible, button:focus-visible {
 <form class="card" id="login-form">
   <h1>Cheapcoding News</h1>
   <p class="sub">模型接口 · 管理登录</p>
-  <label for="username">用户名</label>
+  <label for="username">管理员账号（admin 或已授权邮箱）</label>
   <input id="username" autocomplete="username" value="admin">
   <label for="password">口令</label>
   <input id="password" type="password" autocomplete="current-password" autofocus>
@@ -2883,6 +3593,7 @@ code, pre { font-family: var(--font-data); overflow-wrap: anywhere; white-space:
   display: grid; grid-template-columns: minmax(19rem, 1fr) minmax(20rem, 1.2fr);
   gap: 1.2rem;
 }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.2rem; }
 .panel { min-width: 0; background: var(--sheet); border: 1px solid var(--line); padding: 1rem; }
 .provider {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .8rem;
@@ -2909,6 +3620,8 @@ textarea { min-height: 6rem; resize: vertical; }
 .checks label { display: inline-flex; align-items: center; gap: .35rem; margin: 0; color: var(--ink); }
 .checks input { width: auto; min-height: auto; }
 .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr)); gap: .5rem; margin-top: 1rem; }
+.grant-controls { display: grid; grid-template-columns: minmax(5.5rem, .8fr) minmax(5rem, .65fr) minmax(7rem, 1fr); gap: .35rem; }
+.grant-controls input, .grant-controls select, .grant-controls button { min-width: 0; }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--ink); }
 button:active:not(:disabled) { background: var(--panel); }
@@ -2964,7 +3677,9 @@ button[aria-busy="true"]::after {
 .translation-actions button { min-height: 2.15rem; padding: .35rem .5rem; white-space: nowrap; }
 #delivery-summary { min-width: 0; }
 #delivery-summary strong { display: block; overflow-wrap: anywhere; word-break: break-word; }
-#subscription-list, #delivery-list { max-width: 100%; overflow-x: auto; }
+#subscription-list, #delivery-list, #site-users, #site-orders, #site-codes {
+  max-width: 100%; overflow-x: auto;
+}
 table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 th, td { text-align: left; border-bottom: 1px solid var(--line); padding: .45rem; }
 th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowrap; }
@@ -3030,6 +3745,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .nav button { padding-inline: .58rem; }
   .panel { padding: .8rem; }
   .actions { grid-template-columns: 1fr; }
+  .grant-controls { grid-template-columns: 1fr; }
   .data-table td { grid-template-columns: minmax(4.8rem, .38fr) minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -3060,6 +3776,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
     <button class="tab" id="tab-models" role="tab" data-tab="models" aria-controls="models" aria-selected="true">模型接口</button>
     <button class="tab" id="tab-mail" role="tab" data-tab="mail" aria-controls="mail" aria-selected="false">邮件设置</button>
     <button class="tab" id="tab-subscriptions" role="tab" data-tab="subscriptions" aria-controls="subscriptions" aria-selected="false">订阅管理</button>
+    <button class="tab" id="tab-site" role="tab" data-tab="site" aria-controls="site" aria-selected="false">用户与付费</button>
     <button class="tab" id="tab-translations" role="tab" data-tab="translations" aria-controls="translations" aria-selected="false">翻译状态</button>
     <button class="tab" id="tab-delivery" role="tab" data-tab="delivery" aria-controls="delivery" aria-selected="false">投递状态</button>
   </nav>
@@ -3149,6 +3866,47 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <div class="actions"><button id="subscription-add">新增账号</button><button id="subscriptions-refresh">刷新名单</button></div>
       <div id="subscription-list"></div>
     </section>
+  </section>
+
+  <section class="workspace" id="site" role="tabpanel" aria-labelledby="tab-site" hidden>
+    <h2 id="site-heading">用户与付费</h2>
+    <p class="note">管理登录账号、人工开通、自动支付订单、卡密和公开付费开关。在线支付成功后由网关回调自动开通，无需人工审批；未使用卡密会在后台持续明文显示。</p>
+    <section class="panel">
+      <h3>站点设置</h3>
+      <div class="fields">
+        <label><input id="site-paywall" type="checkbox"> 开启付费墙</label>
+        <label>月刊会员基准价(元)<input id="site-monthly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
+        <label>月刊会员折扣(%)<input id="site-monthly-discount" type="number" min="0" max="100"></label>
+        <label>年刊会员基准价(元)<input id="site-yearly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
+        <label>年刊会员折扣(%)<input id="site-yearly-discount" type="number" min="0" max="100"></label>
+      </div>
+      <div class="actions"><button id="site-settings-save" class="primary">保存设置</button><button id="site-refresh">刷新</button></div>
+    </section>
+    <section class="panel">
+      <h3>EasyPay 支付网关</h3>
+      <p class="note">兼容 EasyPay API 下单（mapi.php）。PKey 留空表示保留已保存值，页面不会回显密钥。</p>
+      <div class="fields">
+        <label><input id="site-epay-enabled" type="checkbox"> 启用在线支付</label>
+        <label>支付类型<select id="site-epay-type"><option value="alipay">支付宝</option><option value="wxpay">微信支付</option></select></label>
+        <label class="span2">API 地址<input id="site-epay-base" type="url" placeholder="https://pay.example.com"></label>
+        <label>商户 ID（PID）<input id="site-epay-pid" autocomplete="off"></label>
+        <label>商户密钥（PKey）<input id="site-epay-pkey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"></label>
+        <label>订单有效期（秒）<input id="site-epay-ttl" type="number" min="60" max="3600" step="1"></label>
+        <label>金额冻结期（秒）<input id="site-epay-hold" type="number" min="60" max="86400" step="1"></label>
+        <p class="span2 meta" id="site-epay-pkey-status"></p>
+        <p class="span2 meta">异步通知：<code id="site-epay-notify"></code><br>同步返回：<code id="site-epay-return"></code></p>
+      </div>
+      <div class="actions"><button id="site-epay-save" class="primary">保存支付配置</button><button id="site-epay-clear" class="danger">清除 PKey 并停用</button></div>
+    </section>
+    <div class="stack" id="site-management-sections">
+      <section class="panel"><h3>用户账号</h3><div id="site-users" aria-live="polite"></div></section>
+      <section class="panel"><h3>支付订单</h3><div id="site-orders" aria-live="polite"></div></section>
+      <section class="panel"><h3>生成卡密</h3>
+        <div class="fields"><label>计划<select id="site-code-plan"><option value="monthly">月刊会员</option><option value="yearly">年刊会员</option></select></label><label>数量<input id="site-code-count" type="number" min="1" max="50" value="1"></label><label class="span2">备注<input id="site-code-note"></label></div>
+        <div class="actions"><button id="site-code-create" class="primary">生成卡密</button></div><div id="site-code-result" class="result" hidden></div>
+        <div id="site-codes" aria-live="polite"></div>
+      </section>
+    </div>
   </section>
 
   <section class="workspace" id="translations" role="tabpanel" aria-labelledby="tab-translations" hidden>
@@ -3318,6 +4076,7 @@ document.querySelectorAll(".tab").forEach(function (tab) {
     });
     if (tab.dataset.tab === "mail") { loadMail(); }
     if (tab.dataset.tab === "subscriptions") { loadSubscriptions(); }
+    if (tab.dataset.tab === "site") { loadSite(); }
     if (tab.dataset.tab === "translations") { startTranslationUpdates(); }
     else { stopTranslationUpdates(); }
     if (tab.dataset.tab === "delivery") { loadDelivery(); }
@@ -3664,6 +4423,214 @@ field("subscription-add").addEventListener("click", function () {
 });
 field("subscriptions-refresh").addEventListener("click", loadSubscriptions);
 
+function yuanToCents(value) {
+  var match = String(value).trim().match(/^(\d{1,6})(?:\.(\d{1,2}))?$/);
+  if (!match) { return null; }
+  var cents = Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
+  return cents <= 10000000 ? cents : null;
+}
+function centsToYuan(value) {
+  return (Number(value) / 100).toFixed(2);
+}
+function remainingSubscriptionDays(paidUntil) {
+  if (!paidUntil) { return null; }
+  var expiresAt = Date.parse(paidUntil);
+  if (!Number.isFinite(expiresAt)) { return null; }
+  return Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000));
+}
+function loadSite() {
+  api("/admin/api/site/overview").then(function (data) {
+    csrf = data.csrf_token || csrf;
+    field("site-paywall").checked = data.settings.paywall_enabled === "true";
+    field("site-monthly").value = centsToYuan(data.settings.monthly_price_cents);
+    field("site-yearly").value = centsToYuan(data.settings.yearly_price_cents);
+    field("site-monthly-discount").value = data.settings.monthly_discount_percent;
+    field("site-yearly-discount").value = data.settings.yearly_discount_percent;
+    field("site-epay-enabled").checked = data.payment.enabled;
+    field("site-epay-base").value = data.payment.api_base || "";
+    field("site-epay-pid").value = data.payment.pid || "";
+    field("site-epay-pkey").value = "";
+    field("site-epay-type").value = data.payment.payment_type || "alipay";
+    field("site-epay-ttl").value = data.payment.order_ttl_seconds;
+    field("site-epay-hold").value = data.payment.amount_hold_seconds;
+    field("site-epay-pkey-status").textContent = data.payment.pkey_set ? "PKey 已保存" : "PKey 尚未保存";
+    field("site-epay-notify").textContent = data.payment.notify_url || "站点域名尚未配置";
+    field("site-epay-return").textContent = data.payment.return_url || "站点域名尚未配置";
+    var userRows = data.users.map(function (item) {
+      var actions = document.createElement("div"); actions.className = "actions";
+      var status = item.status === "disabled" ? "启用" : "停用";
+      actions.appendChild(button(status, function () {
+        api("/admin/api/site/user-status", {
+          user_id: item.id, status: item.status === "disabled" ? "active" : "disabled"
+        }).then(function () { say("用户状态已更新。", true); loadSite(); })
+          .catch(function (error) { say(error.message, false); });
+      }, item.status === "disabled" ? "" : "danger"));
+      var grantControls = document.createElement("div"); grantControls.className = "grant-controls";
+      var grantPlan = document.createElement("select"); grantPlan.setAttribute("aria-label", "增加时长的订阅计划");
+      [["monthly", "月刊会员"], ["yearly", "年刊会员"]].forEach(function (entry) {
+        var option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1];
+        option.selected = item.plan === entry[0]; grantPlan.appendChild(option);
+      });
+      var grantDays = document.createElement("input"); grantDays.type = "number"; grantDays.min = "1";
+      grantDays.max = "3660"; grantDays.value = item.plan === "yearly" ? "366" : "31";
+      grantDays.setAttribute("aria-label", "增加订阅天数");
+      grantPlan.addEventListener("change", function () {
+        grantDays.value = grantPlan.value === "yearly" ? "366" : "31";
+      });
+      var grantAction = button("增加时长", function () {
+        setBusy(grantAction, true);
+        api("/admin/api/site/user-grant", {user_id: item.id, plan: grantPlan.value, days: Number(grantDays.value)})
+          .then(function (result) { say("已增加 " + result.days_added + " 天订阅时长。", true); return loadSite(); })
+          .catch(function (error) { say(error.message, false); })
+          .finally(function () { setBusy(grantAction, false); });
+      });
+      grantControls.append(grantPlan, grantDays, grantAction);
+      actions.appendChild(grantControls);
+      if (item.plan || item.paid_until) {
+        var clearAction = button("清除订阅", function () {
+          if (!confirm("确认清除该账号的订阅计划与剩余时长？账号状态和管理员权限不会改变。")) { return; }
+          setBusy(clearAction, true);
+          api("/admin/api/site/user-subscription-clear", {user_id: item.id, confirm: true})
+            .then(function () { say("订阅已清除。", true); return loadSite(); })
+            .catch(function (error) { say(error.message, false); })
+            .finally(function () { setBusy(clearAction, false); });
+        }, "danger");
+        actions.appendChild(clearAction);
+      }
+      if (item.status === "active" || item.is_admin) {
+        actions.appendChild(button(item.is_admin ? "撤销管理员" : "设为管理员", function () {
+          var prompt = item.is_admin
+            ? "确认撤销该账号的后台管理权限？其现有 Admin 会话会立即失效。"
+            : "确认授予该账号后台管理权限？该账号将可使用邮箱和密码登录 Admin。";
+          if (!confirm(prompt)) { return; }
+          api("/admin/api/site/user-admin", {
+            user_id: item.id, is_admin: !item.is_admin, confirm: true
+          }).then(function () { say("管理员权限已更新。", true); loadSite(); })
+            .catch(function (error) { say(error.message, false); });
+        }, item.is_admin ? "danger" : ""));
+      }
+      var remainingDays = remainingSubscriptionDays(item.paid_until);
+      var planLabel = item.plan === "monthly" ? "月刊会员" : item.plan === "yearly" ? "年刊会员" : "无订阅";
+      var remainingLabel = remainingDays === null ? "无订阅" : remainingDays > 0 ? "剩余 " + remainingDays + " 天" : "已到期";
+      return [item.email, item.status, item.is_admin ? "管理员" : "普通用户", planLabel, remainingLabel, item.paid_until || "-", actions];
+    });
+    field("site-users").replaceChildren(
+      table(["邮箱", "状态", "角色", "订阅计划", "剩余时长", "到期时间", "操作"], userRows)
+    );
+
+    var orderRows = data.orders.map(function (item) {
+      var labels = {
+        pending: "等待支付", paid: "已支付", expired: "已过期", failed: "支付异常",
+        approved: "历史人工开通", rejected: "历史已拒绝"
+      };
+      var offset = Number(item.amount_offset_cents || 0);
+      var offsetLabel = offset === 0 ? "¥0.00" : (offset > 0 ? "+" : "-") + "¥" + (Math.abs(offset) / 100).toFixed(2);
+      var actions = document.createElement("div"); actions.className = "actions";
+      var reconcilable = ["pending", "expired", "failed"].indexOf(item.status) !== -1 &&
+        item.settlement_expires_at && Date.parse(item.settlement_expires_at) > Date.now();
+      if (reconcilable) {
+        var reconcileAction = button("重新查询支付状态", function () {
+          setBusy(reconcileAction, true);
+          api("/admin/api/site/payment-reconcile", {order_id: item.id})
+            .then(function (result) {
+              say(result.status === "paid" ? "订单已确认支付并开通会员。" : "支付状态已更新。", true);
+              return loadSite();
+            })
+            .catch(function (error) { say(error.message, false); })
+            .finally(function () { setBusy(reconcileAction, false); });
+        });
+        actions.appendChild(reconcileAction);
+      }
+      return [
+        item.merchant_order_no || "历史 #" + item.id,
+        item.user_id,
+        item.plan === "monthly" ? "月刊会员" : "年刊会员",
+        "¥" + (item.base_amount_cents / 100).toFixed(2),
+        "¥" + (item.amount_cents / 100).toFixed(2),
+        offsetLabel,
+        labels[item.status] || "状态未知",
+        item.provider_trade_no || "-",
+        item.expires_at || "-",
+        item.last_error_code || "-",
+        actions
+      ];
+    });
+    field("site-orders").replaceChildren(
+      table(["商户订单号", "用户", "计划", "基准金额", "实付金额", "尾差", "状态", "网关交易号", "支付截止", "错误代码", "操作"], orderRows)
+    );
+
+    var codeRows = data.codes.map(function (item) {
+      var actions = document.createElement("div"); actions.className = "actions";
+      if (item.status === "unused") {
+        actions.appendChild(button("删除", function () {
+          if (!confirm("确认删除未使用的卡密 " + item.prefix + "？删除后无法恢复。")) { return; }
+          api("/admin/api/site/code-delete", {code_id: item.id})
+            .then(function () { say("卡密已删除。", true); loadSite(); })
+            .catch(function (error) { say(error.message, false); });
+        }, "danger"));
+      }
+      return [item.code || item.prefix + "••••", item.plan, item.status, item.note || "", item.created_at, actions];
+    });
+    field("site-codes").replaceChildren(
+      table(["卡密", "计划", "状态", "备注", "创建时间", "操作"], codeRows)
+    );
+  }).catch(function (error) { say(error.message, false); });
+}
+field("site-refresh").addEventListener("click", loadSite);
+field("site-settings-save").addEventListener("click", function () {
+  var monthlyPriceCents = yuanToCents(field("site-monthly").value);
+  var yearlyPriceCents = yuanToCents(field("site-yearly").value);
+  if (monthlyPriceCents === null || yearlyPriceCents === null) {
+    say("基准价必须是 0.11 至 100000 元之间、最多两位小数的金额。", false);
+    return;
+  }
+  var action = field("site-settings-save"); setBusy(action, true);
+  api("/admin/api/site/settings", {
+    paywall_enabled: field("site-paywall").checked,
+    monthly_price_cents: monthlyPriceCents,
+    yearly_price_cents: yearlyPriceCents,
+    monthly_discount_percent: Number(field("site-monthly-discount").value),
+    yearly_discount_percent: Number(field("site-yearly-discount").value)
+  }).then(function () { say("付费设置已保存。", true); loadSite(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+});
+field("site-epay-save").addEventListener("click", function () {
+  var action = field("site-epay-save"); setBusy(action, true);
+  api("/admin/api/site/payment-settings", {
+    enabled: field("site-epay-enabled").checked,
+    api_base: field("site-epay-base").value,
+    pid: field("site-epay-pid").value,
+    pkey: field("site-epay-pkey").value,
+    payment_type: field("site-epay-type").value,
+    order_ttl_seconds: Number(field("site-epay-ttl").value),
+    amount_hold_seconds: Number(field("site-epay-hold").value)
+  }).then(function () { say("支付配置已保存并立即生效。", true); return loadSite(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+});
+field("site-epay-clear").addEventListener("click", function () {
+  if (!confirm("确认清除已保存的 EasyPay PKey 并停用在线支付？")) { return; }
+  var action = field("site-epay-clear"); setBusy(action, true);
+  api("/admin/api/site/payment-clear-pkey", {confirm: true})
+    .then(function () { say("PKey 已清除，在线支付已停用。", true); return loadSite(); })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+});
+field("site-code-create").addEventListener("click", function () {
+  var action = field("site-code-create"); setBusy(action, true);
+  api("/admin/api/site/codes", {
+    plan: field("site-code-plan").value,
+    count: Number(field("site-code-count").value),
+    note: field("site-code-note").value
+  }).then(function (data) {
+    var box = field("site-code-result"); box.hidden = false;
+    box.textContent = "已生成以下卡密，后台列表将持续显示：\n" + data.codes.join("\n");
+    say("卡密已生成。", true); loadSite();
+  }).catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+});
+
 var translationFilter = "all";
 var translationState = null;
 var translationSource = null;
@@ -3766,6 +4733,17 @@ function queueTranslationRetry(item, action) {
     })
     .finally(function () { setBusy(action, false); });
 }
+function queueTranslationRetryEdition(item, action) {
+  if (!item || !confirm("将把该刊期全部失败/取消/阻断任务重新入队，确认执行？")) { return; }
+  setBusy(action, true);
+  api("/admin/api/translations/retry-edition", {edition_date: item.date, confirm: true})
+    .then(function (result) {
+      say("已重新入队 " + result.queued + " 篇（跳过 " + result.skipped + " 篇），等待 worker 调度。", true);
+      return loadTranslations();
+    })
+    .catch(function (error) { say(error.message, false); })
+    .finally(function () { setBusy(action, false); });
+}
 function queueTranslationDispatch(item, action) {
   setBusy(action, true);
   api("/admin/api/translations/dispatch", {task_id: item.task_id})
@@ -3864,6 +4842,13 @@ function renderTranslations(data) {
   probeButton.disabled = !data.probe_task_id;
   probeButton.title = data.probe_task_id ? "执行一次正式单篇探测" : "当前无需探测";
   provider.appendChild(probeButton);
+  if (edition && edition.retry_edition_available) {
+    var retryEditionButton = button("重试全部失败篇", function (event) {
+      queueTranslationRetryEdition(edition, event.currentTarget);
+    });
+    retryEditionButton.title = "批量恢复该刊期的终态任务,消除 partial 停滞";
+    provider.appendChild(retryEditionButton);
+  }
 
   var stats = field("translation-stats"); stats.replaceChildren();
   [["总任务", "total"], ["已上线", "online"], ["翻译中", "running"], ["待重试", "retry_wait"], ["失败", "failed"]]

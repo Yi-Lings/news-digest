@@ -18,9 +18,16 @@ _SAFE_URL_SCHEMES = frozenset({"http", "https"})
 
 
 def safe_url(url: str | None) -> str:
-    """href/src 兜底：只放行 http/https，其余（javascript:/data:/vbscript: 等）→ 空串。"""
+    """Allow web URLs and same-origin root paths; reject executable schemes."""
     if not url:
         return ""
+    if (
+        url.startswith("/")
+        and not url.startswith(("//", "/\\"))
+        and "\\" not in url
+        and not any(ord(character) < 0x20 for character in url)
+    ):
+        return url
     return url if urlparse(url).scheme.lower() in _SAFE_URL_SCHEMES else ""
 
 

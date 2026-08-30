@@ -517,7 +517,7 @@ class ApiTranslator:
         return self._request_text(
             SYSTEM_PROMPT,
             build_user_prompt(article),
-            max_tokens=self._config.max_tokens,
+            max_tokens=self._completion_budget(article),
         )
 
     def translate_with_timeout(self, article: Article, *, timeout_seconds: float) -> str:
@@ -525,7 +525,7 @@ class ApiTranslator:
         return self._request_text(
             SYSTEM_PROMPT,
             build_user_prompt(article),
-            max_tokens=self._config.max_tokens,
+            max_tokens=self._completion_budget(article),
             timeout_seconds=timeout_seconds,
         )
 
@@ -535,18 +535,29 @@ class ApiTranslator:
         feedback: str,
         *,
         cancel_requested: Callable[[], bool] | None = None,
+        previous_output: str | None = None,
     ) -> str:
-        """Retry a malformed translation with the closed validation error as guidance."""
+        """Retry a malformed translation with the closed validation error as guidance.
+
+        修复请求携带上一次的错误输出,让模型定向修正而不是从零重写;
+        若未提供 previous_output(如旧调用方),行为退化为完整重生成。
+        """
         repair_prompt = (
             f"{build_user_prompt(article)}\n\n"
-            "上一份输出未通过严格 schema 校验。请完整重新生成 JSON，先修正以下问题：\n"
+            "上一份输出未通过严格校验。请完整重新生成 JSON，先修正以下问题：\n"
             f"{feedback}\n"
-            "必须继续使用 [P#S#] 编号逐句对应，不能合并、拆分、跳过或新增句子。"
+            "必须逐句对应原文，不能合并、拆分、跳过或新增句子。"
         )
+        if previous_output:
+            clipped = previous_output[:4000]
+            repair_prompt += (
+                "\n\n上一份完整输出如下（仅供修正参考，不要原样重复）：\n"
+                f"{clipped}"
+            )
         return self._request_text(
             SYSTEM_PROMPT,
             repair_prompt,
-            max_tokens=self._config.max_tokens,
+            max_tokens=self._completion_budget(article),
             cancel_requested=cancel_requested,
         )
 
@@ -560,9 +571,21 @@ class ApiTranslator:
         return self._request_text(
             SYSTEM_PROMPT,
             build_user_prompt(article),
-            max_tokens=self._config.max_tokens,
+            max_tokens=self._completion_budget(article),
             cancel_requested=cancel_requested,
         )
+
+    def _completion_budget(self, article: Article) -> int:
+        """按原文规模估算完成预算,下限为配置值,上限为配置值的 3 倍。
+
+        固定 max_tokens 会让长文在流中途被截断,进而被误判为 schema 失败
+        (1.2.12/1.2.15 家族);预算随文走才能让截断成为真正的异常路径。
+        """
+        en_chars = len(article.title_en) + len(article.summary_en)
+        en_chars += sum(len(paragraph.en) for paragraph in article.paragraphs)
+        estimated = int(en_chars * 1.2) + 1024
+        ceiling = self._config.max_tokens * 3
+        return max(self._config.max_tokens, min(estimated, ceiling))
 
     def probe(self) -> str:
         """恰好执行一次固定 ``Hi`` 的小输出协议探测，不重试。"""

@@ -17,6 +17,7 @@ APP_DIR="$ND_APP_DIR"
 OWNER="$ND_OWNER"
 WEB_PORT="${ND_WEB_PORT:-8618}"
 ADMIN_PORT="${ND_ADMIN_PORT:-8619}"
+SITE_PORT="${ND_SITE_PORT:-8620}"
 if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
    [[ ! "$APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$APP_DIR/" == *"//"* ]] ||
    [[ "$APP_DIR/" == *"/./"* ]] || [[ "$APP_DIR/" == *"/../"* ]] ||
@@ -25,14 +26,14 @@ if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
   printf '错误：部署目标格式非法。\n' >&2
   exit 1
 fi
-for port_value in "$WEB_PORT" "$ADMIN_PORT"; do
+for port_value in "$WEB_PORT" "$ADMIN_PORT" "$SITE_PORT"; do
   if [[ ! "$port_value" =~ ^[1-9][0-9]{0,4}$ ]] || (( port_value > 65535 )); then
     printf '错误：部署端口非法：%s\n' "$port_value" >&2
     exit 1
   fi
 done
-if [ "$WEB_PORT" = "$ADMIN_PORT" ]; then
-  printf '错误：ND_WEB_PORT 与 ND_ADMIN_PORT 不得相同。\n' >&2
+if [ "$WEB_PORT" = "$ADMIN_PORT" ] || [ "$WEB_PORT" = "$SITE_PORT" ] || [ "$ADMIN_PORT" = "$SITE_PORT" ]; then
+  printf '错误：ND_WEB_PORT、ND_ADMIN_PORT 与 ND_SITE_PORT 必须互不相同。\n' >&2
   exit 1
 fi
 
@@ -43,10 +44,48 @@ ok()   { OK_N=$((OK_N + 1));     printf '[OK]   %s\n' "$1"; }
 warn() { WARN_N=$((WARN_N + 1)); printf '[警告] %s\n' "$1"; }
 fail() { FAIL_N=$((FAIL_N + 1)); printf '[缺失] %s\n' "$1"; }
 
+check_deployment_unit_quiescence() {
+  local unit load_state active_state
+  if ! command -v systemctl >/dev/null 2>&1; then
+    fail "systemctl 不可用——无法确认定时器与 worker 已冻结"
+    return
+  fi
+  for unit in \
+    news-digest.timer \
+    news-digest.service \
+    news-digest-resume.service \
+    news-digest-wakeup.path
+  do
+    if ! load_state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
+      fail "无法读取 ${unit} 的 LoadState——拒绝在运行状态未知时部署"
+      continue
+    fi
+    if [ "$load_state" = "not-found" ]; then
+      ok "${unit} 尚未安装——首次部署无需冻结"
+      continue
+    fi
+    if ! active_state="$(systemctl show "$unit" --property=ActiveState --value 2>/dev/null)"; then
+      fail "无法读取 ${unit} 的 ActiveState——拒绝在运行状态未知时部署"
+      continue
+    fi
+    case "$active_state" in
+      inactive|failed)
+        ok "${unit} ActiveState=${active_state}——已冻结（enabled 状态不影响部署）"
+        ;;
+      *)
+        fail "${unit} ActiveState=${active_state:-unknown}——先停止该 unit，再重新部署"
+        ;;
+    esac
+  done
+}
+
 echo "================================================================"
 echo " news-digest 部署前体检（只读，不做任何修改）"
 echo " $(date '+%F %T %Z')  host=$(hostname 2>/dev/null || echo unknown)"
 echo "================================================================"
+
+# --- 写入冻结：enabled 只表示开机持久化；部署只要求四个运行入口当前均非 active ---
+check_deployment_unit_quiescence
 
 # --- CPU 架构：release.yml 目前只发布 linux/amd64，架构不符必须先改 CI 重新发布 ---
 ARCH="$(uname -m 2>/dev/null || echo unknown)"
@@ -118,7 +157,7 @@ existing_service_owns_port() {  # $1=service $2=port
   [ "$(docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ] || return 1
   case "$role" in
     web)   grep -Fq "127.0.0.1:${port}:8080" "${APP_DIR}/compose.yaml" ;;
-    admin) grep -Fq -- "--port ${port}" "${APP_DIR}/compose.yaml" ;;
+    admin|site) grep -Fq -- "--port ${port}" "${APP_DIR}/compose.yaml" ;;
     *)     return 1 ;;
   esac
 }
@@ -143,6 +182,7 @@ check_port() {
 }
 check_port "$WEB_PORT" web
 check_port "$ADMIN_PORT" admin
+check_port "$SITE_PORT" site
 
 # --- 部署目录现状：存在与否都不阻断，只影响 bootstrap 是全新安装还是复用 ---
 if [ -d "$APP_DIR" ]; then

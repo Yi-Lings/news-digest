@@ -6,8 +6,8 @@
 # - 部署时必须把下方 image 改为 digest 形式，例如：
 #     image: ghcr.io/OWNER/news-digest-worker@sha256:DIGEST
 #     image: ghcr.io/OWNER/news-digest-web@sha256:DIGEST
-#   注意 worker 镜像出现两处（worker 与 admin 服务共用同一引用），须一并替换；
-#   经 bootstrap.sh 渲染时两处自动同步。
+#   注意 worker 镜像出现三处（worker、site 与 admin 服务共用同一引用），须一并替换；
+#   经 bootstrap.sh 渲染时三处自动同步。
 #   DIGEST 从 release.yml 的 Actions 运行摘要复制，或用
 #   `docker buildx imagetools inspect` 查询——具体步骤见 deploy/README.md。
 # - 下方 tag 写法（:VERSION）仅为占位与可读性示例；tag 可被覆盖，不得用于生产。
@@ -96,12 +96,44 @@ services:
       # 站点卷对 web 只读：写入只发生在 worker，一次性任务失败不会破坏在线站点
       - news-site:/site:ro
 
+  site:
+    # 公开读者站点：动态付费墙与账号会话由 Python 服务处理，不能继续走纯静态 web。
+    image: ghcr.io/OWNER/news-digest-worker:VERSION
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["exec news-digest site --port 8620 --config-dir /site-config"]
+    network_mode: host
+    user: "0:10001"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 64m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      # 独立目录仅投影 Site 所需 SMTP/EasyPay 字段；目录 bind 可观察原子替换。
+      - /srv/news-digest/site-config:/site-config:ro
+      - news-site-secret:/site-secret
+      - news-data:/data
+      - news-site:/site:ro
+    environment:
+      NEWS_SITE_SECRET_FILE: /site-secret/site-secret
+
   admin:
-    # 生产模型切换面板（news-digest admin）：复用 worker 镜像——面板与流水线是
+    # 生产模型切换面板（news-digest admin）：复用 worker 镜像——面板与 worker 服务是
     # 同一份代码、同一个 digest，部署时与 worker 的 image 一并替换（见文件头注释）
     image: ghcr.io/OWNER/news-digest-worker:VERSION
     entrypoint: ["/bin/sh", "-c"]
-    command: ["umask 0002; exec news-digest admin --port 8619 --config-dir /config"]
+    command: ["umask 0002; exec news-digest admin --port 8619 --config-dir /config --site-config-dir /site-config"]
     # 面板服务端在代码里硬绑 127.0.0.1（安全设计：密钥面板绝不监听非回环地址）。
     # bridge 网络下 ports 映射的流量到达的是容器 eth0，会被这一回环绑定拒绝，
     # 因此用 host 网络——效果恰好就是需求本身：只监听宿主机 127.0.0.1:8619，
@@ -143,6 +175,8 @@ services:
       # 将各自持有不同文件、互相看不见改动；且 providers.json 首次启动时可能尚不
       # 存在（单文件 bind 会被 Docker 误建成目录）。挂目录后目录项更新对两侧即时可见。
       - /srv/news-digest/config:/config
+      # Admin 原子刷新 Site 最小配置；公开 Site 以只读方式挂载同一目录。
+      - /srv/news-digest/site-config:/site-config
       # 公开订阅与确认/退订共用 worker 的 SQLite 数据；只增加既有 named volume，
       # 不扩大可写宿主 bind 面。
       - news-data:/data
@@ -160,3 +194,4 @@ volumes:
     external: true
     name: news-digest_news-data
   news-site:
+  news-site-secret:

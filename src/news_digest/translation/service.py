@@ -17,6 +17,7 @@ from news_digest.models import Article, DailyEdition
 from news_digest.translation.client import TranslationError
 from news_digest.translation.schema import (
     PROMPT_VERSION,
+    SPLITTER_VERSION,
     InvalidTranslation,
     TranslationResult,
     apply_translation,
@@ -62,12 +63,82 @@ class TranslateReport:
     failures: list[tuple[str, str]] = field(default_factory=list)
 
 
-def _result_from_dict(data: dict, article: Article) -> TranslationResult:
+def _result_from_dict(
+    data: dict, article: Article, frozen_counts: list[int] | None = None
+) -> TranslationResult:
+    cached_splitter = data.get("splitter_version")
+    if cached_splitter is not None and cached_splitter != SPLITTER_VERSION:
+        # 缓存由不同版本的分句器验收:按当前规则不可信,视为未命中。
+        raise InvalidTranslation(
+            f"缓存分句器版本 {cached_splitter} 与当前 {SPLITTER_VERSION} 不一致"
+        )
     return parse_translation(
         json.dumps(data, ensure_ascii=False),
         len(article.paragraphs),
         [paragraph.en for paragraph in article.paragraphs],
+        frozen_counts,
     )
+
+
+def _content_gates(
+    article: Article, result: TranslationResult
+) -> tuple[list[str], list[str]]:
+    """内容级质量门;返回 (硬违规, 软违规)。observe 模式下硬违规也只进软列表。"""
+    from news_digest.translation import quality
+
+    hard, soft = quality.check_translation(
+        [paragraph.en for paragraph in article.paragraphs],
+        result,
+    )
+    if quality.mode() == "observe":
+        soft = soft + hard
+        hard = []
+    return hard, soft
+
+
+def _validate_candidate(
+    article: Article,
+    raw: str,
+    frozen_counts: list[int] | None,
+) -> tuple[TranslationResult, list[str]]:
+    result = parse_translation(
+        raw,
+        len(article.paragraphs),
+        [p.en for p in article.paragraphs],
+        frozen_counts,
+    )
+    hard, soft = _content_gates(article, result)
+    if hard:
+        raise InvalidTranslation("；".join(hard), code="CONTENT_NUMBER_MISSING")
+    return result, soft
+
+
+def _attempt_with_gates(
+    article: Article,
+    translator: Translator,
+    raw: str,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+    frozen_counts: list[int] | None,
+) -> TranslationResult:
+    """校验候选输出;硬门失败交给调用方进入两轮修正预算,软门最多触发一次修复。"""
+    result, soft = _validate_candidate(article, raw, frozen_counts)
+    if not soft:
+        return result
+    repair = getattr(translator, "translate_with_feedback", None)
+    if not callable(repair):
+        return result
+    try:
+        repaired = repair(
+            article,
+            "译文存在以下质量风险，请修正后完整重新输出 JSON：" + "；".join(soft),
+            cancel_requested=cancel_requested,
+            previous_output=raw,
+        )
+        fixed, _ = _validate_candidate(article, repaired, frozen_counts)
+    except Exception:
+        return result
+    return fixed
 
 
 def translate_article_once(
@@ -76,6 +147,7 @@ def translate_article_once(
     cache_dir: Path,
     *,
     cancel_requested: Callable[[], bool] | None = None,
+    frozen_counts: list[int] | None = None,
 ) -> tuple[Article, bool]:
     """Translate one article once, returning the persisted-schema result or raising safely."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +156,7 @@ def translate_article_once(
     if cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            result = _result_from_dict(cached, article)
+            result = _result_from_dict(cached, article, frozen_counts)
             return apply_translation(article, result, translator.label), True
         except (InvalidTranslation, json.JSONDecodeError):
             pass
@@ -94,27 +166,34 @@ def translate_article_once(
         raw = translate_with_cancel(article, cancel_requested=cancel_requested)
     else:
         raw = translator.translate(article)
+
     try:
-        result = parse_translation(
-            raw, len(article.paragraphs), [p.en for p in article.paragraphs]
+        result = _attempt_with_gates(
+            article,
+            translator,
+            raw,
+            cancel_requested=cancel_requested,
+            frozen_counts=frozen_counts,
         )
     except InvalidTranslation as first_error:
-        # Model output can be structurally valid JSON but miss a sentence. Give the
-        # provider two bounded correction attempts before surfacing a terminal task.
+        # Model output can be structurally valid JSON but miss a sentence or a
+        # key number. Give the provider two bounded correction attempts with
+        # the previous output attached before surfacing a terminal task.
         repair = getattr(translator, "translate_with_feedback", None)
         if not callable(repair):
             raise
         last_error = first_error
+        last_raw = raw
         for _ in range(2):
             raw = repair(
                 article,
                 str(last_error),
                 cancel_requested=cancel_requested,
+                previous_output=last_raw,
             )
+            last_raw = raw
             try:
-                result = parse_translation(
-                    raw, len(article.paragraphs), [p.en for p in article.paragraphs]
-                )
+                result = _validate_candidate(article, raw, frozen_counts)[0]
             except InvalidTranslation as error:
                 last_error = error
             else:
@@ -251,8 +330,12 @@ def translate_edition(
                         )
                     else:
                         raw = translator.translate(article)
-                    result = parse_translation(
-                        raw, len(article.paragraphs), [p.en for p in article.paragraphs]
+                    result = _attempt_with_gates(
+                        article,
+                        translator,
+                        raw,
+                        cancel_requested=None,
+                        frozen_counts=None,
                     )
                     cache_file.write_text(
                         json.dumps(result_to_dict(result), ensure_ascii=False, indent=1),

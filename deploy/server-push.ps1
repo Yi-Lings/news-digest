@@ -19,11 +19,13 @@ param(
     [string]$Domain = $env:ND_DOMAIN,
     [string]$CertbotEmail = $env:ND_CERTBOT_EMAIL,
     [string]$WebPort = $env:ND_WEB_PORT,
-    [string]$AdminPort = $env:ND_ADMIN_PORT
+    [string]$AdminPort = $env:ND_ADMIN_PORT,
+    [string]$SitePort = $env:ND_SITE_PORT
 )
 
 if (-not $WebPort) { $WebPort = "8618" }
 if (-not $AdminPort) { $AdminPort = "8619" }
+if (-not $SitePort) { $SitePort = "8620" }
 
 $requiredTargets = [ordered]@{
     Server = $Server; KeyPath = $KeyPath; Owner = $Owner; AppDir = $AppDir;
@@ -59,14 +61,14 @@ if ($CertbotEmail -notmatch '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$'
     Write-Host "[FAIL] Invalid certificate email." -ForegroundColor Red
     exit 1
 }
-foreach ($port in @($WebPort, $AdminPort)) {
+foreach ($port in @($WebPort, $AdminPort, $SitePort)) {
     if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
         Write-Host "[FAIL] Invalid deploy port: $port" -ForegroundColor Red
         exit 1
     }
 }
-if ($WebPort -eq $AdminPort) {
-    Write-Host "[FAIL] WebPort and AdminPort must differ." -ForegroundColor Red
+if (($WebPort -eq $AdminPort) -or ($WebPort -eq $SitePort) -or ($AdminPort -eq $SitePort)) {
+    Write-Host "[FAIL] WebPort, AdminPort and SitePort must differ." -ForegroundColor Red
     exit 1
 }
 
@@ -186,7 +188,7 @@ Stop-OnError $LASTEXITCODE "normalize line endings"
 
 # These values are allow-list validated above before entering the remote POSIX shell.
 $deployEnv = "ND_OWNER='$Owner' ND_APP_DIR='$AppDir' ND_DOMAIN='$Domain' " +
-    "ND_CERTBOT_EMAIL='$CertbotEmail' ND_WEB_PORT='$WebPort' ND_ADMIN_PORT='$AdminPort' " +
+    "ND_CERTBOT_EMAIL='$CertbotEmail' ND_WEB_PORT='$WebPort' ND_ADMIN_PORT='$AdminPort' ND_SITE_PORT='$SitePort' " +
     "ND_VERSION='$Version' ND_WORKER_DIGEST='$WorkerDigest' ND_WEB_DIGEST='$WebDigest'"
 
 # ---- step 3: read-only preflight, shown verbatim ----

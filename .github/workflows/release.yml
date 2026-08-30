@@ -25,6 +25,8 @@ jobs:
   test:
     # 固定 runner 版本而不用 ubuntu-latest：发布链路的每个环节版本都要可复现
     runs-on: ubuntu-24.04
+    outputs:
+      release_channel: ${{ steps.version.outputs.release_channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -48,13 +50,21 @@ jobs:
       - name: 离线测试套件
         run: uv run pytest
 
-      # tag 必须与包内 __version__ 一致，镜像的 version label 才可信；
-      # 也防止随手打错 tag 就发布
-      - name: 校验 tag 与包版本一致
+      # 稳定 tag 必须与包内 __version__ 完全一致；同版本测试候选只允许追加 tN。
+      # 例如包版本 1.4.0 可发布 v1.4.0 或 v1.4.0t1，但不能发布 v1.4.1t1。
+      - name: 校验稳定 tag 或测试候选 tag
+        id: version
         run: |
-          pkg_version="v$(uv run python -c 'import news_digest; print(news_digest.__version__)')"
-          if [ "${pkg_version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} 与 __version__ 推导的 ${pkg_version} 不一致"
+          pkg_version="$(uv run python -c 'import news_digest; print(news_digest.__version__)')"
+          stable_tag="v${pkg_version}"
+          candidate_prefix="${stable_tag}t"
+          if [ "${GITHUB_REF_NAME}" = "${stable_tag}" ]; then
+            echo "release_channel=stable" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+t[1-9][0-9]*$ ]] && \
+               [[ "${GITHUB_REF_NAME}" == "${candidate_prefix}"* ]]; then
+            echo "release_channel=prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::tag ${GITHUB_REF_NAME} 必须是 ${stable_tag} 或 ${stable_tag}tN（N 从 1 开始）"
             exit 1
           fi
 
@@ -138,10 +148,12 @@ jobs:
 
   # 一键部署包：deploy/ 打包为 Release 附件，服务器端 install.sh 一条命令即可部署
   release-bundle:
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      RELEASE_CHANNEL: ${{ needs.test.outputs.release_channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -166,13 +178,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 显式区分「已存在→补传」与「不存在→创建」，避免 || 兜底掩盖真实错误
+          if [ "$RELEASE_CHANNEL" = "prerelease" ]; then
+            release_status=(--prerelease --latest=false)
+            release_notes="测试候选：仅用于受控验收；使用同一 Release 的 immutable digest 按 deploy/README.md 部署。"
+          else
+            release_status=(--prerelease=false --latest)
+            release_notes="一键部署：见 deploy/README.md 的「一键部署」章节；附件为服务器端部署包。"
+          fi
+
+          # 显式区分「已存在→修正发布状态并补传」与「不存在→创建」，
+          # 避免 || 兜底掩盖真实错误。测试候选永远不成为 releases/latest。
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" "${release_status[@]}"
             gh release upload "$GITHUB_REF_NAME" \
               news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env --clobber
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag \
               --title "$GITHUB_REF_NAME" \
-              --notes "一键部署：见 deploy/README.md 的「一键部署」章节；附件为服务器端部署包。" \
+              --notes "$release_notes" "${release_status[@]}" \
               news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env
           fi
