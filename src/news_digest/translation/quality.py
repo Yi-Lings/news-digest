@@ -50,6 +50,10 @@ _ZH_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "�
 _ZH_SMALL_UNITS = {"十": 10, "百": 100, "千": 1000}
 _ZH_SCALES = {"万": 10_000, "亿": 100_000_000}
 _ZH_NUMERAL = re.compile(r"[零一二三四五六七八九两十百千万亿]+")
+_ZH_YEAR_DIGITS = {**_ZH_DIGIT_MAP, "〇": 0}
+_ZH_POSITIONAL_YEAR = re.compile(
+    r"(?<![\d零〇一二三四五六七八九两])(?P<num>[零〇一二三四五六七八九]{4})年"
+)
 
 # 时刻(22:00、01:30、10.30am)不是可对账的数值:ZH 侧常写作"22时""晚上10时",
 # 拆出的 0/30 只会制造幻影数值,两端都先行排除。
@@ -162,6 +166,11 @@ def extract_zh_values(text: str) -> list[tuple[str, float]]:
 
     # 时刻表达(22:00、22时00分、晚上10时)整体排除,不产出数值证据。
     for match in _ZH_TIME.finditer(text):
+        consumed.append((match.start(), match.end()))
+
+    for match in _ZH_POSITIONAL_YEAR.finditer(text):
+        value = float("".join(str(_ZH_YEAR_DIGITS[ch]) for ch in match.group("num")))
+        values.append(("plain", value))
         consumed.append((match.start(), match.end()))
 
     for match in _ZH_PERCENT_PREFIX.finditer(text):

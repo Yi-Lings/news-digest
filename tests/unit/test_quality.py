@@ -72,6 +72,27 @@ class TestHardGate:
         assert quality.extract_en_values("The object is 10m long.") == [("plain", 10.0)]
         assert quality.check_numbers(["The object is 10m long."], result) == []
 
+    def test_compact_m_wide_measurement_is_not_million(self):
+        result = _result([["该物体宽5米。"]])
+        assert quality.check_numbers(["The object is 5m wide."], result) == []
+
+    def test_year_in_positional_chinese_digits_passes(self):
+        source = "The event happened in 2026."
+        for translation in ("事件发生在二零二六年。", "事件发生在二〇二六年。"):
+            assert quality.extract_zh_values(translation) == [("plain", 2026.0)]
+            assert quality.check_numbers([source], _result([[translation]])) == []
+
+    def test_completely_missing_year_still_fails(self):
+        violations = quality.check_numbers(
+            ["The event happened in 2026."], _result([["事件已经发生。"]])
+        )
+        assert len(violations) == 1
+
+    def test_non_year_digit_sequences_are_not_positional_numbers(self):
+        assert ("plain", 23.0) not in quality.extract_zh_values("大约两三次。")
+        assert ("plain", 12.0) not in quality.extract_zh_values("可选一二个方案。")
+        assert ("plain", 2026.0) not in quality.extract_zh_values("编号一二零二六年。")
+
     def test_compact_m_dimension_grammar(self):
         assert quality.extract_en_values("It is 10 m wide.") == [("plain", 10.0)]
         assert quality.extract_en_values("It measures 10m.") == [("plain", 10.0)]
