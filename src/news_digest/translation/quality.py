@@ -34,13 +34,30 @@ _EN_WORD_PERCENT = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s+percent\b", re.IGN
 _EN_PHYSICAL_M_SUFFIX = re.compile(
     r"\s*(?:"
     r"(?:long|wide|high|deep|tall)"
-    r"(?=\s*(?:$|[.,;:!?)]|(?:and|or|but|while|by)\b))"
+    r"(?=\s*(?:$|[.!?)]))"
     r"|in\s+(?:length|width|height|depth)\b"
     r"|by\s+\d[\d,]*(?:\.\d+)?\s?m(?=$|[\s.,;:!?)]))",
     re.IGNORECASE,
 )
-_EN_PHYSICAL_M_PREFIX = re.compile(
-    r"(?:\b(?:measure|measures|measured|measuring)\s+|\d[\d,.]*\s?m\s+by\s+)$",
+_EN_PHYSICAL_M_MEASURE_PREFIX = re.compile(
+    r"\b(?:measure|measures|measured|measuring)\s+$",
+    re.IGNORECASE,
+)
+_EN_PHYSICAL_M_BY_PREFIX = re.compile(r"\d[\d,.]*\s?m\s+by\s+$", re.IGNORECASE)
+_EN_PHYSICAL_M_TERMINAL_SUFFIX = re.compile(r"\s*(?=$|[.,;:!?)])")
+_EN_PHYSICAL_M_COORDINATED_PREFIX = re.compile(
+    r"\d[\d,.]*\s?m\s+(?P<dimension>long|wide|high|deep|tall)"
+    r"(?![-A-Za-z])\s*(?:[,;](?:\s*and\b)?|\band\b)\s*$",
+    re.IGNORECASE,
+)
+_EN_PHYSICAL_M_COORDINATED_SUFFIX = re.compile(
+    r"\s*(?P<dimension>long|wide|high|deep|tall)(?![-A-Za-z])",
+    re.IGNORECASE,
+)
+_EN_PHYSICAL_M_COORDINATED_FORWARD = re.compile(
+    r"\s*(?P<first>long|wide|high|deep|tall)(?![-A-Za-z])"
+    r"\s*(?:[,;](?:\s*and\b)?|\band\b)\s*\d[\d,.]*\s?m\s+"
+    r"(?P<second>long|wide|high|deep|tall)(?![-A-Za-z])",
     re.IGNORECASE,
 )
 _ZH_PERCENT_PREFIX = re.compile(r"百分之\s*(?P<num>[\d一二三四五六七八九两零十点\.]+)")
@@ -143,12 +160,43 @@ def extract_en_values(text: str) -> list[tuple[str, float]]:
             continue
         if scale:
             scale_key = scale.lower().strip()
+            measure_prefix = _EN_PHYSICAL_M_MEASURE_PREFIX.search(
+                text, 0, match.start()
+            )
+            by_prefix = _EN_PHYSICAL_M_BY_PREFIX.search(text, 0, match.start())
+            coordinated_prefix = _EN_PHYSICAL_M_COORDINATED_PREFIX.search(
+                text, 0, match.start()
+            )
+            coordinated_suffix = _EN_PHYSICAL_M_COORDINATED_SUFFIX.match(
+                text, match.end()
+            )
+            coordinated_backward = (
+                coordinated_prefix is not None
+                and coordinated_suffix is not None
+                and coordinated_prefix.group("dimension").lower()
+                != coordinated_suffix.group("dimension").lower()
+            )
+            coordinated_forward = _EN_PHYSICAL_M_COORDINATED_FORWARD.match(
+                text, match.end()
+            )
+            coordinated_forward_valid = (
+                coordinated_forward is not None
+                and coordinated_forward.group("first").lower()
+                != coordinated_forward.group("second").lower()
+            )
             physical_m = (
                 scale == "m"
                 and match.group("cur") is None
                 and (
                     _EN_PHYSICAL_M_SUFFIX.match(text, match.end()) is not None
-                    or _EN_PHYSICAL_M_PREFIX.search(text, 0, match.start()) is not None
+                    or (
+                        measure_prefix is not None
+                        and _EN_PHYSICAL_M_TERMINAL_SUFFIX.match(text, match.end())
+                        is not None
+                    )
+                    or by_prefix is not None
+                    or coordinated_backward
+                    or coordinated_forward_valid
                 )
             )
             if not physical_m:

@@ -76,6 +76,37 @@ class TestHardGate:
         result = _result([["该物体宽5米。"]])
         assert quality.check_numbers(["The object is 5m wide."], result) == []
 
+    def test_coordinated_compact_m_dimensions_are_not_millions(self):
+        result = _result([["这艘长40米、宽10米的Filo Jet抵达岸边。"]])
+        for source in (
+            "The 40m long, 10m wide Filo Jet reached the shore.",
+            "The 40m long, and 10m wide Filo Jet reached the shore.",
+        ):
+            assert quality.extract_en_values(source) == [
+                ("plain", 40.0),
+                ("plain", 10.0),
+            ]
+            assert quality.check_numbers([source], result) == []
+
+    def test_compact_m_context_prefix_does_not_hide_business_millions(self):
+        assert quality.extract_en_values("The audience measures 10m users.") == [
+            ("plain", 10_000_000.0)
+        ]
+        assert quality.extract_en_values("The fund was 40m long, 10m short.") == [
+            ("plain", 40_000_000.0),
+            ("plain", 10_000_000.0),
+        ]
+        assert quality.extract_en_values("It was 40m long, 10m high-value.") == [
+            ("plain", 40_000_000.0),
+            ("plain", 10_000_000.0),
+        ]
+
+    def test_compact_m_by_dimensions_allow_a_following_noun(self):
+        assert quality.extract_en_values("It is a 10m by 5m room.") == [
+            ("plain", 10.0),
+            ("plain", 5.0),
+        ]
+
     def test_year_in_positional_chinese_digits_passes(self):
         source = "The event happened in 2026."
         for translation in ("事件发生在二零二六年。", "事件发生在二〇二六年。"):
