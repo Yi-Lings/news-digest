@@ -410,9 +410,12 @@ backup_database_before_migration() {
   backup_tmp="${backup_workdir}/news.db"
   install -o root -g root -m 600 /dev/null "$backup_tmp"
 
+  # WAL readers may need to update the shared-memory lock file. Keep the
+  # database connection itself read-only below, while allowing SQLite to
+  # coordinate a consistent online snapshot with the live Admin/Site readers.
   docker run --rm --network none --read-only --user 0:0 \
     --entrypoint python \
-    --mount "type=volume,src=${DATA_VOLUME},dst=/data,readonly" \
+    --mount "type=volume,src=${DATA_VOLUME},dst=/data" \
     --mount "type=bind,src=${backup_workdir},dst=/backup" \
     "$WORKER_IMAGE" -c '
 import sqlite3

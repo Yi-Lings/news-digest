@@ -272,6 +272,8 @@ Admin 登录页，三项全过后才 reload 公网 Nginx，最后才恢复 timer
 已有 `news-digest_news-data` 卷时，bootstrap 会在启动 Admin/worker 前使用已拉取的 worker
 镜像执行 SQLite online backup：源库按只读 URI 打开，备份通过 `PRAGMA integrity_check`
 后以唯一文件名和 0600 权限落到 `/srv/news-digest/backups/`，并生成 SHA-256 校验文件。
+数据卷允许 SQLite 更新 WAL 共享锁文件，但备份代码不会以可写模式打开 `news.db`；这使
+Admin/Site 仍在线且数据库处于 WAL 模式时也能取得一致快照。
 无卷或无有效 `news.db` 时明确跳过；备份、完整性或校验失败会停止部署。未运行 bootstrap
 的手工部署也必须先完成同等的一致性备份，不得直接让新镜像打开旧数据库。
 备份后 bootstrap 会把共享数据卷统一为 GID 10001 组可写，并给目录设置 setgid；否则首次

@@ -338,6 +338,8 @@ def test_bootstrap_backs_up_sqlite_before_starting_database_consumers():
     assert 'DATA_VOLUME=' + dq + 'news-digest_news-data' + dq in function_body
     assert "docker volume ls --format '{{.Name}}'" in function_body
     assert 'docker volume inspect ' + dq + '$DATA_VOLUME' + dq in function_body
+    assert 'type=volume,src=${DATA_VOLUME},dst=/data' in function_body
+    assert 'dst=/data,readonly' not in function_body
     assert 'file:/data/news.db?mode=ro' in function_body
     assert 'uri=True' in function_body
     assert 'source_path.is_symlink()' in function_body
