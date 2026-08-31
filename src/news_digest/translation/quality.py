@@ -31,6 +31,18 @@ _EN_NUMBER = re.compile(
     re.IGNORECASE,
 )
 _EN_WORD_PERCENT = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s+percent\b", re.IGNORECASE)
+_EN_PHYSICAL_M_SUFFIX = re.compile(
+    r"\s*(?:"
+    r"(?:long|wide|high|deep|tall)"
+    r"(?=\s*(?:$|[.,;:!?)]|(?:and|or|but|while|by)\b))"
+    r"|in\s+(?:length|width|height|depth)\b"
+    r"|by\s+\d[\d,]*(?:\.\d+)?\s?m(?=$|[\s.,;:!?)]))",
+    re.IGNORECASE,
+)
+_EN_PHYSICAL_M_PREFIX = re.compile(
+    r"(?:\b(?:measure|measures|measured|measuring)\s+|\d[\d,.]*\s?m\s+by\s+)$",
+    re.IGNORECASE,
+)
 _ZH_PERCENT_PREFIX = re.compile(r"百分之\s*(?P<num>[\d一二三四五六七八九两零十点\.]+)")
 _ZH_ARABIC = re.compile(r"(?P<num>\d[\d,]*(?:\.\d+)?)(?P<unit>万|亿|千)?\s*(?P<pct>%|％)?")
 _ZH_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -126,7 +138,17 @@ def extract_en_values(text: str) -> list[tuple[str, float]]:
         except ValueError:
             continue
         if scale:
-            value *= _SCALE_MULT.get(scale.lower().strip(), 1.0)
+            scale_key = scale.lower().strip()
+            physical_m = (
+                scale == "m"
+                and match.group("cur") is None
+                and (
+                    _EN_PHYSICAL_M_SUFFIX.match(text, match.end()) is not None
+                    or _EN_PHYSICAL_M_PREFIX.search(text, 0, match.start()) is not None
+                )
+            )
+            if not physical_m:
+                value *= _SCALE_MULT.get(scale_key, 1.0)
         values.append(("pct" if pct else "plain", value))
     return values
 

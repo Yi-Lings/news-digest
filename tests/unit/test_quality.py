@@ -67,6 +67,38 @@ class TestHardGate:
         result = _result([["该计划投资50亿元。"]])
         assert quality.check_numbers(["The program will invest 5 billion yuan."], result) == []
 
+    def test_compact_m_physical_measurement_is_not_million(self):
+        result = _result([["该物体长10米。"]])
+        assert quality.extract_en_values("The object is 10m long.") == [("plain", 10.0)]
+        assert quality.check_numbers(["The object is 10m long."], result) == []
+
+    def test_compact_m_dimension_grammar(self):
+        assert quality.extract_en_values("It is 10 m wide.") == [("plain", 10.0)]
+        assert quality.extract_en_values("It measures 10m.") == [("plain", 10.0)]
+        assert quality.extract_en_values("It is 10m by 5m.") == [
+            ("plain", 10.0),
+            ("plain", 5.0),
+        ]
+
+    def test_compact_m_business_compounds_remain_million(self):
+        assert quality.extract_en_values("It signed 10m long-term contracts.") == [
+            ("plain", 10_000_000.0)
+        ]
+        assert quality.extract_en_values("It serves 10m high-value customers.") == [
+            ("plain", 10_000_000.0)
+        ]
+        assert quality.extract_en_values("Revenue will increase 10m by 2027.") == [
+            ("plain", 10_000_000.0),
+            ("plain", 2027.0),
+        ]
+
+    def test_compact_m_currency_remains_million(self):
+        result = _result([["该基金筹集了1000万英镑。"]])
+        assert quality.extract_en_values("The fund raised £10m.") == [
+            ("plain", 10_000_000.0)
+        ]
+        assert quality.check_numbers(["The fund raised £10m."], result) == []
+
     def test_no_numbers_is_noop(self):
         result = _result([["这是在正常推进。"]])
         assert quality.check_numbers(["Things moved forward as planned."], result) == []
