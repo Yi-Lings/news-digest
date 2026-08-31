@@ -4,10 +4,10 @@
 
 ## 1. 当前结论
 
-- 当前分支：`main`，Git 基线与生产环境当前均为测试候选 `v1.4.0t5`。
-- 当前源码版本：`1.4.0`；工作区包含尚未提交的投递状态归并修复，当前发布目标是全新测试候选 `v1.4.0t6`，不是稳定 `v1.4.0`。
-- `v1.4.0t1` 至 `v1.4.0t5` 的 GitHub prerelease、CI/GHCR 和生产部署已经完成，旧 tag 与镜像不可移动。稳定 `v1.4.0` Release 尚未授权、尚未发布。
-- t5 已完成受控生产闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，不扩展邮件投递范围，也不重复调用真实 provider、SMTP 或支付。
+- 当前分支：`main`；测试候选 `v1.4.0t6` 已发布并部署生产，候选 tag 指向投递状态归并提交且不可移动。
+- 当前源码版本：`1.4.0`；稳定 `v1.4.0` Release 尚未授权、尚未发布。
+- `v1.4.0t1` 至 `v1.4.0t6` 的 GitHub prerelease、CI/GHCR 和生产部署已经完成，旧 tag 与镜像不可移动。
+- t5 已完成受控生产业务闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，部署时未调用真实 provider、SMTP 或支付，也未补发历史刊期。
 - 不得读取或输出 provider/API key、SMTP 密码、用户密码、验证码、卡密明文、邮件正文或完整上游响应。
 - 未跟踪文件 `大创文档.md` 属于用户内容，不得删除或覆盖。
 
@@ -140,13 +140,12 @@ t6 对该归并补上持久实现：使用 `BEGIN IMMEDIATE` 与条件更新，�
 
 t6 最新定向回归为 `127 passed, 1 skipped`，独立竞态复审未发现 P0/P1/P2；最终离线全量为 `817 passed, 1 skipped, 7 deselected(network)`。全仓 Ruff、`uv build`、Shell 语法、PowerShell AST 与 `git diff --check` 均通过。
 
+t6 GitHub Linux test、worker/web 镜像构建和 release bundle 全绿；Release 为 prerelease，稳定 latest 仍为 `v1.2.19`。生产部署前体检 `18/18` 通过，SQLite online backup 与 SHA-256 校验通过；部署后 Web/Site/Admin 使用 t6 immutable digest 与同一提交，HTTPS/回环健康为 200，schema `9`、`integrity_check=ok`，timer/path active，daily/resume inactive，无残留 worker。生产仍为翻译任务全部成功、当日刊期 `delivered`、无未决投递，账号、会员、订单和订阅聚合未丢失；邮件和支付开关保持启用。部署后未执行真实业务调用。
+
 ## 6. 待完成门禁
 
-1. 显式暂存 News 文件并排除 `.pytest-final-v140t1/`、`大创文档.md` 与其他用户文件；复核 staged diff 后 commit、push，创建全新 annotated `v1.4.0t6` tag。
-2. 等待 GitHub release workflow 全绿，确认 t6 是 prerelease、不成为 `releases/latest`，并从同一 Release 取得 worker/web immutable digest。
-3. 冻结 News systemd 入口并复核 production online backup，然后用 `server-push.ps1` 部署 t6 digest；不得移动任何旧 tag，也不得用稳定版 `deploy-all.ps1` 隐式发布候选。
-4. 部署后只读核对版本/digest、health、schema/integrity、systemd 和当日刊期/投递审计；不得再次调用真实 provider、SMTP 或支付，不重试 `unknown`，不补发历史刊期。
-5. 用户人工验收：用已注册账号登录；确认顶部显示“管理后台”；进入 `/admin/` 不要求独立运维密码；账户页显示月刊会员、有效期和已支付订单；确认当日邮件实际到达。文档和日志不得记录账号、订单号或邮件正文。
+1. 用户人工验收：用已注册账号登录；确认顶部显示“管理后台”；进入 `/admin/` 时使用同一管理员账号而非独立运维身份；账户页显示月刊会员、有效期和已支付订单；确认当日邮件实际到达。文档和日志不得记录账号、订单号或邮件正文。
+2. 稳定 `v1.4.0` 是否发布必须等待用户对候选的单独明确授权；不得移动 t6 tag 或把 prerelease 直接改成稳定 latest。
 
 ## 7. 最终本地门禁命令
 
@@ -171,8 +170,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产环境当前为 `v1.4.0t5`；在 t6 实际部署完成前不得描述为已上线。
-- 已推送 tag 永不移动；当前候选必须使用全新 `v1.4.0t6`，稳定版才使用 `v1.4.0`。
+- 生产环境当前为 `v1.4.0t6`；稳定版仍未发布。
+- 已推送 tag 永不移动；t6 后的任何代码变化必须使用新提交和新候选 tag，稳定版才使用 `v1.4.0`。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
-- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；t5 已完成的真实闭环不在 t6 重复执行。
+- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；t5 已完成的真实闭环未在 t6 重复执行。
