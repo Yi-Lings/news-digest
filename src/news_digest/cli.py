@@ -377,6 +377,8 @@ def _run_send_email(
         f"unknown {report.unknown_count}，跳过 {report.skipped_count}；"
         f"归档 {report.archive_status}"
     )
+    if report.error_category == "state_sync_failed":
+        print(report.message)
     return 0 if report.succeeded else 1
 
 

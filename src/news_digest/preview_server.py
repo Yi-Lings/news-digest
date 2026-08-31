@@ -4975,18 +4975,18 @@ function loadDelivery() {
 field("delivery-refresh").addEventListener("click", loadDelivery);
 field("retry-failed").addEventListener("click", function () {
   if (!confirm("确认仅重试当前刊期 failed 收件人？sent 与 unknown 不会包含。")) { return; }
-  api("/admin/api/delivery/retry-failed", {confirm: true, edition: currentEdition}).then(function (data) { say("失败重试完成：成功 " + data.sent_count, data.ok); loadDelivery(); }).catch(function (error) { say(error.message, false); });
+  api("/admin/api/delivery/retry-failed", {confirm: true, edition: currentEdition}).then(function (data) { say(data.message || "失败重试完成：成功 " + data.sent_count, data.ok && !data.error_category); loadDelivery(); }).catch(function (error) { say(error.message, false); });
 });
 field("retry-unknown").addEventListener("click", function () {
   if (!confirm("unknown 可能已送达，重试可能产生重复邮件。是否承担此风险并继续？")) { return; }
-  api("/admin/api/delivery/retry-unknown", {confirm: true, confirm_duplicate_risk: true, edition: currentEdition}).then(function (data) { say("unknown 风险重试完成：成功 " + data.sent_count, data.ok); loadDelivery(); }).catch(function (error) { say(error.message, false); });
+  api("/admin/api/delivery/retry-unknown", {confirm: true, confirm_duplicate_risk: true, edition: currentEdition}).then(function (data) { say(data.message || "unknown 风险重试完成：成功 " + data.sent_count, data.ok && !data.error_category); loadDelivery(); }).catch(function (error) { say(error.message, false); });
 });
 field("manual-preview").addEventListener("click", function () {
   api("/admin/api/delivery/manual-preview", {edition: field("manual-edition").value}).then(function (data) { manualPreview = data; field("manual-send").disabled = false; showMailPreview(data); say("指定刊期已预览；确认后默认只发送未成功者。", true); }).catch(function (error) { say(error.message, false); });
 });
 field("manual-send").addEventListener("click", function () {
   if (!manualPreview || !confirm("确认发送刚刚预览的指定刊期？默认只投递未成功者。")) { return; }
-  api("/admin/api/delivery/manual", {edition: manualPreview.edition_date, preview_token: manualPreview.preview_token, fingerprint: manualPreview.fingerprint, confirm: true}).then(function (data) { manualPreview = null; field("manual-send").disabled = true; say("人工投递完成：成功 " + data.sent_count, data.ok); loadDelivery(); }).catch(function (error) { say(error.message, false); });
+  api("/admin/api/delivery/manual", {edition: manualPreview.edition_date, preview_token: manualPreview.preview_token, fingerprint: manualPreview.fingerprint, confirm: true}).then(function (data) { manualPreview = null; field("manual-send").disabled = true; say(data.message || "人工投递完成：成功 " + data.sent_count, data.ok && !data.error_category); loadDelivery(); }).catch(function (error) { say(error.message, false); });
 });
 
 field("change-password").addEventListener("click", function () {

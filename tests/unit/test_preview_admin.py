@@ -3358,6 +3358,8 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert ADMIN_HTML.startswith("<!DOCTYPE html>")
     assert "innerhtml" not in lowered
     assert ".textcontent" in lowered
+    assert ADMIN_HTML.count("data.message ||") == 3
+    assert ADMIN_HTML.count("data.ok && !data.error_category") == 3
     assert "replacechildren" in lowered
     assert 'id="test"' in lowered
     assert 'id="f-type"' in lowered

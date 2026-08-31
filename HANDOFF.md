@@ -4,10 +4,10 @@
 
 ## 1. 当前结论
 
-- 当前分支：`main`，基线提交与生产版本仍为 `v1.2.19`。
-- 当前源码版本：`1.4.0`，工作区包含尚未提交的 v1.3.0 与 v1.4.0 改动；当前发布目标是测试候选 `v1.4.0t1`，不是稳定 `v1.4.0`。
-- v1.4.0 本地功能与发布门禁已收口；EasyPay 支付已按现有 `fastpay-adapter` 改为 `mapi.php` API 模式。最终离线全量、独立复审、浏览器复核和生产数据库副本迁移演练均已通过；候选 CI/GHCR 和生产真实闭环尚未完成。
-- 用户已授权在全面测试通过后 commit、push、创建 annotated `v1.4.0t1` tag，并在先完成 SQLite 一致性备份的前提下部署生产测试候选；同时授权真实抓取、受控翻译、SMTP 和 FastPay 后台确认支付闭环。稳定 `v1.4.0` Release 尚未授权。
+- 当前分支：`main`，Git 基线与生产环境当前均为测试候选 `v1.4.0t5`。
+- 当前源码版本：`1.4.0`；工作区包含尚未提交的投递状态归并修复，当前发布目标是全新测试候选 `v1.4.0t6`，不是稳定 `v1.4.0`。
+- `v1.4.0t1` 至 `v1.4.0t5` 的 GitHub prerelease、CI/GHCR 和生产部署已经完成，旧 tag 与镜像不可移动。稳定 `v1.4.0` Release 尚未授权、尚未发布。
+- t5 已完成受控生产闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，不扩展邮件投递范围，也不重复调用真实 provider、SMTP 或支付。
 - 不得读取或输出 provider/API key、SMTP 密码、用户密码、验证码、卡密明文、邮件正文或完整上游响应。
 - 未跟踪文件 `大创文档.md` 属于用户内容，不得删除或覆盖。
 
@@ -109,6 +109,7 @@ src/news_digest/site_server.py       读者站点、账号端点、订单、兑�
 src/news_digest/storage/db.py        schema v9、用户/会话/订单/卡密/免费阅读数据操作
 src/news_digest/preview_server.py    Admin“用户与付费”API 与 UI
 src/news_digest/delivery/mailer.py   注册/重置验证码邮件
+src/news_digest/delivery/delivery_service.py  投递批次、收件人事实与刊期状态归并
 src/news_digest/cli.py               site 子命令和运行配置
 deploy/compose.yaml                  site/admin/web/worker 服务边界
 deploy/nginx/news.conf               公网反向代理与 CSP
@@ -119,7 +120,7 @@ tests/unit/test_release_deploy_artifacts.py
 
 ## 5. 当前验证证据
 
-最终候选门禁与外部依赖证据：
+已完成的 t5 候选门禁与生产闭环证据：
 
 ```text
 News 离线全量：799 passed, 1 skipped, 7 deselected(network)
@@ -131,14 +132,21 @@ FastPay Server（Java 17 / Maven）：18 passed，BUILD SUCCESS
 
 浏览器已复核首页桌面与 `390x844` 手机端、会员价格、登录/角色、账户订单和 Admin“用户与付费”工作区；无横向溢出或新增 console error。Admin 窄屏最后两个页签需要横向滑动，属于非阻断可发现性风险。
 
-生产 `v1.2.19` live DB 仅做 online backup；其副本已在 `--network none`、只读文件系统和 tmpfs 环境中完成 schema `7 -> 9` 演练。迁移前后 `integrity_check=ok`，13 个旧关键表计数逐项不变，8 个新表全部存在；live DB 未被候选代码写入。
+生产部署前的 SQLite online backup 与 SHA-256 核验通过；部署后 schema 为 `9`，`integrity_check=ok`。当日正式任务达到翻译 `6/6`、上线 `6/6`，数字质量门误判已消失。真实 EasyPay 订单完成回调、重复通知幂等与会员权益闭环。
+
+当日内容完成时间超过 `08:00 + 6h` 自动追赶窗口，自动投递按设计拒绝迟发。在确认当日没有投递批次且没有 `unknown` 后，仅人工正式投递当日刊物一次，结果为 `sent=1`、`failed=0`、`unknown=0` 且归档成功；没有补发历史刊期。旧的 `complete + DELIVERY_FAILED` 汇总已通过正式数据库状态机归并为 `delivered` 并清除旧错误，未改写收件人投递事实。
+
+t6 对该归并补上持久实现：使用 `BEGIN IMMEDIATE` 与条件更新，只处理已经完成的 `manual`、`retry_failed`、`retry_unknown` 批次。批次仍有 `failed/unknown`、刊期未全部翻译或上线、存在 `sending/unknown`、当前有效付费目标仍待处理时返回 `blocked`；租约未过期的 `delivery_pending` 不会被覆盖，过期认领也只在不存在未决收件人时收口。收件人投递事实持久化后，即使汇总同步异常，也保持发送成功并返回 `state_sync_failed` 与“禁止重发”告警；Admin 人工投递和两类重试均显示后端原始告警，不再用普通成功文案掩盖。
+
+t6 最新定向回归为 `127 passed, 1 skipped`，独立竞态复审未发现 P0/P1/P2；最终离线全量为 `817 passed, 1 skipped, 7 deselected(network)`。全仓 Ruff、`uv build`、Shell 语法、PowerShell AST 与 `git diff --check` 均通过。
 
 ## 6. 待完成门禁
 
-1. 显式暂存 News 文件并排除 `大创文档.md` 与测试临时目录；复核 staged diff 后 commit、push、创建 annotated `v1.4.0t1` tag。
-2. 等待 GitHub release workflow 全绿，确认候选是 prerelease、不成为 `releases/latest`，并从同一 Release 取得 worker/web immutable digest。
-3. 先备份并升级 FastPay Server/Adapter，再冻结 News 四个 systemd unit、复核 production online backup，并用 `server-push.ps1` 部署候选 digest；不得用稳定版 `deploy-all.ps1` 隐式创建候选 tag。
-4. 生产闭环只验证一个注册账号、一个 FastPay 测试订单、当日真实抓取、受控翻译、构建和受限 SMTP；支付可在 FastPay 后台确认。不得补发历史刊期，测试后核对旧刊期、订阅、翻译任务和投递审计未丢失。
+1. 显式暂存 News 文件并排除 `.pytest-final-v140t1/`、`大创文档.md` 与其他用户文件；复核 staged diff 后 commit、push，创建全新 annotated `v1.4.0t6` tag。
+2. 等待 GitHub release workflow 全绿，确认 t6 是 prerelease、不成为 `releases/latest`，并从同一 Release 取得 worker/web immutable digest。
+3. 冻结 News systemd 入口并复核 production online backup，然后用 `server-push.ps1` 部署 t6 digest；不得移动任何旧 tag，也不得用稳定版 `deploy-all.ps1` 隐式发布候选。
+4. 部署后只读核对版本/digest、health、schema/integrity、systemd 和当日刊期/投递审计；不得再次调用真实 provider、SMTP 或支付，不重试 `unknown`，不补发历史刊期。
+5. 用户人工验收：用已注册账号登录；确认顶部显示“管理后台”；进入 `/admin/` 不要求独立运维密码；账户页显示月刊会员、有效期和已支付订单；确认当日邮件实际到达。文档和日志不得记录账号、订单号或邮件正文。
 
 ## 7. 最终本地门禁命令
 
@@ -163,8 +171,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产环境仍为 `v1.2.19`；不能把本地候选描述为已上线。
-- 已推送 tag 永不移动；首个候选使用全新 `v1.4.0t1`，后续候选递增 `tN`，稳定版才使用 `v1.4.0`。
+- 生产环境当前为 `v1.4.0t5`；在 t6 实际部署完成前不得描述为已上线。
+- 已推送 tag 永不移动；当前候选必须使用全新 `v1.4.0t6`，稳定版才使用 `v1.4.0`。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
-- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递。
+- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；t5 已完成的真实闭环不在 t6 重复执行。

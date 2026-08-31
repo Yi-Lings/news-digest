@@ -25,6 +25,7 @@ CONTENT_ERROR_CODES = ("CONTENT_NUMBER_MISSING",)
 DeliveryStatus = Literal["pending", "sending", "sent", "failed", "unknown"]
 ArchiveStatus = Literal["pending", "archived", "failed"]
 DeliveryRunStatus = Literal["running", "completed", "partial", "failed", "skipped"]
+DeliveryReconciliationResult = Literal["reconciled", "not_applicable", "blocked"]
 SubscriptionStatus = Literal["pending", "active", "unsubscribed", "disabled"]
 SubscriptionSource = Literal["public", "admin_test"]
 SubscriptionTokenPurpose = Literal["confirm", "unsubscribe"]
@@ -4425,6 +4426,120 @@ def finish_delivery_run(
         )
     if cursor.rowcount != 1:
         raise RuntimeError("delivery run does not exist")
+
+
+def reconcile_completed_delivery_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    edition_date: str,
+    now: str,
+) -> DeliveryReconciliationResult:
+    """Atomically reconcile a completed operator delivery with automation state."""
+    run_id = _non_empty(run_id, "run_id", maximum=128)
+    _validate_test_attempt_date(edition_date)
+    now = _automation_timestamp(now)
+    allowed_modes = {"manual", "retry_failed", "retry_unknown"}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        run = conn.execute(
+            "SELECT edition_date, mode, status, started_at, finished_at,"
+            " failed_count, unknown_count"
+            " FROM email_delivery_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise RuntimeError("delivery run does not exist")
+        if run["edition_date"] != edition_date:
+            raise RuntimeError("delivery run edition does not match")
+        if run["mode"] not in allowed_modes:
+            conn.commit()
+            return "not_applicable"
+        if (
+            run["status"] != "completed"
+            or run["finished_at"] is None
+            or run["failed_count"]
+            or run["unknown_count"]
+        ):
+            conn.commit()
+            return "blocked"
+
+        edition = conn.execute(
+            "SELECT status, target_count, succeeded_count, online_count,"
+            " delivery_expires_at"
+            " FROM automation_editions WHERE edition_date = ?",
+            (edition_date,),
+        ).fetchone()
+        if edition is None:
+            conn.commit()
+            return "not_applicable"
+        if edition["status"] == "delivered":
+            conn.commit()
+            return "reconciled"
+        if edition["status"] == "delivery_pending":
+            if edition["delivery_expires_at"] is None:
+                conn.commit()
+                return "blocked"
+            if edition["delivery_expires_at"] > now:
+                conn.commit()
+                return "not_applicable"
+        elif edition["status"] != "complete":
+            conn.commit()
+            return "blocked"
+        if (
+            edition["succeeded_count"] < edition["target_count"]
+            or edition["online_count"] < edition["target_count"]
+        ):
+            conn.commit()
+            return "blocked"
+
+        unresolved = conn.execute(
+            "SELECT COUNT(*) AS count FROM email_deliveries"
+            " WHERE edition_date = ? AND status IN ('sending', 'unknown')",
+            (edition_date,),
+        ).fetchone()
+        pending_targets = conn.execute(
+            "SELECT COUNT(*) AS count FROM subscriptions AS s"
+            " JOIN users AS u ON u.email_key = s.email_key"
+            " LEFT JOIN email_deliveries AS d"
+            " ON d.recipient_key = s.email_key AND d.edition_date = ?"
+            " WHERE s.status = 'active' AND u.status = 'active'"
+            " AND u.plan IS NOT NULL AND u.paid_until > ?"
+            " AND (d.status IS NULL OR d.status IN"
+            " ('pending', 'failed', 'sending', 'unknown'))",
+            (edition_date, now),
+        ).fetchone()
+        if unresolved["count"] or pending_targets["count"]:
+            conn.commit()
+            return "blocked"
+
+        first_run = conn.execute(
+            "SELECT MIN(started_at) AS started_at FROM email_delivery_runs"
+            " WHERE edition_date = ? AND mode IN"
+            " ('auto', 'manual', 'retry_failed', 'retry_unknown')",
+            (edition_date,),
+        ).fetchone()
+        first_started_at = first_run["started_at"] or run["started_at"]
+        finished_at = _automation_timestamp(run["finished_at"])
+        updated_at = max(now, finished_at)
+
+        delivery_key = hashlib.sha256(
+            f"automation-delivery\n{edition_date}".encode()
+        ).hexdigest()
+        cursor = conn.execute(
+            "UPDATE automation_editions SET status = 'delivered',"
+            " delivery_key = COALESCE(delivery_key, ?), delivery_expires_at = NULL,"
+            " delivery_started_at = COALESCE(delivery_started_at, ?),"
+            " delivery_finished_at = ?, last_error_code = NULL, updated_at = ?"
+            " WHERE edition_date = ? AND (status = 'complete' OR"
+            " (status = 'delivery_pending' AND delivery_expires_at IS NOT NULL"
+            " AND delivery_expires_at <= ?))",
+            (delivery_key, first_started_at, finished_at, updated_at, edition_date, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return "reconciled" if cursor.rowcount == 1 else "blocked"
 
 
 def latest_delivery_run(conn: sqlite3.Connection, *, mode: str | None = None) -> DeliveryRun | None:

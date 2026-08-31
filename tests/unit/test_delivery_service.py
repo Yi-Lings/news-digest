@@ -102,6 +102,26 @@ def _add_paid_users(database, recipients):
         conn.close()
 
 
+def _complete_automation_edition(database, *, error="DELIVERY_FAILED"):
+    conn = db.connect(database)
+    try:
+        db.ensure_automation_edition(
+            conn,
+            DATE,
+            target_count=1,
+            now=NOW.isoformat(),
+        )
+        with conn:
+            conn.execute(
+                "UPDATE automation_editions SET status = 'complete',"
+                " succeeded_count = 1, online_count = 1, last_error_code = ?"
+                " WHERE edition_date = ?",
+                (error, DATE),
+            )
+    finally:
+        conn.close()
+
+
 class FakeSMTP:
     messages = []
     fail_for = set()
@@ -189,6 +209,7 @@ def _deliver(tmp_path, mode="manual", *, smtp=None, archive_dir=None, **kwargs):
         conn.close()
     else:
         _add_paid_users(tmp_path / "news.db", smtp_config.recipients)
+    now = kwargs.pop("now", NOW)
     report = deliver_published(
         mode,
         output_root=root,
@@ -196,7 +217,7 @@ def _deliver(tmp_path, mode="manual", *, smtp=None, archive_dir=None, **kwargs):
         site_url=SITE,
         timezone="Asia/Shanghai",
         smtp_config=smtp_config,
-        now=NOW,
+        now=now,
         archive_dir=archive_dir,
         smtp_factory=FakeSMTP,
         **kwargs,
@@ -378,6 +399,180 @@ def test_all_success_private_messages_have_body_and_header_unsubscribe(tmp_path)
     assert "one@example.com" not in archived
     assert "two@example.com" not in archived
     assert "/unsubscribe/" not in archived
+
+
+def test_completed_manual_delivery_reconciles_automation_summary(tmp_path):
+    database = tmp_path / "news.db"
+    _complete_automation_edition(database)
+
+    _, _, report = _deliver(tmp_path, archive_dir=tmp_path / "mail")
+
+    assert report.status == "sent"
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None
+        assert edition.status == "delivered"
+        assert edition.last_error_code is None
+        assert edition.delivery_key is not None
+        assert edition.delivery_started_at == NOW.isoformat()
+        run = db.latest_delivery_run(conn)
+        assert run is not None
+        assert edition.delivery_finished_at == run.finished_at
+    finally:
+        conn.close()
+
+
+def test_skipped_manual_run_does_not_hide_unresolved_unknown(tmp_path):
+    database = tmp_path / "news.db"
+    recipients = ("sent@example.com", "unknown@example.com")
+    smtp = _smtp(recipients)
+    _complete_automation_edition(database)
+    FakeSMTP.unknown_for = {"unknown@example.com"}
+
+    _, _, first = _deliver(tmp_path, smtp=smtp)
+    assert first.sent_count == 1 and first.unknown_count == 1
+    FakeSMTP.unknown_for = set()
+    _, _, skipped = _deliver(tmp_path, smtp=smtp, now=NOW + dt.timedelta(minutes=1))
+
+    assert skipped.status == "skipped"
+    assert skipped.error_category == "state_sync_failed"
+    assert "禁止重发" in skipped.message
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None
+        assert edition.status == "complete"
+        assert edition.last_error_code == "DELIVERY_FAILED"
+    finally:
+        conn.close()
+
+    _, _, retried = _deliver(
+        tmp_path,
+        mode="retry_unknown",
+        smtp=smtp,
+        confirm_unknown=True,
+        now=NOW + dt.timedelta(minutes=2),
+    )
+    assert retried.sent_count == 1 and retried.unknown_count == 0
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None and edition.status == "delivered"
+        assert edition.delivery_started_at == NOW.isoformat()
+        run = db.latest_delivery_run(conn)
+        assert run is not None
+        assert edition.delivery_finished_at == run.finished_at
+    finally:
+        conn.close()
+
+
+def test_manual_delivery_does_not_override_active_automation_claim(tmp_path):
+    database = tmp_path / "news.db"
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        key = db.claim_automation_delivery(conn, DATE, now=NOW.isoformat())
+        assert key is not None
+    finally:
+        conn.close()
+
+    _, _, report = _deliver(tmp_path)
+
+    assert report.status == "sent"
+    assert report.error_category is None
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None
+        assert edition.status == "delivery_pending"
+        assert edition.delivery_key == key
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("edition_status", ["partial", "build_failed"])
+def test_manual_delivery_reports_incomplete_automation_summary(
+    tmp_path, edition_status
+):
+    database = tmp_path / "news.db"
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE automation_editions SET status = ? WHERE edition_date = ?",
+                (edition_status, DATE),
+            )
+    finally:
+        conn.close()
+
+    _, _, report = _deliver(tmp_path)
+
+    assert report.succeeded
+    assert report.error_category == "state_sync_failed"
+    assert "禁止重发" in report.message
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None and edition.status == edition_status
+    finally:
+        conn.close()
+
+
+def test_manual_delivery_reconciles_expired_automation_claim(tmp_path):
+    database = tmp_path / "news.db"
+    _complete_automation_edition(database)
+    claim_started_at = NOW - dt.timedelta(minutes=11)
+    conn = db.connect(database)
+    try:
+        key = db.claim_automation_delivery(conn, DATE, now=claim_started_at.isoformat())
+        assert key is not None
+    finally:
+        conn.close()
+
+    _, _, report = _deliver(tmp_path)
+
+    assert report.status == "sent"
+    assert report.error_category is None
+    conn = db.connect(database)
+    try:
+        edition = db.automation_edition(conn, DATE)
+        run = db.latest_delivery_run(conn)
+        assert edition is not None and edition.status == "delivered"
+        assert edition.delivery_expires_at is None
+        assert edition.delivery_started_at == claim_started_at.isoformat()
+        assert run is not None
+        assert edition.delivery_finished_at == run.finished_at
+        assert edition.updated_at >= edition.delivery_finished_at
+    finally:
+        conn.close()
+
+
+def test_delivery_sync_failure_preserves_sent_outcome_and_forbids_resend(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "news.db"
+    _complete_automation_edition(database)
+
+    def fail_sync(*args, **kwargs):
+        raise sqlite3.OperationalError("fixture state sync failure")
+
+    monkeypatch.setattr(db, "reconcile_completed_delivery_run", fail_sync)
+    _, _, report = _deliver(tmp_path)
+
+    assert report.succeeded
+    assert report.error_category == "state_sync_failed"
+    assert "禁止重发" in report.message
+    conn = db.connect(database)
+    try:
+        summary = db.delivery_summary(conn, DATE)
+        run = db.latest_delivery_run(conn)
+        assert summary.sent == 1 and summary.unknown == 0
+        assert run is not None and run.status == "completed"
+        assert db.automation_edition(conn, DATE).status == "complete"
+    finally:
+        conn.close()
 
 
 def test_partial_translation_records_degraded_status(tmp_path):

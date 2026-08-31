@@ -4,7 +4,7 @@
 
 [在线阅读](https://news.cheapcoding.top) · [快速部署](#快速部署) · [部署手册](deploy/README.md) · [运维手册](docs/OPERATIONS.md) · [技术路线](技术路线.md)
 
-当前源码版本：`1.4.0`；首个测试候选为 `v1.4.0t1`，正式 `v1.4.0` 尚未发布。测试候选包含翻译质量与任务恢复、账号注册/邮箱验证码、会员简报与付费墙、EasyPay 兼容自动支付、卡密兑换及 Admin 用户管理。生产环境仍为 `v1.2.19`，只有候选门禁与生产闭环通过后才会另行发布稳定版。
+当前源码版本：`1.4.0`；生产环境当前运行测试候选 `v1.4.0t5`，本轮发布目标为 `v1.4.0t6`，正式 `v1.4.0` 尚未发布。测试候选包含翻译质量与任务恢复、账号注册/邮箱验证码、会员简报与付费墙、EasyPay 兼容自动支付、卡密兑换及 Admin 用户管理。
 
 v1.4.0 的付费设置支持以元输入月付/年付基准价格（最多两位小数）和独立折扣百分比；有折扣时订阅页显示划线原价、绿色折扣标识与折后现价，订单保存创建时的折后金额。
 
@@ -38,6 +38,8 @@ v1.4.0 的付费设置支持以元输入月付/年付基准价格（最多两位
 - 正式刊物全部翻译、构建完成后才发送；调度重启、重复 build 或重复 worker 不会重复投递成功收件人。
 - SMTP 支持 implicit TLS 与 STARTTLS。连接测试不发信，测试邮件和正式投递需要显式确认。
 - DATA 阶段结果不确定时记录为 `unknown` 并停止自动重发，避免邮件可能已被服务端接受后再次投递。
+- 已完成的 `manual`、`retry_failed` 或经管理员确认风险后的 `retry_unknown` 批次，会在收件人结果全部确定、刊期内容全部上线且没有待处理付费目标时，原子归并刊期为 `delivered` 并清除旧投递错误。归并只同步状态，不发送邮件，也不会覆盖租约未过期的自动投递认领；过期认领只有在不存在未决收件人后才可由同一事务安全收口。
+- 归并条件不足时返回 `blocked` 并保留原刊期状态；若收件人投递事实已持久化但汇总同步失败，CLI 与 Admin 显示 `state_sync_failed` 和“禁止重发”告警。此时必须检查投递审计，不得把汇总失败当作 SMTP 失败再次发送。
 
 ![会员简报区：付费会员主动启停、随时退订](docs/screenshots/subscription.png)
 
@@ -221,7 +223,7 @@ unset GH_TOKEN
 
 需要避开服务器已有端口时，在同一行增加 `ND_WEB_PORT=9000 ND_ADMIN_PORT=9001 ND_SITE_PORT=9002`。若镜像为私有且脚本提示缺少 GHCR 权限，执行 `docker login ghcr.io -u 你的GitHub用户名`，在密码提示中粘贴只读 PAT，再原样重跑安装命令；不要把 PAT 写进命令参数或仓库。
 
-安装器会校验稳定 Release、部署包和镜像 digest，执行服务器体检，创建配置目录与持久化 volume，启动 Web/Site/Admin，安装每天 `08:00 Asia/Shanghai` 的 systemd timer，并配置 Nginx、HTTPS 和证书续期。安装阶段不会接收 API/SMTP 密钥，也不会获取 RSS、翻译、构建或投递。`v1.4.0t1` 是 prerelease，不成为 `releases/latest`，因此不能通过“最新稳定版”安装器误装；维护者按[部署手册](deploy/README.md)使用 `server-push.ps1` 和同一候选 Release 的 immutable digest 受控部署。
+安装器会校验稳定 Release、部署包和镜像 digest，执行服务器体检，创建配置目录与持久化 volume，启动 Web/Site/Admin，安装每天 `08:00 Asia/Shanghai` 的 systemd timer，并配置 Nginx、HTTPS 和证书续期。安装阶段不会接收 API/SMTP 密钥，也不会获取 RSS、翻译、构建或投递。所有 `v1.4.0tN` 测试候选都是 prerelease，不成为 `releases/latest`，因此不能通过“最新稳定版”安装器误装；维护者按[部署手册](deploy/README.md)使用 `server-push.ps1` 和同一候选 Release 的 immutable digest 受控部署。
 
 #### 部署后配置与首次运行
 
@@ -384,6 +386,11 @@ resume service 为 `inactive`；两个 service 都把应用终态 `10` 视为已
 但其自动投递资格已过期。只有当天刊期需要补投时，才在核对订阅者逐账号投递状态、SMTP
 服务端队列以及所有 `unknown` 后，由管理员明确决定是否执行一次当日恢复；任何历史刊期都
 不得自动补发，`unknown` 也不得盲目重发。
+
+人工投递或失败项重试完成后，系统只在安全条件全部成立时归并自动化刊期状态。若 Admin
+显示 `state_sync_failed`，表示收件人结果或批次事实已经保存，但刊期汇总仍被未完成结果、
+并发状态或数据库异常阻断；页面会直接显示后端告警而不是普通成功提示。先核对投递批次与
+逐收件人状态，禁止为了清除告警再次发送。
 
 ## 常见问题
 

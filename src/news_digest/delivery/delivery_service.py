@@ -317,6 +317,20 @@ def _result_error_stage(results: list[RecipientDeliveryResult]) -> ReportErrorSt
     return stages.pop() if len(stages) == 1 else "multiple"
 
 
+def _reconcile_completed_run_safely(
+    conn,
+    run_id: str,
+    edition_date: str,
+    now_iso: str,
+) -> db.DeliveryReconciliationResult | Literal["failed"]:
+    # SMTP outcomes are already durable here. A summary-sync failure must never
+    # turn a successful send into a retryable delivery failure.
+    try:
+        return db.reconcile_completed_delivery_run(conn, run_id, edition_date, now_iso)
+    except Exception:
+        return "failed"
+
+
 def deliver_published(
     mode: DeliveryMode,
     *,
@@ -431,6 +445,10 @@ def deliver_published(
             )
             if not recipients:
                 db.finish_delivery_run(conn, run_id, "completed", now_iso)
+                state_sync_result = _reconcile_completed_run_safely(
+                    conn, run_id, release.release_date, now_iso
+                )
+                state_sync_ok = state_sync_result in {"reconciled", "not_applicable"}
                 return DeliveryServiceReport(
                     run_id,
                     release.release_name,
@@ -444,7 +462,13 @@ def deliver_published(
                     0,
                     rendered.metadata.degraded,
                     "not_requested",
-                    message="没有待投递收件人；已成功者不会重复发送",
+                    error_category=None if state_sync_ok else "state_sync_failed",
+                    message=(
+                        "没有待投递收件人；已成功者不会重复发送"
+                        if state_sync_ok
+                        else "投递事实已持久化，但刊期状态同步失败；"
+                        "禁止重发，请检查投递审计。"
+                    ),
                 )
 
         results: list[RecipientDeliveryResult] = []
@@ -570,6 +594,7 @@ def deliver_published(
                 archive_status = "archived"
         error_category = _result_error_category(results, archive_error)
         error_stage = _result_error_stage(results)
+        state_sync_ok = True
         if mode != "test":
             if archive_status == "failed":
                 db.mark_archive(conn, release.release_date, "failed", now_iso, "archive_failed")
@@ -592,8 +617,15 @@ def deliver_published(
                 unknown_count=unknown_count,
                 error_category=error_category,
             )
+            if run_status == "completed":
+                state_sync_result = _reconcile_completed_run_safely(
+                    conn, run_id, release.release_date, now_iso
+                )
+                state_sync_ok = state_sync_result in {"reconciled", "not_applicable"}
         if archive_status == "failed":
             status = "failed"
+        if not state_sync_ok:
+            error_category = "state_sync_failed"
         return DeliveryServiceReport(
             run_id,
             release.release_name,
@@ -608,7 +640,14 @@ def deliver_published(
             rendered.metadata.degraded,
             archive_status,
             error_category=error_category,
-            message="投递完成" if status == "sent" else "投递未全部成功",
+            message=(
+                "投递事实已持久化，但刊期状态同步失败；"
+                "禁止重发，请检查投递审计。"
+                if not state_sync_ok
+                else "投递完成"
+                if status == "sent"
+                else "投递未全部成功"
+            ),
             error_stage=error_stage,
         )
     except Exception:
