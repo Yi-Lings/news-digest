@@ -56,7 +56,7 @@ from news_digest.admin_providers import (
 from news_digest.config import (
     SmtpConfig,
     TranslationConfig,
-    public_subscription_enabled_from_env,
+    normalize_email_address,
     smtp_config_from_env,
 )
 from news_digest.config_io import atomic_write_bytes_unlocked, atomic_write_text, locked_path
@@ -75,7 +75,6 @@ from news_digest.delivery.mailer import (
     send_confirmation,
     send_test_email,
     test_connection,
-    validate_smtp,
 )
 from news_digest.delivery.publisher import resolve_published_release
 from news_digest.rendering.email import render_email_preview
@@ -89,7 +88,6 @@ from news_digest.translation.client import (
 _APR1_CHARS = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _SESSION_TTL_SECONDS = 7 * 24 * 3600
 _SESSION_COOKIE = "nd_admin_session"
-_PUBLIC_CSRF_COOKIE = "nd_public_csrf"
 _SITE_ADMIN_DUMMY_PASSWORD_HASH = accounts.hash_password("admin-login-timing-equalizer")
 
 _QR_DATA_HEADERS = {
@@ -120,11 +118,6 @@ def _validated_qr_data_url(value: object) -> str:
     ):
         raise ValueError("QR 图片内容与声明的 MIME 类型不一致")
     return qr
-_PUBLIC_CSRF_TTL_SECONDS = 2 * 3600
-_PUBLIC_BODY_LIMIT = 1_024
-_PUBLIC_EMAIL_LIMIT = 254
-
-
 def _request_origin(value: str) -> tuple[str, str, int]:
     if not value or "\\" in value or any(
         ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
@@ -195,8 +188,7 @@ _IDEMPOTENCY_WARNING = (
     "测试尝试已按脱敏指纹持久记录；未解决的 running/unknown 状态会阻止同一请求重发，"
     "须先人工核对 SMTP 服务端投递/队列日志。"
 )
-_PUBLIC_SUBMISSION_MESSAGE = "如果该地址可以订阅，我们会发送一封确认邮件。"
-_PUBLIC_CONFIRM_MESSAGE = "确认请求已处理；如链接有效，订阅将生效。"
+_PUBLIC_SUBSCRIPTION_DISABLED_MESSAGE = "匿名订阅入口已关闭，请登录会员账号管理每日简报"
 _PUBLIC_UNSUBSCRIBE_MESSAGE = "退订请求已处理；如链接有效，后续邮件将停止。"
 _AUTOMATION_EDITION_ERROR_CODES = frozenset(
     {"BUILD_FAILED", "DELIVERY_FAILED", "DELIVERY_EXPIRED"}
@@ -282,29 +274,6 @@ def _verify_session(secret: bytes, token: str) -> bool:
 
 def _csrf_token(secret: bytes, session_token: str) -> str:
     return hmac.new(secret, f"csrf|{session_token}".encode(), hashlib.sha256).hexdigest()
-
-
-def _public_csrf_token(secret: bytes, nonce: str, expires_at: int) -> str:
-    payload = f"{nonce}|{expires_at}"
-    digest = hmac.new(secret, f"public-csrf|{payload}".encode(), hashlib.sha256).hexdigest()
-    return f"{payload}|{digest}"
-
-
-def _verify_public_csrf(secret: bytes, cookie_nonce: str, token: str, now: float) -> bool:
-    parts = token.split("|")
-    if len(parts) != 3 or not cookie_nonce:
-        return False
-    nonce, raw_expires, digest = parts
-    try:
-        expires_at = int(raw_expires)
-    except ValueError:
-        return False
-    if expires_at < now or nonce != cookie_nonce:
-        return False
-    expected = hmac.new(
-        secret, f"public-csrf|{nonce}|{expires_at}".encode(), hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, digest)
 
 
 def verify_htpasswd(htpasswd_file: Path, username: str, password: str) -> bool:
@@ -479,20 +448,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return values[0] == f"127.0.0.1:{self.server.server_port}"
         return _request_host(values[0], self.server.admin_origin[0]) == self.server.admin_origin
 
-    def _public_same_origin(self) -> bool:
-        origin = self.headers.get("Origin", "")
-        if not origin or not self._public_request_host_valid():
-            return False
-        if origin == "null":
-            return (
-                self.server.loopback_browser_compat
-                and self.server.public_origin[1] == "127.0.0.1"
-            )
-        try:
-            return _request_origin(origin) == self.server.public_origin
-        except ValueError:
-            return False
-
     def _csrf_for_response(self) -> str:
         if not self._login_required:
             return ""
@@ -508,14 +463,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if user is not None:
             return f"site-user:{user.id}"
         return "local-admin"
-
-    def _valid_public_csrf(self, token: str) -> bool:
-        return _verify_public_csrf(
-            self.server.public_secret,
-            self._cookie(_PUBLIC_CSRF_COOKIE),
-            token,
-            self.server.clock(),
-        )
 
     def _consume_sensitive_limit(self, action: str) -> bool:
         now = self.server.clock()
@@ -590,8 +537,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if path == "/admin/api/subscriptions":
             self._handle_subscriptions_get()
             return
-        if path == "/admin/api/site/overview":
-            self._handle_site_overview()
+        if path == "/admin/api/users/overview":
+            self._handle_users_overview(
+                parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            )
+            return
+        if path in {"/admin/api/payments/overview", "/admin/api/site/overview"}:
+            self._handle_payments_overview()
             return
         if path == "/admin/api/translations":
             self._handle_translations_get(parse_qs(urlsplit(self.path).query).get("edition", [None])[0])
@@ -789,11 +741,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self.server.loopback_public_subscription or bool(self.server.site_url)
         )
 
-    def _public_subscription_base(self) -> str:
-        if self.server.loopback_public_subscription:
-            return f"http://127.0.0.1:{self.server.server_port}"
-        return subscriptions.public_https_base(self.server.site_url)
-
     def _public_request_host_valid(self) -> bool:
         values = self.headers.get_all("Host", [])
         if len(values) != 1:
@@ -804,20 +751,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         return _request_host(host, self.server.public_origin[0]) == self.server.public_origin
 
     def _public_submission_ready(self) -> bool:
-        if not self.server.public_subscription_enabled or not self._public_endpoint_ready():
-            return False
-        try:
-            env = read_env(self._env_path())
-            if not public_subscription_enabled_from_env(env):
-                return False
-            self._public_subscription_base()
-            smtp = smtp_config_from_env(env)
-            if not smtp.delivery_enabled:
-                return False
-            validate_smtp(smtp, require_recipients=False)
-        except (AdminEmailError, MailError, ValueError):
-            return False
-        return True
+        return False
 
     def _public_token(self, raw: str) -> str:
         token = unquote(raw)
@@ -833,22 +767,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         return token
 
     def _issue_public_csrf(self) -> None:
-        if not self._public_submission_ready():
-            self._json(404, {"error": "接口未启用"})
-            return
-        if not self._public_request_host_valid():
-            self._json(403, {"error": "Host 无效"})
-            return
-        nonce = secrets.token_urlsafe(32)
-        expires_at = int(self.server.clock()) + _PUBLIC_CSRF_TTL_SECONDS
-        token = _public_csrf_token(self.server.public_secret, nonce, expires_at)
-        cookie = (
-            f"{_PUBLIC_CSRF_COOKIE}={nonce}; Max-Age={_PUBLIC_CSRF_TTL_SECONDS}; "
-            "Path=/subscribe/api/; SameSite=Strict"
-        )
-        if not self.server.loopback_public_subscription:
-            cookie += "; Secure"
-        self._json(200, {"csrf_token": token}, extra_headers={"Set-Cookie": cookie})
+        self._json(404, {"error": _PUBLIC_SUBSCRIPTION_DISABLED_MESSAGE})
 
     def _public_length(self, maximum: int) -> tuple[int | None, str | None]:
         raw_length = self.headers.get("Content-Length")
@@ -863,95 +782,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         return length, None
 
     def _handle_public_submission(self) -> None:
-        if not self._public_submission_ready():
-            self._json(404, {"error": "接口未启用"})
-            return
-        if not self._public_request_host_valid():
-            self._json(403, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        if not self._public_same_origin():
-            self._json(403, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
-        if content_type != "application/json":
-            self._json(415, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        length, length_error = self._public_length(_PUBLIC_BODY_LIMIT)
-        if length_error is not None:
-            self._json(
-                413 if length_error == "too_large" else 411,
-                {"message": _PUBLIC_SUBMISSION_MESSAGE},
-            )
-            return
-        try:
-            body = json.loads(self.rfile.read(length))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._json(400, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        if (
-            not isinstance(body, dict)
-            or set(body) != {"email", "website", "csrf_token"}
-            or not isinstance(body.get("email"), str)
-            or not isinstance(body.get("website"), str)
-            or not isinstance(body.get("csrf_token"), str)
-        ):
-            self._json(400, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        if not self._valid_public_csrf(body["csrf_token"]):
-            self._json(403, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        if not self._consume_sensitive_limit("public-subscribe"):
-            self._json(429, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-        email = body["email"]
-        if (
-            body["website"]
-            or len(body["website"]) > 0
-            or not email
-            or len(email) > _PUBLIC_EMAIL_LIMIT
-            or "\r" in email
-            or "\n" in email
-        ):
-            self._json(202, {"message": _PUBLIC_SUBMISSION_MESSAGE})
-            return
-
-        conn = None
-        submission = None
-        try:
-            conn = db.connect(self.server.db_path)
-            submission = subscriptions.submit_subscription(
-                conn,
-                email,
-                self._public_subscription_base(),
-                dt.datetime.now(dt.UTC),
-                allow_loopback_http=self.server.loopback_public_subscription,
-            )
-            if submission.should_send_confirmation:
-                if not self._public_submission_ready():
-                    raise MailError("configuration")
-                smtp = self._saved_smtp_config()
-                if not smtp.delivery_enabled:
-                    raise MailError("configuration")
-                report = self.server.confirmation_sender(
-                    smtp, submission.recipient or "", submission.confirmation_url or ""
-                )
-                if report is not None and report.unknown_count:
-                    result = next(item for item in report.results if item.status == "unknown")
-                    print(
-                        "public-subscription confirmation_unknown "
-                        f"category={result.error_category or 'smtp_protocol'} "
-                        f"stage={result.error_stage or 'data_final_response'} "
-                        "action=verify_provider_queue_before_retry"
-                    )
-        except Exception as error:
-            if conn is not None and submission is not None and submission.confirmation_token:
-                subscriptions.abandon_confirmation(conn, submission.confirmation_token)
-            category = getattr(error, "category", "configuration")
-            print(f"public-subscription confirmation_failed category={category}")
-        finally:
-            if conn is not None:
-                conn.close()
-        self._json(202, {"message": _PUBLIC_SUBMISSION_MESSAGE})
+        self._json(404, {"error": _PUBLIC_SUBSCRIPTION_DISABLED_MESSAGE})
 
     def _saved_smtp_config(self) -> SmtpConfig:
         return smtp_config_from_env(read_env(self._env_path()))
@@ -1532,7 +1363,86 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return None
         return db.connect(self.server.db_path)
 
-    def _handle_site_overview(self) -> None:
+    def _handle_users_overview(self, parameters: dict[str, list[str]]) -> None:
+        if not self._authed():
+            self._json(401, {"error": "未登录"})
+            return
+        query_values = parameters.get("query", [""])
+        page_values = parameters.get("page", ["1"])
+        page_size_values = parameters.get("page_size", ["20"])
+        if any(len(values) != 1 for values in (query_values, page_values, page_size_values)):
+            self._json(400, {"error": "分页参数只能提供一次", "category": "configuration"})
+            return
+        query = query_values[0].strip()
+        try:
+            page = int(page_values[0])
+            page_size = int(page_size_values[0])
+        except ValueError:
+            self._json(400, {"error": "分页参数必须是整数", "category": "configuration"})
+            return
+        if len(query) > 254:
+            self._json(400, {"error": "搜索内容过长", "category": "configuration"})
+            return
+        if page < 1 or not 1 <= page_size <= 100:
+            self._json(
+                400,
+                {
+                    "error": "page 必须大于等于 1，page_size 必须在 1 至 100 之间",
+                    "category": "configuration",
+                },
+            )
+            return
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            total = db.count_users(conn, query=query)
+            page_count = max(1, (total + page_size - 1) // page_size)
+            page = min(page, page_count)
+            users = db.list_users(
+                conn,
+                query=query,
+                limit=page_size,
+                offset=(page - 1) * page_size,
+            )
+            newsletter_states = {
+                user.id: db.subscription_by_email(conn, user.email) for user in users
+            }
+        finally:
+            conn.close()
+        self._json(
+            200,
+            {
+                "users": [
+                    {
+                        "id": user.id,
+                        "email": user.email,
+                        "status": user.status,
+                        "is_admin": user.is_admin,
+                        "plan": user.plan,
+                        "paid_until": user.paid_until,
+                        "newsletter_subscription_id": (
+                            newsletter_states[user.id].id
+                            if newsletter_states[user.id] is not None
+                            else None
+                        ),
+                        "newsletter_status": (
+                            newsletter_states[user.id].status
+                            if newsletter_states[user.id] is not None
+                            else None
+                        ),
+                        "created_at": user.created_at,
+                    }
+                    for user in users
+                ],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "csrf_token": self._csrf_for_response(),
+            },
+        )
+
+    def _handle_payments_overview(self) -> None:
         if not self._authed():
             self._json(401, {"error": "未登录"})
             return
@@ -1541,7 +1451,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             db.expire_payment_orders(conn, now=dt.datetime.now(dt.UTC).isoformat())
-            users = db.list_users(conn)
             orders = db.list_orders(conn)
             codes = db.list_redemption_codes(conn)
             settings = {
@@ -1552,6 +1461,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 )
                 for key, default in accounts.DEFAULT_SETTINGS.items()
             }
+            for plan in accounts.PLANS:
+                list_key = f"{plan}_list_price_cents"
+                if not settings[list_key].strip():
+                    legacy_base = accounts.base_price_cents(settings, plan)
+                    legacy_current = accounts.price_cents(settings, plan)
+                    settings[list_key] = str(legacy_base)
+                    settings[f"{plan}_price_cents"] = str(legacy_current)
         finally:
             conn.close()
         try:
@@ -1564,18 +1480,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self._json(
             200,
             {
-                "users": [
-                    {
-                        "id": user.id,
-                        "email": user.email,
-                        "status": user.status,
-                        "is_admin": user.is_admin,
-                        "plan": user.plan,
-                        "paid_until": user.paid_until,
-                        "created_at": user.created_at,
-                    }
-                    for user in users
-                ],
                 "orders": [
                     {
                         "id": order.id,
@@ -1802,7 +1706,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 entries["paywall_enabled"] = (
                     "true" if body["paywall_enabled"] is True else "false"
                 )
-            for key in ("monthly_price_cents", "yearly_price_cents"):
+            for key in (
+                "monthly_price_cents",
+                "yearly_price_cents",
+                "monthly_list_price_cents",
+                "yearly_list_price_cents",
+            ):
                 if key in body:
                     value = body[key]
                     if type(value) is not int or not 0 <= value <= 10_000_000:
@@ -1826,10 +1735,37 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 key: db.get_setting(conn, key) or default
                 for key, default in accounts.DEFAULT_SETTINGS.items()
             }
+            for plan in accounts.PLANS:
+                list_key = f"{plan}_list_price_cents"
+                price_key = f"{plan}_price_cents"
+                discount_key = f"{plan}_discount_percent"
+                if (
+                    discount_key in entries
+                    and list_key not in entries
+                    and price_key not in entries
+                    and current_settings.get(list_key, "").strip()
+                ):
+                    raise ValueError("价格已迁移，不能单独修改旧折扣字段")
+                if (
+                    list_key in entries
+                    and price_key not in entries
+                    and not current_settings.get(list_key, "").strip()
+                ):
+                    raise ValueError("划线基准价与会员现价必须同时保存")
+                if list_key in entries or (
+                    price_key in entries and current_settings.get(list_key, "").strip()
+                ):
+                    entries[discount_key] = "0"
             candidate_settings = {**current_settings, **entries}
             for plan in accounts.PLANS:
+                base = accounts.base_price_cents(candidate_settings, plan)
+                list_key = f"{plan}_list_price_cents"
+                raw_list = candidate_settings.get(list_key, "").strip()
+                current = int(candidate_settings[f"{plan}_price_cents"])
+                if raw_list and current > base:
+                    raise ValueError("会员现价不能高于划线基准价")
                 if accounts.price_cents(candidate_settings, plan) <= 10:
-                    raise ValueError("折后价格必须至少为 0.11 元")
+                    raise ValueError("会员现价必须至少为 0.11 元")
             db.set_settings(conn, entries, now=dt.datetime.now(dt.UTC).isoformat())
         except (TypeError, ValueError, RuntimeError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
@@ -1901,7 +1837,8 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if set(body) != {"order_id"} or type(body.get("order_id")) is not int:
             self._json(409, {"error": "订单参数无效", "category": "lifecycle"})
             return
-        now = dt.datetime.now(dt.UTC).isoformat()
+        now_datetime = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
+        now = now_datetime.isoformat()
         conn = self._site_db()
         if conn is None:
             return
@@ -1915,6 +1852,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             or not order.merchant_order_no
             or not order.settlement_expires_at
             or order.settlement_expires_at <= now
+            or (
+                order.last_error_code == "GATEWAY_CREATE_RUNNING"
+                and (
+                    now_datetime - dt.datetime.fromisoformat(order.updated_at)
+                ).total_seconds()
+                < db.PAYMENT_CREATION_LEASE_SECONDS
+            )
         ):
             self._json(409, {"error": "订单已不可对账", "category": "lifecycle"})
             return
@@ -1932,6 +1876,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 merchant_order_no=order.merchant_order_no,
                 expected_amount_cents=order.amount_cents,
             )
+            finished_now = dt.datetime.fromtimestamp(
+                self.server.clock(), dt.UTC
+            ).isoformat()
             conn = self._site_db()
             if conn is None:
                 return
@@ -1942,7 +1889,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         merchant_order_no=result.merchant_order_no,
                         provider_trade_no=result.provider_trade_no,
                         amount_cents=result.amount_cents,
-                        now=now,
+                        now=finished_now,
                         amount_hold_seconds=config.amount_hold_seconds,
                         plan_days=accounts.PLAN_DAYS,
                     )
@@ -1951,7 +1898,8 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         conn,
                         order_id=order.id,
                         trade_status=result.trade_status,
-                        now=now,
+                        expected_updated_at=order.updated_at,
+                        now=finished_now,
                     )
             finally:
                 conn.close()
@@ -2021,8 +1969,32 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         conn = db.connect(self.server.db_path)
         try:
+            now = dt.datetime.now(dt.UTC)
+            email = normalize_email_address(body["email"], "Admin newsletter recipient")
+            existing = db.subscription_by_email(conn, email)
+            if existing is not None and existing.status == "disabled":
+                self._json(
+                    409,
+                    {
+                        "error": "管理员停用的简报必须使用启用操作并提交 confirm=true",
+                        "category": "lifecycle",
+                    },
+                )
+                return
+            user = db.user_by_email_key(conn, db.delivery_recipient_key(email))
+            if user is None or user.status != "active" or not accounts.is_paid(
+                user.paid_until, now
+            ):
+                self._json(
+                    409,
+                    {
+                        "error": "只有已启用且会员未到期的注册用户可以开启每日简报",
+                        "category": "membership",
+                    },
+                )
+                return
             added = subscriptions.add_admin_test_recipient(
-                conn, body["email"], dt.datetime.now(dt.UTC)
+                conn, email, now
             )
         except ValueError as error:
             self._safe_error(error)
@@ -2077,8 +2049,32 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         conn = db.connect(self.server.db_path)
         try:
+            row = conn.execute(
+                "SELECT email, status FROM subscriptions WHERE id = ?", (body["id"],)
+            ).fetchone()
+            if row is None or row["status"] != "disabled":
+                self._json(
+                    409,
+                    {"error": "只能重新启用 disabled 订阅账号", "category": "lifecycle"},
+                )
+                return
+            now = dt.datetime.now(dt.UTC)
+            user = db.user_by_email_key(
+                conn, db.delivery_recipient_key(row["email"])
+            )
+            if user is None or user.status != "active" or not accounts.is_paid(
+                user.paid_until, now
+            ):
+                self._json(
+                    409,
+                    {
+                        "error": "只有已启用且会员未到期的注册用户可以开启每日简报",
+                        "category": "membership",
+                    },
+                )
+                return
             enabled = subscriptions.enable_subscription_id(
-                conn, body["id"], dt.datetime.now(dt.UTC)
+                conn, body["id"], now
             )
         except ValueError as error:
             self._safe_error(error)
@@ -2922,14 +2918,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         self._json(status, {"error": message, "category": category})
 
     def _handle_public_confirm(self, raw_token: str) -> None:
-        token = self._public_token(raw_token)
-        if self._public_endpoint_ready() and self._public_request_host_valid() and token:
-            conn = db.connect(self.server.db_path)
-            try:
-                subscriptions.confirm_subscription(conn, token, dt.datetime.now(dt.UTC))
-            finally:
-                conn.close()
-        self._html(_public_result_page("确认订阅", _PUBLIC_CONFIRM_MESSAGE))
+        self._html(
+            _public_result_page("每日简报", _PUBLIC_SUBSCRIPTION_DISABLED_MESSAGE),
+            404,
+        )
 
     def _handle_unsubscribe_get(self, raw_token: str) -> None:
         token = self._public_token(raw_token)
@@ -3614,14 +3606,27 @@ input, textarea, select, button {
   transition: border-color .18s ease, background .18s ease, color .18s ease, opacity .18s ease;
 }
 input, textarea, select { box-sizing: border-box; width: 100%; }
+input[type="checkbox"] {
+  width: 1rem; height: 1rem; min-height: 1rem; padding: 0;
+  vertical-align: -.12rem; accent-color: var(--cinnabar);
+}
 input:hover, textarea:hover, select:hover { border-color: var(--ink); }
 textarea { min-height: 6rem; resize: vertical; }
 .checks { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem 1rem; margin-top: .55rem; }
 .checks label { display: inline-flex; align-items: center; gap: .35rem; margin: 0; color: var(--ink); }
-.checks input { width: auto; min-height: auto; }
+.checks input { width: 1rem; min-height: 1rem; }
 .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr)); gap: .5rem; margin-top: 1rem; }
 .grant-controls { display: grid; grid-template-columns: minmax(5.5rem, .8fr) minmax(5rem, .65fr) minmax(7rem, 1fr); gap: .35rem; }
 .grant-controls input, .grant-controls select, .grant-controls button { min-width: 0; }
+.user-list-tools {
+  display: grid; grid-template-columns: minmax(14rem, 1fr) auto;
+  align-items: end; gap: .65rem 1rem; margin-top: .7rem;
+}
+.user-list-tools label { margin: 0; }
+.user-page-controls { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; }
+.user-page-controls button { min-width: 4.5rem; }
+#users-page { min-width: 5.5rem; text-align: center; }
+#users-summary { margin: .7rem 0 .35rem; }
 button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--ink); }
 button:active:not(:disabled) { background: var(--panel); }
@@ -3677,7 +3682,7 @@ button[aria-busy="true"]::after {
 .translation-actions button { min-height: 2.15rem; padding: .35rem .5rem; white-space: nowrap; }
 #delivery-summary { min-width: 0; }
 #delivery-summary strong { display: block; overflow-wrap: anywhere; word-break: break-word; }
-#subscription-list, #delivery-list, #site-users, #site-orders, #site-codes {
+#delivery-list, #site-users, #site-orders, #site-codes {
   max-width: 100%; overflow-x: auto;
 }
 table { width: 100%; border-collapse: collapse; font-size: .82rem; }
@@ -3734,6 +3739,13 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
     -webkit-line-clamp: 2; line-clamp: 2;
   }
   .translation-actions { justify-content: flex-end; }
+  .user-list-tools { grid-template-columns: 1fr; }
+  .user-page-controls {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+  .user-page-controls button { min-width: 0; }
+  #users-refresh { grid-column: 1 / -1; }
+  #users-page { min-width: 0; white-space: nowrap; }
   .wrap { padding-inline: .9rem; }
 }
 @media (max-width: 520px) {
@@ -3775,8 +3787,8 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   <nav class="nav" role="tablist" aria-label="管理职责">
     <button class="tab" id="tab-models" role="tab" data-tab="models" aria-controls="models" aria-selected="true">模型接口</button>
     <button class="tab" id="tab-mail" role="tab" data-tab="mail" aria-controls="mail" aria-selected="false">邮件设置</button>
-    <button class="tab" id="tab-subscriptions" role="tab" data-tab="subscriptions" aria-controls="subscriptions" aria-selected="false">订阅管理</button>
-    <button class="tab" id="tab-site" role="tab" data-tab="site" aria-controls="site" aria-selected="false">用户与付费</button>
+    <button class="tab" id="tab-users" role="tab" data-tab="users" aria-controls="users" aria-selected="false">用户管理</button>
+    <button class="tab" id="tab-site" role="tab" data-tab="site" aria-controls="site" aria-selected="false">付费管理</button>
     <button class="tab" id="tab-translations" role="tab" data-tab="translations" aria-controls="translations" aria-selected="false">翻译状态</button>
     <button class="tab" id="tab-delivery" role="tab" data-tab="delivery" aria-controls="delivery" aria-selected="false">投递状态</button>
   </nav>
@@ -3856,29 +3868,38 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
     </section>
   </section>
 
-  <section class="workspace" id="subscriptions" role="tabpanel" aria-labelledby="tab-subscriptions" hidden>
-    <h2 id="subscriptions-heading">订阅管理</h2>
-    <p class="note">主页订阅与 Admin 手工添加共用这份名单；正式邮件只投递 active 账号。</p>
-    <div id="subscription-stats" class="stats"></div>
+  <section class="workspace" id="users" role="tabpanel" aria-labelledby="tab-users" hidden>
+    <h2 id="users-heading">用户管理</h2>
+    <p class="note">统一管理账号状态、管理员权限、会员计划、有效期和每日简报。正式邮件仅投递已开启简报且会员有效的账号。</p>
     <section class="panel">
-      <label for="subscription-email">新增订阅账号</label>
-      <input id="subscription-email" type="email">
-      <div class="actions"><button id="subscription-add">新增账号</button><button id="subscriptions-refresh">刷新名单</button></div>
-      <div id="subscription-list"></div>
+      <h3>用户账号</h3>
+      <div class="user-list-tools">
+        <label for="users-search">搜索用户邮箱
+          <input id="users-search" type="search" autocomplete="off" placeholder="输入完整或部分邮箱">
+        </label>
+        <div class="user-page-controls" aria-label="用户列表分页">
+          <button id="users-refresh">刷新</button>
+          <button id="users-prev">上一页</button>
+          <span id="users-page" class="meta" aria-live="polite">第 1 / 1 页</span>
+          <button id="users-next">下一页</button>
+        </div>
+      </div>
+      <p id="users-summary" class="note" aria-live="polite">正在读取用户列表。</p>
+      <div id="site-users" aria-live="polite"></div>
     </section>
   </section>
 
   <section class="workspace" id="site" role="tabpanel" aria-labelledby="tab-site" hidden>
-    <h2 id="site-heading">用户与付费</h2>
-    <p class="note">管理登录账号、人工开通、自动支付订单、卡密和公开付费开关。在线支付成功后由网关回调自动开通，无需人工审批；未使用卡密会在后台持续明文显示。</p>
+    <h2 id="site-heading">付费管理</h2>
+    <p class="note">管理会员定价、自动支付订单、卡密和公开付费开关。在线支付成功后由网关回调自动开通，无需人工审批；未使用卡密会在后台持续明文显示。</p>
     <section class="panel">
       <h3>站点设置</h3>
       <div class="fields">
         <label><input id="site-paywall" type="checkbox"> 开启付费墙</label>
-        <label>月刊会员基准价(元)<input id="site-monthly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
-        <label>月刊会员折扣(%)<input id="site-monthly-discount" type="number" min="0" max="100"></label>
-        <label>年刊会员基准价(元)<input id="site-yearly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
-        <label>年刊会员折扣(%)<input id="site-yearly-discount" type="number" min="0" max="100"></label>
+        <label>月刊会员划线基准价(元)<input id="site-monthly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
+        <label>月刊会员现价(元)<input id="site-monthly-sale" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"><output id="site-monthly-discount-preview" class="note"></output></label>
+        <label>年刊会员划线基准价(元)<input id="site-yearly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
+        <label>年刊会员现价(元)<input id="site-yearly-sale" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"><output id="site-yearly-discount-preview" class="note"></output></label>
       </div>
       <div class="actions"><button id="site-settings-save" class="primary">保存设置</button><button id="site-refresh">刷新</button></div>
     </section>
@@ -3899,7 +3920,6 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <div class="actions"><button id="site-epay-save" class="primary">保存支付配置</button><button id="site-epay-clear" class="danger">清除 PKey 并停用</button></div>
     </section>
     <div class="stack" id="site-management-sections">
-      <section class="panel"><h3>用户账号</h3><div id="site-users" aria-live="polite"></div></section>
       <section class="panel"><h3>支付订单</h3><div id="site-orders" aria-live="polite"></div></section>
       <section class="panel"><h3>生成卡密</h3>
         <div class="fields"><label>计划<select id="site-code-plan"><option value="monthly">月刊会员</option><option value="yearly">年刊会员</option></select></label><label>数量<input id="site-code-count" type="number" min="1" max="50" value="1"></label><label class="span2">备注<input id="site-code-note"></label></div>
@@ -3969,6 +3989,12 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
 "use strict";
 var csrf = "";
 var providers = {};
+var loadedUsers = [];
+var usersPage = 1;
+var usersPageSize = 20;
+var usersTotal = 0;
+var usersRequestSerial = 0;
+var usersSearchTimer = null;
 var statusEl = document.getElementById("status");
 var listEl = document.getElementById("providers");
 var resultEl = document.getElementById("test-result");
@@ -4075,8 +4101,8 @@ document.querySelectorAll(".tab").forEach(function (tab) {
       space.hidden = space.id !== tab.dataset.tab;
     });
     if (tab.dataset.tab === "mail") { loadMail(); }
-    if (tab.dataset.tab === "subscriptions") { loadSubscriptions(); }
-    if (tab.dataset.tab === "site") { loadSite(); }
+    if (tab.dataset.tab === "users") { loadUsers(); }
+    if (tab.dataset.tab === "site") { loadPayments(); }
     if (tab.dataset.tab === "translations") { startTranslationUpdates(); }
     else { stopTranslationUpdates(); }
     if (tab.dataset.tab === "delivery") { loadDelivery(); }
@@ -4385,44 +4411,6 @@ function statCard(parent, label, value) {
   var card = document.createElement("div"); card.className = "stat";
   addText(card, "strong", String(value)); addText(card, "span", label); parent.appendChild(card);
 }
-function loadSubscriptions() {
-  api("/admin/api/subscriptions").then(function (data) {
-    var stats = field("subscription-stats"); stats.replaceChildren();
-    ["pending", "active", "unsubscribed", "disabled"].forEach(function (name) { statCard(stats, name, data.counts[name]); });
-    var rows = data.items.map(function (item) {
-      var actions = document.createElement("div"); actions.className = "actions";
-      if (item.status === "active") {
-        actions.appendChild(button("发送验证邮件", function (event) {
-          if (!confirm("确认只向 " + item.email_masked + " 发送一封小体积 SMTP 验证邮件？")) { return; }
-          sendMailTest(event.currentTarget, "smtp_smoke", "SMTP 验证邮件", item.id);
-        }));
-        actions.appendChild(button("发送测试邮件", function (event) {
-          if (!confirm("确认只向 " + item.email_masked + " 发送一封测试邮件？")) { return; }
-          sendMailTest(event.currentTarget, "digest", "测试邮件", item.id);
-        }));
-        actions.appendChild(button("停用", function () {
-          if (!confirm("确认停用订阅账号 " + item.email_masked + "？")) { return; }
-          api("/admin/api/subscriptions/disable", {id: item.id, confirm: true}).then(function () { say("订阅账号已停用。", true); loadSubscriptions(); }).catch(function (error) { say(error.message, false); });
-        }, "danger"));
-      } else if (item.status === "disabled") {
-        actions.appendChild(button("启用", function () {
-          api("/admin/api/subscriptions/enable", {id: item.id, confirm: true}).then(function () { say("订阅账号已启用。", true); loadSubscriptions(); }).catch(function (error) { say(error.message, false); });
-        }));
-      }
-      actions.appendChild(button("删除", function () {
-        if (!confirm("确认永久删除订阅账号 " + item.email_masked + "？")) { return; }
-        api("/admin/api/subscriptions/delete", {id: item.id, confirm: true}).then(function () { say("订阅账号已删除。", true); loadSubscriptions(); }).catch(function (error) { say(error.message, false); });
-      }, "danger"));
-      return [item.email_masked, item.recipient_key, item.status, item.updated_at, actions];
-    });
-    field("subscription-list").replaceChildren(table(["地址", "标识", "状态", "更新时间", "操作"], rows));
-  }).catch(function (error) { say(error.message, false); });
-}
-field("subscription-add").addEventListener("click", function () {
-  api("/admin/api/subscriptions/add", {email: field("subscription-email").value}).then(function () { field("subscription-email").value = ""; say("订阅账号已新增并自动进入统一名单。", true); loadSubscriptions(); }).catch(function (error) { say(error.message, false); });
-});
-field("subscriptions-refresh").addEventListener("click", loadSubscriptions);
-
 function yuanToCents(value) {
   var match = String(value).trim().match(/^(\d{1,6})(?:\.(\d{1,2}))?$/);
   if (!match) { return null; }
@@ -4432,37 +4420,89 @@ function yuanToCents(value) {
 function centsToYuan(value) {
   return (Number(value) / 100).toFixed(2);
 }
+function formatBasisPoints(value) {
+  var whole = Math.floor(value / 100);
+  var fraction = String(value % 100).padStart(2, "0").replace(/0+$/, "");
+  return fraction ? whole + "." + fraction : String(whole);
+}
+function updateDiscountPreview(plan) {
+  var base = yuanToCents(field("site-" + plan).value);
+  var sale = yuanToCents(field("site-" + plan + "-sale").value);
+  var output = field("site-" + plan + "-discount-preview");
+  if (base === null || sale === null || base === 0 || sale > base) {
+    output.textContent = "现价不得高于划线基准价";
+    return;
+  }
+  if (sale === base) {
+    output.textContent = "当前无优惠 · 前台仅显示现价";
+    return;
+  }
+  var priceRatio = Math.floor(sale * 10000 / base);
+  var reduction = Math.floor((base - sale) * 10000 / base);
+  output.textContent = "现价为基准价 " + formatBasisPoints(priceRatio)
+    + "% · 前台显示 -" + formatBasisPoints(reduction) + "%";
+}
+function updateDiscountPreviews() {
+  updateDiscountPreview("monthly");
+  updateDiscountPreview("yearly");
+}
 function remainingSubscriptionDays(paidUntil) {
   if (!paidUntil) { return null; }
   var expiresAt = Date.parse(paidUntil);
   if (!Number.isFinite(expiresAt)) { return null; }
   return Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000));
 }
-function loadSite() {
-  api("/admin/api/site/overview").then(function (data) {
-    csrf = data.csrf_token || csrf;
-    field("site-paywall").checked = data.settings.paywall_enabled === "true";
-    field("site-monthly").value = centsToYuan(data.settings.monthly_price_cents);
-    field("site-yearly").value = centsToYuan(data.settings.yearly_price_cents);
-    field("site-monthly-discount").value = data.settings.monthly_discount_percent;
-    field("site-yearly-discount").value = data.settings.yearly_discount_percent;
-    field("site-epay-enabled").checked = data.payment.enabled;
-    field("site-epay-base").value = data.payment.api_base || "";
-    field("site-epay-pid").value = data.payment.pid || "";
-    field("site-epay-pkey").value = "";
-    field("site-epay-type").value = data.payment.payment_type || "alipay";
-    field("site-epay-ttl").value = data.payment.order_ttl_seconds;
-    field("site-epay-hold").value = data.payment.amount_hold_seconds;
-    field("site-epay-pkey-status").textContent = data.payment.pkey_set ? "PKey 已保存" : "PKey 尚未保存";
-    field("site-epay-notify").textContent = data.payment.notify_url || "站点域名尚未配置";
-    field("site-epay-return").textContent = data.payment.return_url || "站点域名尚未配置";
-    var userRows = data.users.map(function (item) {
+function renderUsers() {
+    var query = field("users-search").value.trim();
+    var pageCount = Math.max(1, Math.ceil(usersTotal / usersPageSize));
+    var userRows = loadedUsers.map(function (item) {
       var actions = document.createElement("div"); actions.className = "actions";
+      var newsletterActions = document.createElement("div"); newsletterActions.className = "actions";
+      var remainingDays = remainingSubscriptionDays(item.paid_until);
+      var memberActive = item.status === "active" && remainingDays !== null && remainingDays > 0;
+      var newsletterId = item.newsletter_subscription_id;
+      var newsletterStatus = item.newsletter_status;
+      if (newsletterStatus === "active") {
+        newsletterActions.appendChild(button("发送验证邮件", function (event) {
+          if (!confirm("确认只向该用户发送一封小体积 SMTP 验证邮件？")) { return; }
+          sendMailTest(event.currentTarget, "smtp_smoke", "SMTP 验证邮件", newsletterId);
+        }));
+        newsletterActions.appendChild(button("发送测试邮件", function (event) {
+          if (!confirm("确认只向该用户发送一封测试邮件？")) { return; }
+          sendMailTest(event.currentTarget, "digest", "测试邮件", newsletterId);
+        }));
+        newsletterActions.appendChild(button("停用简报", function () {
+          if (!confirm("确认由管理员停用该用户的每日简报？")) { return; }
+          api("/admin/api/subscriptions/disable", {id: newsletterId, confirm: true})
+            .then(function () { say("每日简报已停用。", true); return loadUsers(); })
+            .catch(function (error) { say(error.message, false); });
+        }, "danger"));
+      } else if (newsletterStatus === "disabled" && memberActive) {
+        newsletterActions.appendChild(button("启用简报", function () {
+          api("/admin/api/subscriptions/enable", {id: newsletterId, confirm: true})
+            .then(function () { say("每日简报已启用。", true); return loadUsers(); })
+            .catch(function (error) { say(error.message, false); });
+        }));
+      } else if (memberActive) {
+        newsletterActions.appendChild(button("开启简报", function () {
+          api("/admin/api/subscriptions/add", {email: item.email})
+            .then(function () { say("每日简报已开启。", true); return loadUsers(); })
+            .catch(function (error) { say(error.message, false); });
+        }));
+      }
+      if (newsletterId !== null) {
+        newsletterActions.appendChild(button("删除简报记录", function () {
+          if (!confirm("确认删除该用户的每日简报记录？")) { return; }
+          api("/admin/api/subscriptions/delete", {id: newsletterId, confirm: true})
+            .then(function () { say("每日简报记录已删除。", true); return loadUsers(); })
+            .catch(function (error) { say(error.message, false); });
+        }, "danger"));
+      }
       var status = item.status === "disabled" ? "启用" : "停用";
       actions.appendChild(button(status, function () {
         api("/admin/api/site/user-status", {
           user_id: item.id, status: item.status === "disabled" ? "active" : "disabled"
-        }).then(function () { say("用户状态已更新。", true); loadSite(); })
+        }).then(function () { say("用户状态已更新。", true); loadUsers(); })
           .catch(function (error) { say(error.message, false); });
       }, item.status === "disabled" ? "" : "danger"));
       var grantControls = document.createElement("div"); grantControls.className = "grant-controls";
@@ -4480,7 +4520,7 @@ function loadSite() {
       var grantAction = button("增加时长", function () {
         setBusy(grantAction, true);
         api("/admin/api/site/user-grant", {user_id: item.id, plan: grantPlan.value, days: Number(grantDays.value)})
-          .then(function (result) { say("已增加 " + result.days_added + " 天订阅时长。", true); return loadSite(); })
+          .then(function (result) { say("已增加 " + result.days_added + " 天订阅时长。", true); return loadUsers(); })
           .catch(function (error) { say(error.message, false); })
           .finally(function () { setBusy(grantAction, false); });
       });
@@ -4491,7 +4531,7 @@ function loadSite() {
           if (!confirm("确认清除该账号的订阅计划与剩余时长？账号状态和管理员权限不会改变。")) { return; }
           setBusy(clearAction, true);
           api("/admin/api/site/user-subscription-clear", {user_id: item.id, confirm: true})
-            .then(function () { say("订阅已清除。", true); return loadSite(); })
+            .then(function () { say("订阅已清除。", true); return loadUsers(); })
             .catch(function (error) { say(error.message, false); })
             .finally(function () { setBusy(clearAction, false); });
         }, "danger");
@@ -4505,19 +4545,72 @@ function loadSite() {
           if (!confirm(prompt)) { return; }
           api("/admin/api/site/user-admin", {
             user_id: item.id, is_admin: !item.is_admin, confirm: true
-          }).then(function () { say("管理员权限已更新。", true); loadSite(); })
+          }).then(function () { say("管理员权限已更新。", true); loadUsers(); })
             .catch(function (error) { say(error.message, false); });
         }, item.is_admin ? "danger" : ""));
       }
-      var remainingDays = remainingSubscriptionDays(item.paid_until);
       var planLabel = item.plan === "monthly" ? "月刊会员" : item.plan === "yearly" ? "年刊会员" : "无订阅";
       var remainingLabel = remainingDays === null ? "无订阅" : remainingDays > 0 ? "剩余 " + remainingDays + " 天" : "已到期";
-      return [item.email, item.status, item.is_admin ? "管理员" : "普通用户", planLabel, remainingLabel, item.paid_until || "-", actions];
+      var newsletterLabels = {
+        active: memberActive ? "已开启" : "已开启（会员失效暂停）",
+        pending: "待确认",
+        unsubscribed: "用户已退订",
+        disabled: "管理员停用"
+      };
+      var newsletterLabel = newsletterLabels[newsletterStatus] || "未开启";
+      return [item.email, item.status, item.is_admin ? "管理员" : "普通用户", planLabel, remainingLabel, item.paid_until || "-", newsletterLabel, newsletterActions, actions];
     });
     field("site-users").replaceChildren(
-      table(["邮箱", "状态", "角色", "订阅计划", "剩余时长", "到期时间", "操作"], userRows)
+      table(["邮箱", "状态", "角色", "会员计划", "剩余时长", "到期时间", "每日简报", "简报操作", "账号操作"], userRows)
     );
+    field("users-page").textContent = "第 " + usersPage + " / " + pageCount + " 页";
+    field("users-prev").disabled = usersPage <= 1;
+    field("users-next").disabled = usersPage >= pageCount;
+    var start = usersTotal === 0 ? 0 : (usersPage - 1) * usersPageSize + 1;
+    var end = start === 0 ? 0 : start + loadedUsers.length - 1;
+    var summary = query
+      ? "邮箱搜索结果 " + usersTotal + " 个"
+      : "账号总数 " + usersTotal + " 个";
+    summary += " · 当前显示 " + start + "–" + end + "。";
+    if (loadedUsers.length === 0) { summary += " 没有匹配的账号。"; }
+    field("users-summary").textContent = summary;
+}
 
+function loadUsers() {
+  var requestSerial = ++usersRequestSerial;
+  var query = encodeURIComponent(field("users-search").value.trim());
+  var url = "/admin/api/users/overview?query=" + query
+    + "&page=" + usersPage + "&page_size=" + usersPageSize;
+  api(url).then(function (data) {
+    if (requestSerial !== usersRequestSerial) { return; }
+    csrf = data.csrf_token || csrf;
+    loadedUsers = data.users;
+    usersTotal = data.total;
+    usersPage = data.page;
+    usersPageSize = data.page_size;
+    renderUsers();
+  }).catch(function (error) { say(error.message, false); });
+}
+
+function loadPayments() {
+  api("/admin/api/payments/overview").then(function (data) {
+    csrf = data.csrf_token || csrf;
+    field("site-paywall").checked = data.settings.paywall_enabled === "true";
+    field("site-monthly").value = centsToYuan(data.settings.monthly_list_price_cents);
+    field("site-yearly").value = centsToYuan(data.settings.yearly_list_price_cents);
+    field("site-monthly-sale").value = centsToYuan(data.settings.monthly_price_cents);
+    field("site-yearly-sale").value = centsToYuan(data.settings.yearly_price_cents);
+    updateDiscountPreviews();
+    field("site-epay-enabled").checked = data.payment.enabled;
+    field("site-epay-base").value = data.payment.api_base || "";
+    field("site-epay-pid").value = data.payment.pid || "";
+    field("site-epay-pkey").value = "";
+    field("site-epay-type").value = data.payment.payment_type || "alipay";
+    field("site-epay-ttl").value = data.payment.order_ttl_seconds;
+    field("site-epay-hold").value = data.payment.amount_hold_seconds;
+    field("site-epay-pkey-status").textContent = data.payment.pkey_set ? "PKey 已保存" : "PKey 尚未保存";
+    field("site-epay-notify").textContent = data.payment.notify_url || "站点域名尚未配置";
+    field("site-epay-return").textContent = data.payment.return_url || "站点域名尚未配置";
     var orderRows = data.orders.map(function (item) {
       var labels = {
         pending: "等待支付", paid: "已支付", expired: "已过期", failed: "支付异常",
@@ -4534,7 +4627,7 @@ function loadSite() {
           api("/admin/api/site/payment-reconcile", {order_id: item.id})
             .then(function (result) {
               say(result.status === "paid" ? "订单已确认支付并开通会员。" : "支付状态已更新。", true);
-              return loadSite();
+              return loadPayments();
             })
             .catch(function (error) { say(error.message, false); })
             .finally(function () { setBusy(reconcileAction, false); });
@@ -4565,7 +4658,7 @@ function loadSite() {
         actions.appendChild(button("删除", function () {
           if (!confirm("确认删除未使用的卡密 " + item.prefix + "？删除后无法恢复。")) { return; }
           api("/admin/api/site/code-delete", {code_id: item.id})
-            .then(function () { say("卡密已删除。", true); loadSite(); })
+            .then(function () { say("卡密已删除。", true); loadPayments(); })
             .catch(function (error) { say(error.message, false); });
         }, "danger"));
       }
@@ -4576,22 +4669,48 @@ function loadSite() {
     );
   }).catch(function (error) { say(error.message, false); });
 }
-field("site-refresh").addEventListener("click", loadSite);
+field("users-refresh").addEventListener("click", loadUsers);
+field("users-search").addEventListener("input", function () {
+  usersPage = 1;
+  window.clearTimeout(usersSearchTimer);
+  usersSearchTimer = window.setTimeout(loadUsers, 250);
+});
+field("users-prev").addEventListener("click", function () {
+  usersPage = Math.max(1, usersPage - 1);
+  loadUsers();
+});
+field("users-next").addEventListener("click", function () {
+  usersPage += 1;
+  loadUsers();
+});
+field("site-refresh").addEventListener("click", loadPayments);
+["monthly", "yearly"].forEach(function (plan) {
+  field("site-" + plan).addEventListener("input", updateDiscountPreviews);
+  field("site-" + plan + "-sale").addEventListener("input", updateDiscountPreviews);
+});
 field("site-settings-save").addEventListener("click", function () {
-  var monthlyPriceCents = yuanToCents(field("site-monthly").value);
-  var yearlyPriceCents = yuanToCents(field("site-yearly").value);
-  if (monthlyPriceCents === null || yearlyPriceCents === null) {
-    say("基准价必须是 0.11 至 100000 元之间、最多两位小数的金额。", false);
+  var monthlyListPriceCents = yuanToCents(field("site-monthly").value);
+  var yearlyListPriceCents = yuanToCents(field("site-yearly").value);
+  var monthlyPriceCents = yuanToCents(field("site-monthly-sale").value);
+  var yearlyPriceCents = yuanToCents(field("site-yearly-sale").value);
+  if (monthlyListPriceCents === null || yearlyListPriceCents === null
+      || monthlyPriceCents === null || yearlyPriceCents === null) {
+    say("基准价和现价必须是 0.11 至 100000 元之间、最多两位小数的金额。", false);
+    return;
+  }
+  if (monthlyPriceCents > monthlyListPriceCents
+      || yearlyPriceCents > yearlyListPriceCents) {
+    say("会员现价不能高于划线基准价。", false);
     return;
   }
   var action = field("site-settings-save"); setBusy(action, true);
   api("/admin/api/site/settings", {
     paywall_enabled: field("site-paywall").checked,
+    monthly_list_price_cents: monthlyListPriceCents,
+    yearly_list_price_cents: yearlyListPriceCents,
     monthly_price_cents: monthlyPriceCents,
-    yearly_price_cents: yearlyPriceCents,
-    monthly_discount_percent: Number(field("site-monthly-discount").value),
-    yearly_discount_percent: Number(field("site-yearly-discount").value)
-  }).then(function () { say("付费设置已保存。", true); loadSite(); })
+    yearly_price_cents: yearlyPriceCents
+  }).then(function () { say("付费设置已保存。", true); loadPayments(); })
     .catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
 });
@@ -4605,7 +4724,7 @@ field("site-epay-save").addEventListener("click", function () {
     payment_type: field("site-epay-type").value,
     order_ttl_seconds: Number(field("site-epay-ttl").value),
     amount_hold_seconds: Number(field("site-epay-hold").value)
-  }).then(function () { say("支付配置已保存并立即生效。", true); return loadSite(); })
+  }).then(function () { say("支付配置已保存并立即生效。", true); return loadPayments(); })
     .catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
 });
@@ -4613,7 +4732,7 @@ field("site-epay-clear").addEventListener("click", function () {
   if (!confirm("确认清除已保存的 EasyPay PKey 并停用在线支付？")) { return; }
   var action = field("site-epay-clear"); setBusy(action, true);
   api("/admin/api/site/payment-clear-pkey", {confirm: true})
-    .then(function () { say("PKey 已清除，在线支付已停用。", true); return loadSite(); })
+    .then(function () { say("PKey 已清除，在线支付已停用。", true); return loadPayments(); })
     .catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
 });
@@ -4626,7 +4745,7 @@ field("site-code-create").addEventListener("click", function () {
   }).then(function (data) {
     var box = field("site-code-result"); box.hidden = false;
     box.textContent = "已生成以下卡密，后台列表将持续显示：\n" + data.codes.join("\n");
-    say("卡密已生成。", true); loadSite();
+    say("卡密已生成。", true); loadPayments();
   }).catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
 });

@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -80,16 +81,50 @@ _GATEWAY_TIMEOUT_SECONDS = 10
 
 
 def _contains_unsafe_url_character(value: str) -> bool:
-    return "\\" in value or any(
-        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+    return "\\" in value or ";" in value or any(
+        character.isspace()
+        or ord(character) < 0x20
+        or 0x7F <= ord(character) <= 0x9F
         for character in value
     )
+
+
+def _canonical_hostname(value: str, field_name: str) -> str:
+    if "%" in value:
+        raise PaymentError(f"{field_name} contains an invalid hostname")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        if ":" in value or re.fullmatch(r"[0-9.]+", value):
+            raise PaymentError(f"{field_name} contains an invalid hostname") from None
+        try:
+            hostname = value.encode("idna").decode("ascii").casefold()
+        except UnicodeError:
+            raise PaymentError(f"{field_name} contains an invalid hostname") from None
+        absolute = hostname.endswith(".")
+        dns_name = hostname[:-1] if absolute else hostname
+        labels = dns_name.split(".")
+        if (
+            not dns_name
+            or len(dns_name) > 253
+            or any(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                is None
+                for label in labels
+            )
+        ):
+            raise PaymentError(f"{field_name} contains an invalid hostname") from None
+        return dns_name + ("." if absolute else "")
+    return str(address).casefold()
 
 
 def _url_origin(value: str, field_name: str) -> tuple[str, str, int]:
     if _contains_unsafe_url_character(value):
         raise PaymentError(f"{field_name} contains unsupported URL characters")
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise PaymentError(f"{field_name} is invalid") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise PaymentError(f"{field_name} must be an absolute HTTP URL")
     if parsed.username or parsed.password or parsed.fragment:
@@ -101,9 +136,12 @@ def _url_origin(value: str, field_name: str) -> tuple[str, str, int]:
     hostname = parsed.hostname
     if not hostname:
         raise PaymentError(f"{field_name} must include a hostname")
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+    hostname = _canonical_hostname(hostname, field_name)
+    if port == 0:
+        raise PaymentError(f"{field_name} has an invalid port")
+    if parsed.scheme == "http" and hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise PaymentError(f"{field_name} must use HTTPS outside loopback")
-    return parsed.scheme, hostname.casefold(), port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme, hostname, port or (443 if parsed.scheme == "https" else 80)
 
 
 def _validate_url(value: str, field_name: str) -> None:
@@ -212,6 +250,15 @@ def config_identity(config: EpayConfig) -> str:
         )
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def payment_origin(config: EpayConfig) -> str:
+    """Return the validated gateway origin for a CSP source expression."""
+    scheme, hostname, port = _url_origin(config.base_url, "EPAY_API_BASE")
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 443 if scheme == "https" else 80
+    port_suffix = "" if port == default_port else f":{port}"
+    return f"{scheme}://{host}{port_suffix}"
 
 
 def money_to_cents(value: str) -> int:

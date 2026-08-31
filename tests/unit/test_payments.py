@@ -15,6 +15,7 @@ from news_digest.payments import (
     money_to_cents,
     normalize_api_base,
     parse_notification,
+    payment_origin,
     query_payment,
     sign_fields,
 )
@@ -161,6 +162,57 @@ def test_config_identity_is_secret_safe_and_changes_with_settlement_credentials(
     assert config_identity(first) == config_identity(same)
     assert config_identity(first) != config_identity(changed)
     assert first.merchant_key not in config_identity(first)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("HTTPS://PAY.Example.Test:443/gateway", "https://pay.example.test"),
+        ("https://pay.example.test:8443/gateway", "https://pay.example.test:8443"),
+        ("http://127.0.0.1:8080/gateway", "http://127.0.0.1:8080"),
+        ("http://[::1]:8080/gateway", "http://[::1]:8080"),
+        ("https://例子.测试/gateway", "https://xn--fsqu00a.xn--0zwm56d"),
+        ("https://xn--fsqu00a.xn--0zwm56d/gateway", "https://xn--fsqu00a.xn--0zwm56d"),
+    ],
+)
+def test_payment_origin_canonicalizes_scheme_hostname_and_port(base_url, expected):
+    config = EpayConfig(
+        base_url=base_url,
+        merchant_id="1001",
+        merchant_key="merchant-secret",
+        payment_type="alipay",
+        site_url="https://news.example.test",
+    )
+    assert payment_origin(config) == expected
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://pay.example.test; script-src *",
+        "https://pay.example.test /gateway",
+        "https://pay.example.test/gateway;param=1",
+        "https://bad_host.example/gateway",
+        "https://-bad.example/gateway",
+        "https://bad-.example/gateway",
+        "https://bad..example/gateway",
+        "https://999.1.1.1/gateway",
+        "https://127.1/gateway",
+        "https://[gggg::1]/gateway",
+        "https://[fe80::1%25eth0]/gateway",
+        "https://pay.example.test:0/gateway",
+        "https://pay.example.test:65536/gateway",
+    ],
+)
+def test_epay_config_rejects_csp_unsafe_or_invalid_gateway_hosts(base_url):
+    with pytest.raises(PaymentError):
+        EpayConfig(
+            base_url=base_url,
+            merchant_id="1001",
+            merchant_key="merchant-secret",
+            payment_type="alipay",
+            site_url="https://news.example.test",
+        )
 
 
 def test_signed_order_query_is_strict_and_does_not_expose_key(monkeypatch):

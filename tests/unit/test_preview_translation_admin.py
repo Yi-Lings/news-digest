@@ -578,7 +578,9 @@ def test_translation_admin_exposes_recovery_after_cancel_lease_expiry(tmp_path):
 
 
 def test_translation_admin_dom_contract_and_reduced_motion():
-    assert ADMIN_HTML.index('data-tab="subscriptions"') < ADMIN_HTML.index(
+    assert ADMIN_HTML.index('data-tab="users"') < ADMIN_HTML.index(
+        'data-tab="site"'
+    ) < ADMIN_HTML.index(
         'data-tab="translations"'
     ) < ADMIN_HTML.index('data-tab="delivery"')
     for token in [

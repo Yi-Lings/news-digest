@@ -17,12 +17,15 @@ from news_digest.models import (
     article_to_dict,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
+PAYMENT_CREATION_LEASE_SECONDS = 30
 
 # v1.3.0 新增的内容级错误码:与 SCHEMA_VALIDATION_FAILED 同为终态(不自动重试)。
 CONTENT_ERROR_CODES = ("CONTENT_NUMBER_MISSING",)
 
-DeliveryStatus = Literal["pending", "sending", "sent", "failed", "unknown"]
+DeliveryStatus = Literal[
+    "pending", "sending", "sent", "failed", "unknown", "ineligible"
+]
 ArchiveStatus = Literal["pending", "archived", "failed"]
 DeliveryRunStatus = Literal["running", "completed", "partial", "failed", "skipped"]
 DeliveryReconciliationResult = Literal["reconciled", "not_applicable", "blocked"]
@@ -120,7 +123,9 @@ class DeliveryState:
     ``unknown``. Automatic retry APIs exclude both ``sent`` and ``unknown``; only an
     explicit operator decision may reset ``unknown``. This is at-most-once automation,
     not strict exactly-once delivery, so the SMTP-accept/local-commit crash window can
-    still produce a duplicate after a manually confirmed retry.
+    still produce a duplicate after a manually confirmed retry. If the recipient later
+    loses paid eligibility, ``ineligible`` is terminal for that edition and
+    ``ineligible_from_status`` preserves whether the historical outcome was unknown.
     """
 
     edition_date: str
@@ -133,6 +138,7 @@ class DeliveryState:
     started_at: str | None
     finished_at: str | None
     degraded: bool
+    ineligible_from_status: Literal["pending", "failed", "unknown"] | None
 
 
 @dataclass(frozen=True)
@@ -168,6 +174,7 @@ class DeliverySummary:
     sent: int = 0
     failed: int = 0
     unknown: int = 0
+    ineligible: int = 0
     legacy_sent_detail: str | None = None
 
 
@@ -545,7 +552,9 @@ CREATE INDEX IF NOT EXISTS idx_briefs_date ON briefs(date);
 CREATE TABLE IF NOT EXISTS email_deliveries (
     edition_date TEXT NOT NULL,
     recipient_key TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
+    status TEXT NOT NULL CHECK(status IN (
+        'pending', 'sending', 'sent', 'failed', 'unknown', 'ineligible'
+    )),
     error_category TEXT,
     updated_at TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -553,6 +562,10 @@ CREATE TABLE IF NOT EXISTS email_deliveries (
     started_at TEXT,
     finished_at TEXT,
     degraded INTEGER NOT NULL DEFAULT 0 CHECK(degraded IN (0, 1)),
+    ineligible_from_status TEXT,
+    CHECK((status = 'ineligible' AND ineligible_from_status IS NOT NULL AND
+        ineligible_from_status IN ('pending', 'failed', 'unknown')) OR
+        (status != 'ineligible' AND ineligible_from_status IS NULL)),
     PRIMARY KEY (edition_date, recipient_key)
 );
 CREATE INDEX IF NOT EXISTS idx_email_deliveries_date_status
@@ -911,13 +924,21 @@ def connect(path: Path) -> sqlite3.Connection:
     """打开数据库,父目录与表按需创建,并校验 schema 版本。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    # WAL + NORMAL:Admin/worker/恢复进程并发读写时不再整库排队;
-    # 数据目录均为本地卷,不涉及网络文件系统的 WAL 限制。
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        # WAL + NORMAL:Admin/worker/恢复进程并发读写时不再整库排队;
+        # 数据目录均为本地卷,不涉及网络文件系统的 WAL 限制。
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return _initialize_connection(conn, path)
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if row is None:
@@ -936,9 +957,8 @@ def connect(path: Path) -> sqlite3.Connection:
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         return conn
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
         found = row["value"]
-        conn.close()
         raise RuntimeError(f"schema 版本不匹配:库中为 {found},代码期望 {SCHEMA_VERSION},需迁移")
     if version in {1, 2}:
         _migrate_to_v3(conn)
@@ -956,7 +976,10 @@ def connect(path: Path) -> sqlite3.Connection:
     if version in {1, 2, 3, 4, 5, 6, 7}:
         _migrate_to_v8(conn, path)
         _set_schema_version(conn, 8)
-    _migrate_to_v9(conn, path)
+    if version in {1, 2, 3, 4, 5, 6, 7, 8}:
+        _migrate_to_v9(conn, path)
+        _set_schema_version(conn, 9)
+    _migrate_to_v10(conn, path)
     _set_schema_version(conn, SCHEMA_VERSION)
     return conn
 
@@ -1125,6 +1148,91 @@ def _validate_v9_backup(backup_path: Path) -> None:
             backup.close()
     if integrity is None or integrity[0] != "ok" or version is None or version[0] != "8":
         raise RuntimeError("schema v9 迁移前数据库备份校验失败")
+
+
+def _migrate_to_v10(conn: sqlite3.Connection, path: Path) -> None:
+    """v1.4.0:为失去投递资格的历史收件人增加可审计终态。"""
+    backup_path = path.with_name(f"{path.name}.pre-v10.bak")
+    if backup_path.exists():
+        _validate_v10_backup(backup_path)
+    elif path.is_file():
+        backup = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup)
+        except Exception:
+            backup.close()
+            backup_path.unlink(missing_ok=True)
+            raise
+        finally:
+            try:
+                backup.close()
+            except sqlite3.Error:
+                pass
+        try:
+            _validate_v10_backup(backup_path)
+        except Exception:
+            backup_path.unlink(missing_ok=True)
+            raise
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE email_deliveries RENAME TO email_deliveries_v9")
+        conn.execute(
+            "CREATE TABLE email_deliveries ("
+            "edition_date TEXT NOT NULL,"
+            "recipient_key TEXT NOT NULL,"
+            "status TEXT NOT NULL CHECK(status IN ("
+            "'pending', 'sending', 'sent', 'failed', 'unknown', 'ineligible')),"
+            "error_category TEXT,"
+            "updated_at TEXT NOT NULL,"
+            "attempt_count INTEGER NOT NULL DEFAULT 0,"
+            "run_id TEXT,"
+            "started_at TEXT,"
+            "finished_at TEXT,"
+            "degraded INTEGER NOT NULL DEFAULT 0 CHECK(degraded IN (0, 1)),"
+            "ineligible_from_status TEXT,"
+            "CHECK((status = 'ineligible' AND ineligible_from_status IS NOT NULL AND "
+            "ineligible_from_status IN "
+            "('pending', 'failed', 'unknown')) OR "
+            "(status != 'ineligible' AND ineligible_from_status IS NULL)),"
+            "PRIMARY KEY (edition_date, recipient_key))"
+        )
+        conn.execute(
+            "INSERT INTO email_deliveries"
+            " (edition_date, recipient_key, status, error_category, updated_at,"
+            " attempt_count, run_id, started_at, finished_at, degraded,"
+            " ineligible_from_status)"
+            " SELECT edition_date, recipient_key, status, error_category, updated_at,"
+            " attempt_count, run_id, started_at, finished_at, degraded, NULL"
+            " FROM email_deliveries_v9"
+        )
+        conn.execute("DROP TABLE email_deliveries_v9")
+        conn.execute(
+            "CREATE INDEX idx_email_deliveries_date_status"
+            " ON email_deliveries(edition_date, status)"
+        )
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("schema v10 迁移后外键校验失败")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _validate_v10_backup(backup_path: Path) -> None:
+    backup = None
+    try:
+        backup = sqlite3.connect(backup_path)
+        integrity = backup.execute("PRAGMA integrity_check").fetchone()
+        version = backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+    except sqlite3.Error as error:
+        raise RuntimeError("schema v10 迁移前数据库备份校验失败") from error
+    finally:
+        if backup is not None:
+            backup.close()
+    if integrity is None or integrity[0] != "ok" or version is None or version[0] != "9":
+        raise RuntimeError("schema v10 迁移前数据库备份校验失败")
 
 
 def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
@@ -4217,6 +4325,67 @@ def ensure_delivery_recipients(
             )
 
 
+def _finalize_ineligible_deliveries(
+    conn: sqlite3.Connection, edition_date: str, now: str
+) -> int:
+    cursor = conn.execute(
+        "UPDATE email_deliveries SET"
+        " ineligible_from_status = status, status = 'ineligible',"
+        " error_category = COALESCE(error_category, 'recipient_inactive'),"
+        " updated_at = ?, finished_at = COALESCE(finished_at, ?)"
+        " WHERE edition_date = ? AND status IN ('pending', 'failed', 'unknown')"
+        " AND NOT EXISTS ("
+        " SELECT 1 FROM subscriptions AS s"
+        " JOIN users AS u ON u.email_key = s.email_key"
+        " WHERE s.email_key = email_deliveries.recipient_key"
+        " AND s.status = 'active' AND u.status = 'active'"
+        " AND u.plan IS NOT NULL AND u.paid_until > ?)",
+        (now, now, edition_date, now),
+    )
+    return cursor.rowcount
+
+
+def finalize_ineligible_deliveries(
+    conn: sqlite3.Connection, edition_date: str, now: str
+) -> int:
+    """终结当前已失去付费资格的历史工作，并保留原状态与错误审计。"""
+    _validate_test_attempt_date(edition_date)
+    now = _accounts_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        count = _finalize_ineligible_deliveries(conn, edition_date, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return count
+
+
+def delivery_completion_ready(
+    conn: sqlite3.Connection, edition_date: str, now: str
+) -> bool:
+    """Return whether an edition has no uncertain or currently eligible delivery work."""
+    _validate_test_attempt_date(edition_date)
+    now = _accounts_timestamp(now)
+    row = conn.execute(
+        "SELECT ("
+        " EXISTS (SELECT 1 FROM email_deliveries"
+        "  WHERE edition_date = ? AND status IN ('sending', 'unknown'))"
+        " OR EXISTS ("
+        "  SELECT 1 FROM subscriptions AS s"
+        "  JOIN users AS u ON u.email_key = s.email_key"
+        "  LEFT JOIN email_deliveries AS d"
+        "   ON d.recipient_key = s.email_key AND d.edition_date = ?"
+        "  WHERE s.status = 'active' AND u.status = 'active'"
+        "   AND u.plan IS NOT NULL AND u.paid_until > ?"
+        "   AND (d.status IS NULL OR d.status IN"
+        "    ('pending', 'failed', 'sending', 'unknown'))"
+        " )) AS blocked",
+        (edition_date, edition_date, now),
+    ).fetchone()
+    return not bool(row["blocked"])
+
+
 def recover_interrupted_deliveries(
     conn: sqlite3.Connection, now: str, *, stale_before: str | None = None
 ) -> int:
@@ -4347,7 +4516,8 @@ def reset_unknown_delivery(
 def delivery_states(conn: sqlite3.Connection, edition_date: str) -> list[DeliveryState]:
     rows = conn.execute(
         "SELECT edition_date, recipient_key, status, error_category, updated_at,"
-        " attempt_count, run_id, started_at, finished_at, degraded"
+        " attempt_count, run_id, started_at, finished_at, degraded,"
+        " ineligible_from_status"
         " FROM email_deliveries WHERE edition_date = ? ORDER BY recipient_key",
         (edition_date,),
     ).fetchall()
@@ -4363,6 +4533,7 @@ def delivery_states(conn: sqlite3.Connection, edition_date: str) -> list[Deliver
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             degraded=bool(row["degraded"]),
+            ineligible_from_status=row["ineligible_from_status"],
         )
         for row in rows
     ]
@@ -4370,7 +4541,10 @@ def delivery_states(conn: sqlite3.Connection, edition_date: str) -> list[Deliver
 
 def delivery_summary(conn: sqlite3.Connection, edition_date: str) -> DeliverySummary:
     """Summarize structured state and expose legacy sent metadata without treating it as rows."""
-    counts = {status: 0 for status in ("pending", "sending", "sent", "failed", "unknown")}
+    counts = {
+        status: 0
+        for status in ("pending", "sending", "sent", "failed", "unknown", "ineligible")
+    }
     rows = conn.execute(
         "SELECT status, COUNT(*) AS count FROM email_deliveries"
         " WHERE edition_date = ? GROUP BY status",
@@ -4492,23 +4666,8 @@ def reconcile_completed_delivery_run(
             conn.commit()
             return "blocked"
 
-        unresolved = conn.execute(
-            "SELECT COUNT(*) AS count FROM email_deliveries"
-            " WHERE edition_date = ? AND status IN ('sending', 'unknown')",
-            (edition_date,),
-        ).fetchone()
-        pending_targets = conn.execute(
-            "SELECT COUNT(*) AS count FROM subscriptions AS s"
-            " JOIN users AS u ON u.email_key = s.email_key"
-            " LEFT JOIN email_deliveries AS d"
-            " ON d.recipient_key = s.email_key AND d.edition_date = ?"
-            " WHERE s.status = 'active' AND u.status = 'active'"
-            " AND u.plan IS NOT NULL AND u.paid_until > ?"
-            " AND (d.status IS NULL OR d.status IN"
-            " ('pending', 'failed', 'sending', 'unknown'))",
-            (edition_date, now),
-        ).fetchone()
-        if unresolved["count"] or pending_targets["count"]:
+        _finalize_ineligible_deliveries(conn, edition_date, now)
+        if not delivery_completion_ready(conn, edition_date, now):
             conn.commit()
             return "blocked"
 
@@ -4965,17 +5124,36 @@ def clear_user_subscription(conn: sqlite3.Connection, user_id: int, *, now: str)
     return user
 
 
+def _user_search(query: str | None) -> tuple[str, tuple[object, ...]]:
+    normalized = (query or "").strip()
+    if not normalized:
+        return "", ()
+    return " WHERE instr(lower(email), lower(?)) > 0", (normalized,)
+
+
+def count_users(conn: sqlite3.Connection, *, query: str | None = None) -> int:
+    clause, parameters = _user_search(query)
+    row = conn.execute("SELECT COUNT(*) FROM users" + clause, parameters).fetchone()
+    return int(row[0])
+
+
 def list_users(
-    conn: sqlite3.Connection, *, query: str | None = None, limit: int = 200
+    conn: sqlite3.Connection,
+    *,
+    query: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
 ) -> list[User]:
-    sql = _user_select()
-    parameters: list[object] = []
-    if query:
-        sql += " WHERE email LIKE ?"
-        parameters.append(f"%{query}%")
-    sql += " ORDER BY created_at DESC LIMIT ?"
-    parameters.append(max(1, min(int(limit), 500)))
-    return [_user(row) for row in conn.execute(sql, parameters).fetchall()]
+    clause, parameters = _user_search(query)
+    bounded_limit = max(1, min(int(limit), 100))
+    bounded_offset = max(0, int(offset))
+    rows = conn.execute(
+        _user_select()
+        + clause
+        + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        (*parameters, bounded_limit, bounded_offset),
+    ).fetchall()
+    return [_user(row) for row in rows]
 
 
 def issue_email_code(
@@ -5422,7 +5600,7 @@ def reserve_payment_order(
             int(row["amount_cents"])
             for row in conn.execute(
                 "SELECT amount_cents FROM orders WHERE merchant_order_no IS NOT NULL "
-                "AND status IN ('pending', 'expired') "
+                "AND status IN ('pending', 'expired', 'failed') "
                 "AND COALESCE(settlement_expires_at, expires_at) > ?",
                 (now,),
             ).fetchall()
@@ -5476,7 +5654,7 @@ def claim_payment_order_creation(
     *,
     order_id: int,
     now: str,
-    lease_seconds: int = 30,
+    lease_seconds: int = PAYMENT_CREATION_LEASE_SECONDS,
     checkout_ttl_seconds: int | None = None,
 ) -> Order | None:
     now = _accounts_timestamp(now)
@@ -5492,33 +5670,32 @@ def claim_payment_order_creation(
         row = conn.execute(_order_select() + " WHERE id = ?", (order_id,)).fetchone()
         if row is None:
             raise RuntimeError("payment order does not exist")
-        waiting_without_url = row["last_error_code"] == "PAYMENT_WAITING_NO_URL"
-        claimable = row["payment_url"] is None and (
-            (
-                row["status"] == "pending"
-                and (
-                    row["last_error_code"] == "GATEWAY_CREATE_FAILED"
-                    or waiting_without_url
-                    or (
-                        row["last_error_code"] == "GATEWAY_CREATE_RUNNING"
-                        and row["updated_at"] <= stale_before
-                    )
-                )
-            )
-            or (
-                row["status"] == "expired"
-                and waiting_without_url
-                and checkout_ttl_seconds is not None
-                and row["settlement_expires_at"] is not None
-                and row["settlement_expires_at"] > now
-            )
+        retryable_error = row["last_error_code"] in {
+            "GATEWAY_CREATE_FAILED",
+            "PAYMENT_WAITING_NO_URL",
+        } or (
+            row["last_error_code"] == "GATEWAY_CREATE_RUNNING"
+            and row["updated_at"] <= stale_before
+        )
+        settlement_active = (
+            row["settlement_expires_at"] is not None
+            and row["settlement_expires_at"] > now
+        )
+        claimable = (
+            row["payment_url"] is None
+            and row["status"] in {"pending", "expired", "failed"}
+            and settlement_active
+            and retryable_error
         )
         if not claimable:
             conn.commit()
             return None
         expires_at = (
-            _future_timestamp(now, checkout_ttl_seconds)
-            if row["status"] == "expired" and checkout_ttl_seconds is not None
+            min(
+                _future_timestamp(now, checkout_ttl_seconds),
+                row["settlement_expires_at"],
+            )
+            if row["status"] in {"expired", "failed"} and checkout_ttl_seconds is not None
             else row["expires_at"]
         )
         conn.execute(
@@ -5584,9 +5761,11 @@ def record_payment_order_created(
     order_id: int,
     provider_trade_no: str,
     payment_url: str | None = None,
+    creation_generation: str,
     now: str,
 ) -> Order:
     now = _accounts_timestamp(now)
+    creation_generation = _accounts_timestamp(creation_generation)
     provider_trade_no = _non_empty(
         provider_trade_no, "provider_trade_no", maximum=128
     )
@@ -5596,8 +5775,10 @@ def record_payment_order_created(
         cursor = conn.execute(
             "UPDATE orders SET provider_trade_no = ?, payment_url = COALESCE(?, payment_url),"
             " last_error_code = NULL, "
-            "updated_at = ? WHERE id = ? AND status = 'pending'",
-            (provider_trade_no, payment_url, now, order_id),
+            "updated_at = ? WHERE id = ? AND status = 'pending'"
+            " AND provider_trade_no IS NULL"
+            " AND last_error_code = 'GATEWAY_CREATE_RUNNING' AND updated_at = ?",
+            (provider_trade_no, payment_url, now, order_id, creation_generation),
         )
     if cursor.rowcount != 1:
         existing = order_by_id(conn, order_id)
@@ -5607,7 +5788,7 @@ def record_payment_order_created(
             and existing.provider_trade_no == provider_trade_no
         ):
             return existing
-        raise RuntimeError("payment order is not pending")
+        raise RuntimeError("payment creation claim is stale")
     order = order_by_id(conn, order_id)
     if order is None:
         raise RuntimeError("payment order does not exist")
@@ -5658,9 +5839,11 @@ def reallocate_payment_order_amount(
     *,
     order_id: int,
     rejected_amounts: set[int],
+    creation_generation: str,
     now: str,
 ) -> Order:
     now = _accounts_timestamp(now)
+    creation_generation = _accounts_timestamp(creation_generation)
     if any(type(amount) is not int or amount <= 0 for amount in rejected_amounts):
         raise ValueError("rejected payment amounts are invalid")
     try:
@@ -5668,7 +5851,12 @@ def reallocate_payment_order_amount(
         row = conn.execute(_order_select() + " WHERE id = ?", (order_id,)).fetchone()
         if row is None:
             raise RuntimeError("payment order does not exist")
-        if row["status"] != "pending" or row["provider_trade_no"] is not None:
+        if (
+            row["status"] != "pending"
+            or row["provider_trade_no"] is not None
+            or row["last_error_code"] != "GATEWAY_CREATE_RUNNING"
+            or row["updated_at"] != creation_generation
+        ):
             raise RuntimeError("payment order amount cannot be changed")
         if (
             row["settlement_expires_at"] is not None
@@ -5679,7 +5867,8 @@ def reallocate_payment_order_amount(
             int(item["amount_cents"])
             for item in conn.execute(
                 "SELECT amount_cents FROM orders WHERE id <> ? "
-                "AND merchant_order_no IS NOT NULL AND status IN ('pending', 'expired') "
+                "AND merchant_order_no IS NOT NULL "
+                "AND status IN ('pending', 'expired', 'failed') "
                 "AND COALESCE(settlement_expires_at, expires_at) > ?",
                 (order_id, now),
             ).fetchall()
@@ -5716,24 +5905,28 @@ def record_payment_order_create_error(
     conn: sqlite3.Connection,
     *,
     order_id: int,
+    creation_generation: str,
     now: str,
     waiting_recovery: bool = False,
 ) -> Order:
     now = _accounts_timestamp(now)
+    creation_generation = _accounts_timestamp(creation_generation)
     error_code = (
         "PAYMENT_WAITING_NO_URL" if waiting_recovery else "GATEWAY_CREATE_FAILED"
     )
     with conn:
         cursor = conn.execute(
             "UPDATE orders SET last_error_code = ?, updated_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (error_code, now, order_id),
+            "WHERE id = ? AND status = 'pending'"
+            " AND provider_trade_no IS NULL"
+            " AND last_error_code = 'GATEWAY_CREATE_RUNNING' AND updated_at = ?",
+            (error_code, now, order_id, creation_generation),
         )
     if cursor.rowcount != 1:
         existing = order_by_id(conn, order_id)
         if existing is not None and existing.status == "paid":
             return existing
-        raise RuntimeError("payment order is not pending")
+        raise RuntimeError("payment creation claim is stale")
     order = order_by_id(conn, order_id)
     if order is None:
         raise RuntimeError("payment order does not exist")
@@ -5745,9 +5938,11 @@ def record_payment_query_status(
     *,
     order_id: int,
     trade_status: Literal["WAIT_BUYER_PAY", "TRADE_CLOSED"],
+    expected_updated_at: str,
     now: str,
 ) -> Order:
     now = _accounts_timestamp(now)
+    expected_updated_at = _accounts_timestamp(expected_updated_at)
     if trade_status == "WAIT_BUYER_PAY":
         existing = order_by_id(conn, order_id)
         status = (
@@ -5772,20 +5967,22 @@ def record_payment_query_status(
             cursor = conn.execute(
                 "UPDATE orders SET status = ?, last_error_code = ?, "
                 "settlement_expires_at = ?, updated_at = ? "
-                "WHERE id = ? AND status IN ('pending', 'expired', 'failed')",
-                (status, error_code, now, now, order_id),
+                "WHERE id = ? AND status IN ('pending', 'expired', 'failed')"
+                " AND updated_at = ?",
+                (status, error_code, now, now, order_id, expected_updated_at),
             )
         else:
             cursor = conn.execute(
                 "UPDATE orders SET status = ?, last_error_code = ?, updated_at = ? "
-                "WHERE id = ? AND status IN ('pending', 'expired', 'failed')",
-                (status, error_code, now, order_id),
+                "WHERE id = ? AND status IN ('pending', 'expired', 'failed')"
+                " AND updated_at = ?",
+                (status, error_code, now, order_id, expected_updated_at),
             )
     if cursor.rowcount != 1:
         existing = order_by_id(conn, order_id)
         if existing is not None and existing.status == "paid":
             return existing
-        raise RuntimeError("payment order is not reconcilable")
+        raise RuntimeError("payment reconciliation is stale")
     order = order_by_id(conn, order_id)
     if order is None:
         raise RuntimeError("payment order does not exist")
@@ -5891,7 +6088,7 @@ def confirm_payment_order(
         ).fetchone()
         if duplicate is not None:
             raise RuntimeError("provider trade number already used")
-        if row["status"] not in {"pending", "expired"}:
+        if row["status"] not in {"pending", "expired", "failed"}:
             raise RuntimeError("payment order is not payable")
         settlement_expired = (
             row["settlement_expires_at"] is not None
@@ -5968,11 +6165,14 @@ def decide_order(
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT id, user_id, plan, status FROM orders WHERE id = ?",
+            "SELECT id, user_id, plan, status, merchant_order_no"
+            " FROM orders WHERE id = ?",
             (order_id,),
         ).fetchone()
         if row is None:
             raise RuntimeError("order does not exist")
+        if row["merchant_order_no"] is not None:
+            raise RuntimeError("automatic payment orders cannot be manually decided")
         if row["status"] != "pending":
             raise RuntimeError("order is already decided")
         status = "approved" if approve else "rejected"
@@ -6107,17 +6307,19 @@ def redeem_code(
         ).fetchone()
         if row is None:
             raise RuntimeError("redemption code is invalid or already used")
+        current = conn.execute(
+            "SELECT paid_until FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if current is None:
+            raise RuntimeError("user does not exist")
         conn.execute(
             "UPDATE redemption_codes SET status = 'used', used_by = ?, used_at = ?"
             " WHERE id = ? AND status = 'unused'",
             (user_id, now, row["id"]),
         )
         days = (plan_days or {}).get(row["plan"], 30)
-        current = conn.execute(
-            "SELECT paid_until FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
         base = now
-        if current is not None and current["paid_until"] and current["paid_until"] > now:
+        if current["paid_until"] and current["paid_until"] > now:
             base = current["paid_until"]
         until = _future_timestamp(base, days * 86400)
         conn.execute(

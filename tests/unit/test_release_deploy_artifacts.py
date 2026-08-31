@@ -227,6 +227,24 @@ def test_bootstrap_requires_exact_release_version_and_both_digests():
     assert "ND_ALLOW_TAG_DOWNGRADE" not in bootstrap
 
 
+def test_bootstrap_rejects_mixed_or_mislabeled_release_images_before_database_backup():
+    bootstrap = _read("deploy/bootstrap.sh")
+    verify_start = bootstrap.index("verify_release_image_labels()")
+    verify_call = bootstrap.index("\nverify_release_image_labels\n", verify_start)
+    backup_call = bootstrap.index("\nbackup_database_before_migration\n", verify_call)
+    verification = bootstrap[verify_start:backup_call]
+
+    assert verify_call < backup_call
+    assert verification.count('org.opencontainers.image.version') == 2
+    assert verification.count('org.opencontainers.image.revision') == 2
+    assert '[ "$worker_version" = "$TAG" ]' in verification
+    assert '[ "$web_version" = "$TAG" ]' in verification
+    assert '[ "$worker_revision" = "$web_revision" ]' in verification
+    assert '[ "$worker_revision" != "UNKNOWN" ]' in verification
+    assert "version label 与部署版本不一致" in verification
+    assert "revision label 不一致" in verification
+
+
 def test_public_site_does_not_mount_provider_configuration():
     compose = _read("deploy/compose.yaml")
     site_section = compose.split("\n  site:\n", 1)[1].split("\n  admin:\n", 1)[0]

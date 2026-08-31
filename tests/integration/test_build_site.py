@@ -112,14 +112,17 @@ def test_home_uses_one_membership_and_newsletter_entry(tmp_path):
         assert "data-support-panel" not in page.read_text(encoding="utf-8"), page
 
 
-def test_privacy_page_documents_double_opt_in_and_one_click(site):
+def test_privacy_page_documents_paid_member_newsletter_and_one_click(site):
     output_root, _ = site
     html = (output_root / "current" / "privacy" / "index.html").read_text(
         encoding="utf-8"
     )
-    assert "double opt-in" in html
+    assert "有效付费会员" in html
+    assert "登录" in html
     assert "one-click" in html
     assert "不可逆摘要" in html
+    assert "double opt-in" not in html
+    assert "限时确认链接" not in html
 
 
 def test_article_page_contains_learning_sections(site):

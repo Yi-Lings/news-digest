@@ -20,6 +20,7 @@ from news_digest.payments import (
     PaymentCreation,
     PaymentError,
     PaymentQuery,
+    config_identity,
     sign_fields,
 )
 from news_digest.site_server import create_site_server, load_site_secret
@@ -239,7 +240,7 @@ class SiteHarness:
             conn,
             token_digest=hashlib.sha256(token.encode()).hexdigest(),
             user_id=user.id,
-            expires_at=(NOW + dt.timedelta(days=1)).isoformat(),
+            expires_at=(NOW + dt.timedelta(days=3650)).isoformat(),
             now=NOW.isoformat(),
         )
         conn.close()
@@ -374,10 +375,10 @@ class TestStaticAndPaywall:
         db.set_settings(
             conn,
             {
-                "monthly_price_cents": "1000",
-                "monthly_discount_percent": "25",
-                "yearly_price_cents": "10000",
-                "yearly_discount_percent": "10",
+                "monthly_list_price_cents": "3600",
+                "monthly_price_cents": "990",
+                "yearly_list_price_cents": "10000",
+                "yearly_price_cents": "9000",
                 "payment_qr_data_url": "data:image/png;base64,legacy",
             },
             now=NOW.isoformat(),
@@ -388,14 +389,42 @@ class TestStaticAndPaywall:
         assert content.count('<span class="price-original">') == 2
         assert "月刊会员" in content and "年刊会员" in content
         assert "包月" not in content and "包年" not in content
-        assert "-25%" in content and "¥7.5" in content
+        assert "-72.5%" in content and "¥9.9" in content
         assert "-10%" in content and "¥90" in content
         assert "收款二维码" not in content and "data:image/png" not in content
         assert "支付成功后自动开通" in content
+        assert "form-action 'self' https://pay.example.test" in headers[
+            "Content-Security-Policy"
+        ]
         assert accounts.price_cents(
             {"monthly_price_cents": "999", "monthly_discount_percent": "20"},
             "monthly",
         ) == 799
+
+    def test_payment_csp_allows_only_the_configured_gateway_origin(self, tmp_path):
+        configured = EpayConfig(
+            base_url="https://pay.example.test/gateway",
+            merchant_id="1001",
+            merchant_key="merchant-secret",
+            payment_type="alipay",
+            site_url="http://127.0.0.1",
+        )
+        enabled = SiteHarness(tmp_path / "enabled", payment_config=configured)
+        disabled = SiteHarness(tmp_path / "disabled", payment_config=None)
+        try:
+            status, headers, _page = enabled.get("/subscribe")
+            policy = headers["Content-Security-Policy"]
+            assert status == 200
+            assert "form-action 'self' https://pay.example.test" in policy
+            assert "pay.example.test/gateway" not in policy
+
+            status, headers, _page = disabled.get("/subscribe")
+            assert status == 200
+            assert "form-action 'self'" in headers["Content-Security-Policy"]
+            assert "pay.example.test" not in headers["Content-Security-Policy"]
+        finally:
+            enabled.stop()
+            disabled.stop()
 
     def test_paywall_off_serves_archive(self, site):
         site.set_paywall(False)
@@ -473,7 +502,7 @@ class TestStaticAndPaywall:
             conn,
             token_digest=hashlib.sha256(token.encode()).hexdigest(),
             user_id=user.id,
-            expires_at=(NOW + dt.timedelta(days=1)).isoformat(),
+            expires_at=(NOW + dt.timedelta(days=3650)).isoformat(),
             now=NOW.isoformat(),
         )
         conn.close()
@@ -493,6 +522,9 @@ class TestMembership:
         user, cookies = site.member_session("member@example.com")
         status, headers, page = site.get("/subscribe", cookies=cookies)
         assert status == 200
+        assert page.count('form method="post" action="/order"') == 2
+        assert 'href="/register">注册</a>或<a href="/login">登录</a>后' not in page
+        assert "也可以在「我的账户」兑换卡密" in page
         assert "只有有效付费会员" not in page
         assert "当前账号尚无有效付费会员" in page
         assert 'action="/newsletter"' not in page
@@ -1190,7 +1222,11 @@ class TestOrders:
         db.activate_user(conn, email_key=user.email_key, now=NOW.isoformat())
         db.set_settings(
             conn,
-            {"monthly_price_cents": "999", "monthly_discount_percent": "20"},
+            {
+                "monthly_list_price_cents": "3600",
+                "monthly_price_cents": "990",
+                "monthly_discount_percent": "0",
+            },
             now=NOW.isoformat(),
         )
         session_token = "buyer-session-token-with-enough-entropy"
@@ -1198,7 +1234,7 @@ class TestOrders:
             conn,
             token_digest=hashlib.sha256(session_token.encode()).hexdigest(),
             user_id=user.id,
-            expires_at=(NOW + dt.timedelta(days=1)).isoformat(),
+            expires_at=(NOW + dt.timedelta(days=3650)).isoformat(),
             now=NOW.isoformat(),
         )
         conn.close()
@@ -1221,7 +1257,15 @@ class TestOrders:
         conn.close()
         assert len(orders) == 1
         order = orders[0]
-        assert order.base_amount_cents == order.amount_cents == 799
+        assert order.base_amount_cents == order.amount_cents == 990
+        status, account_headers, account_page = site.get("/account", cookies=cookies)
+        assert status == 200
+        assert order.merchant_order_no in account_page
+        assert "月刊会员" in account_page and "继续支付" in account_page
+        assert "基准 ¥" not in account_page and "实付 ¥" not in account_page
+        assert "form-action 'self' https://pay.example.test" in account_headers[
+            "Content-Security-Policy"
+        ]
         fields = self._notification(site, order)
         status, _headers, body = site.post(
             "/subscribe/api/payment/easypay", fields
@@ -1242,8 +1286,10 @@ class TestOrders:
         assert db.user_by_id(conn, user.id).paid_until == first_until
         conn.close()
         status, _headers, account_page = site.get("/account", cookies=cookies)
-        assert status == 200 and "¥7.99" in account_page and "已支付" in account_page
+        assert status == 200 and "已支付" in account_page
+        assert order.merchant_order_no in account_page
         assert "月刊会员" in account_page
+        assert "基准 ¥" not in account_page and "实付 ¥" not in account_page
         assert "计划:monthly" not in account_page
         assert "payment_ref" not in account_page and "收款二维码" not in account_page
         assert 'href="/forgot"' in account_page
@@ -1306,6 +1352,42 @@ class TestOrders:
         finally:
             harness.stop()
 
+    def test_paid_webhook_wins_when_gateway_create_response_fails(self, tmp_path):
+        harness = None
+
+        def settle_then_fail(config, **kwargs):
+            conn = db.connect(harness.db_path)
+            db.confirm_payment_order(
+                conn,
+                merchant_order_no=kwargs["merchant_order_no"],
+                provider_trade_no="gateway-paid-before-error",
+                amount_cents=kwargs["amount_cents"],
+                now=dt.datetime.now(dt.UTC).isoformat(),
+                amount_hold_seconds=config.amount_hold_seconds,
+                plan_days=accounts.PLAN_DAYS,
+            )
+            conn.close()
+            raise PaymentError("create response lost")
+
+        harness = SiteHarness(tmp_path, payment_create_callback=settle_then_fail)
+        try:
+            user, cookies = harness.member_session("paid-before-error@example.com")
+            status, headers, page = harness.get("/account", cookies=cookies)
+            csrf, csrf_cookies = harness.csrf_pair(page, headers)
+            cookies.update(csrf_cookies)
+            status, response_headers, _page = harness.post(
+                "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
+            )
+            assert status == 303 and response_headers["Location"] == "/account"
+            conn = db.connect(harness.db_path)
+            order = db.list_user_orders(conn, user_id=user.id)[0]
+            updated_user = db.user_by_id(conn, user.id)
+            conn.close()
+            assert order.status == "paid"
+            assert updated_user is not None and updated_user.paid_until is not None
+        finally:
+            harness.stop()
+
     def test_gateway_creation_failure_retries_same_local_order_once_claimed(
         self, tmp_path
     ):
@@ -1329,10 +1411,22 @@ class TestOrders:
             first = harness.post(
                 "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
             )
+            assert first[0] == 502
+            conn = db.connect(harness.db_path)
+            order = db.list_user_orders(conn, user_id=user.id)[0]
+            with conn:
+                conn.execute(
+                    "UPDATE orders SET status = 'failed' WHERE id = ?",
+                    (order.id,),
+                )
+            conn.close()
+
+            status, _headers, account_page = harness.get("/account", cookies=cookies)
+            assert status == 200
+            assert "继续支付" in account_page
             second = harness.post(
                 "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
             )
-            assert first[0] == 502
             assert second[0] == 302 and second[1]["Location"].endswith("/recovered")
             assert len(calls) == 2
             assert calls[0]["merchant_order_no"] == calls[1]["merchant_order_no"]
@@ -1340,6 +1434,93 @@ class TestOrders:
             orders = db.list_user_orders(conn, user_id=user.id)
             conn.close()
             assert len(orders) == 1 and orders[0].payment_url == second[1]["Location"]
+        finally:
+            harness.stop()
+
+    def test_ambiguous_create_retry_does_not_reallocate_after_amount_occupied(
+        self, tmp_path
+    ):
+        calls = []
+
+        def lose_then_report_occupied(_config, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise PaymentError("create response lost")
+            raise PaymentError("amount occupied", code="AMOUNT_OCCUPIED")
+
+        harness = SiteHarness(
+            tmp_path, payment_create_callback=lose_then_report_occupied
+        )
+        try:
+            user, cookies = harness.member_session("ambiguous-retry@example.com")
+            status, headers, page = harness.get("/account", cookies=cookies)
+            csrf, csrf_cookies = harness.csrf_pair(page, headers)
+            cookies.update(csrf_cookies)
+
+            first = harness.post(
+                "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
+            )
+            second = harness.post(
+                "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
+            )
+
+            assert first[0] == second[0] == 502
+            assert len(calls) == 2
+            assert calls[0]["merchant_order_no"] == calls[1]["merchant_order_no"]
+            assert [call["amount_cents"] for call in calls] == [990, 990]
+            conn = db.connect(harness.db_path)
+            orders = db.list_user_orders(conn, user_id=user.id)
+            conn.close()
+            assert len(orders) == 1
+            assert orders[0].merchant_order_no == calls[0]["merchant_order_no"]
+            assert orders[0].amount_cents == orders[0].base_amount_cents == 990
+            assert orders[0].amount_offset_cents == 0
+
+            fields = self._notification(harness, orders[0])
+            status, _headers, body = harness.post("/payment/notify", fields)
+            assert status == 200 and body == "success"
+        finally:
+            harness.stop()
+
+    def test_failed_uncertain_order_accepts_late_success_callback_once(self, tmp_path):
+        def fail_create(_config, **_kwargs):
+            raise PaymentError("create response lost")
+
+        harness = SiteHarness(tmp_path, payment_create_callback=fail_create)
+        try:
+            user, cookies = harness.member_session("failed-callback@example.com")
+            status, headers, page = harness.get("/account", cookies=cookies)
+            csrf, csrf_cookies = harness.csrf_pair(page, headers)
+            cookies.update(csrf_cookies)
+            status, _headers, _page = harness.post(
+                "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
+            )
+            assert status == 502
+            conn = db.connect(harness.db_path)
+            order = db.list_user_orders(conn, user_id=user.id)[0]
+            with conn:
+                conn.execute(
+                    "UPDATE orders SET status = 'failed', "
+                    "last_error_code = 'PAYMENT_WAITING_NO_URL' WHERE id = ?",
+                    (order.id,),
+                )
+            conn.close()
+
+            fields = self._notification(harness, order)
+            status, _headers, body = harness.post("/payment/notify", fields)
+            assert status == 200 and body == "success"
+            conn = db.connect(harness.db_path)
+            paid = db.order_by_id(conn, order.id)
+            first_until = db.user_by_id(conn, user.id).paid_until
+            conn.close()
+            assert paid is not None and paid.status == "paid"
+            assert first_until is not None
+
+            status, _headers, body = harness.post("/payment/notify", fields)
+            assert status == 200 and body == "success"
+            conn = db.connect(harness.db_path)
+            assert db.user_by_id(conn, user.id).paid_until == first_until
+            conn.close()
         finally:
             harness.stop()
 
@@ -1410,6 +1591,12 @@ class TestOrders:
         harness = SiteHarness(tmp_path, payment_config=None)
         try:
             _user, cookies = harness.member_session("disabled-pay@example.com")
+            status, _headers, subscribe_page = harness.get(
+                "/subscribe", cookies=cookies
+            )
+            assert status == 200
+            assert "在线支付暂不可用" in subscribe_page
+            assert 'action="/order"' not in subscribe_page
             status, headers, page = harness.get("/account", cookies=cookies)
             csrf, csrf_cookies = harness.csrf_pair(page, headers)
             cookies.update(csrf_cookies)
@@ -1596,13 +1783,54 @@ class TestOrders:
         finally:
             harness.stop()
 
+    def test_account_does_not_reconcile_an_active_payment_creation_lease(self, tmp_path):
+        queries = []
+
+        def unexpected_query(_config, **kwargs):
+            queries.append(kwargs)
+            raise AssertionError("active payment creation lease must not be queried")
+
+        harness = SiteHarness(tmp_path, payment_query_callback=unexpected_query)
+        try:
+            user, cookies = harness.member_session("active-create@example.com")
+            created_at = (
+                dt.datetime.now(dt.UTC) - dt.timedelta(seconds=20)
+            ).isoformat()
+            conn = db.connect(harness.db_path)
+            db.reserve_payment_order(
+                conn,
+                user_id=user.id,
+                plan="monthly",
+                base_amount_cents=990,
+                merchant_order_no="news_active_create",
+                payment_type="alipay",
+                payment_config_id=config_identity(harness.payment_config),
+                now=created_at,
+                ttl_seconds=300,
+                amount_hold_seconds=3600,
+            )
+            conn.close()
+
+            status, _headers, page = harness.get("/account", cookies=cookies)
+            assert status == 200 and "等待支付" in page
+            assert queries == []
+        finally:
+            harness.stop()
+
     def test_logged_in_subscribe_cards_submit_selected_plan_directly(self, site):
         _user, cookies = site.member_session("plans@example.com")
-        status, _headers, page = site.get("/subscribe", cookies=cookies)
+        status, headers, page = site.get("/subscribe", cookies=cookies)
         assert status == 200
         assert page.count('action="/order"') == 2
         assert 'name="plan" value="monthly"' in page
         assert 'name="plan" value="yearly"' in page
+        csrf, csrf_cookies = site.csrf_pair(page, headers)
+        cookies.update(csrf_cookies)
+        status, redirect_headers, _page = site.post(
+            "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
+        )
+        assert status == 302
+        assert redirect_headers["Location"].endswith("/pay/gateway-10001")
 
     def test_account_marks_checkout_deadline_expired_before_render(self, site):
         user, cookies = site.member_session("expired-account@example.com")
@@ -1620,7 +1848,8 @@ class TestOrders:
         )
         conn.close()
         status, _headers, page = site.get("/account", cookies=cookies)
-        assert status == 200 and "已过期" in page
+        assert status == 200 and "已过期 / 已取消" in page
+        assert order.merchant_order_no in page
         conn = db.connect(site.db_path)
         assert db.order_by_id(conn, order.id).status == "expired"
         conn.close()
@@ -1635,6 +1864,46 @@ class TestOrders:
 
 
 class TestRedemptionDomain:
+    def test_redeem_result_and_account_show_plan_and_expiry(self, site):
+        user, cookies = site.member_session("redeem-result@example.com")
+        code = generate_redemption_code()
+        conn = db.connect(site.db_path)
+        db.create_redemption_codes(
+            conn,
+            entries=[(redemption_digest(code), redemption_prefix(code))],
+            plan="yearly",
+            note=None,
+            created_by="admin",
+            now=NOW.isoformat(),
+        )
+        conn.close()
+
+        status, headers, page = site.get("/account", cookies=cookies)
+        assert status == 200
+        token, csrf_cookie = site.csrf_pair(page, headers)
+        cookies.update(csrf_cookie)
+        status, headers, _page = site.post(
+            "/redeem", {"csrf": token, "code": code}, cookies=cookies
+        )
+        assert status == 303
+        assert headers["Location"] == "/account?redeemed=1"
+
+        conn = db.connect(site.db_path)
+        refreshed = db.user_by_id(conn, user.id)
+        conn.close()
+        assert refreshed is not None and refreshed.paid_until is not None
+        expiry_date = refreshed.paid_until[:10]
+
+        status, _headers, page = site.get(headers["Location"], cookies=cookies)
+        assert status == 200
+        assert "年刊会员已兑换" in page
+        assert f"会员有效期至 {expiry_date}" in page
+
+        status, _headers, account_page = site.get("/account", cookies=cookies)
+        assert status == 200
+        assert "年刊会员" in account_page
+        assert f"会员有效期至 {expiry_date}" in account_page
+
     def test_redeem_code_extends_and_single_use(self, tmp_path, site):
         conn = db.connect(site.db_path)
         user = db.upsert_pending_user(
@@ -1671,4 +1940,26 @@ class TestRedemptionDomain:
                 user_id=user.id,
                 now=NOW.isoformat(),
             )
+
+        orphan_code = generate_redemption_code()
+        db.create_redemption_codes(
+            conn,
+            entries=[(redemption_digest(orphan_code), redemption_prefix(orphan_code))],
+            plan="monthly",
+            note=None,
+            created_by="admin",
+            now=NOW.isoformat(),
+        )
+        with pytest.raises(RuntimeError, match="user does not exist"):
+            db.redeem_code(
+                conn,
+                code_digest=redemption_digest(orphan_code),
+                user_id=user.id + 10_000,
+                now=NOW.isoformat(),
+            )
+        orphan = conn.execute(
+            "SELECT status FROM redemption_codes WHERE code_digest = ?",
+            (redemption_digest(orphan_code),),
+        ).fetchone()
+        assert orphan["status"] == "unused"
         conn.close()

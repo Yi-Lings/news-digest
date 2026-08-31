@@ -57,6 +57,23 @@ _LOGIN_DUMMY_PASSWORD_HASH = (
 )
 
 
+def _payment_order_creation_retryable(order: db.Order, now: dt.datetime) -> bool:
+    if order.payment_url is not None:
+        return False
+    if order.settlement_expires_at is None or order.settlement_expires_at <= now.isoformat():
+        return False
+    if order.status not in {"pending", "expired", "failed"}:
+        return False
+    if order.last_error_code in {"GATEWAY_CREATE_FAILED", "PAYMENT_WAITING_NO_URL"}:
+        return True
+    if order.last_error_code == "GATEWAY_CREATE_RUNNING":
+        updated_at = dt.datetime.fromisoformat(order.updated_at)
+        return (
+            now - updated_at
+        ).total_seconds() >= db.PAYMENT_CREATION_LEASE_SECONDS
+    return False
+
+
 def _sign(secret: bytes, message: str) -> str:
     return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -279,7 +296,9 @@ def _page(title: str, body: str) -> str:
         ".plan-cta{display:block;text-align:center;background:var(--ink);color:#fff;"
         "text-decoration:none;padding:.7rem 1rem;font:700 .92rem/1.3 Arial,sans-serif;"
         "border:1px solid var(--ink)}.plan-card.is-featured .plan-cta{background:var(--red);"
-        "border-color:var(--red)}.plan-benefits{list-style:none;padding:0;margin:1rem 0 0}"
+        "border-color:var(--red)}.plan-cta.is-disabled,.plan-card.is-featured "
+        ".plan-cta.is-disabled{background:#777;border-color:#777;cursor:not-allowed}"
+        ".plan-benefits{list-style:none;padding:0;margin:1rem 0 0}"
         ".plan-benefits li{position:relative;padding:.35rem 0 .35rem 1.35rem;color:var(--muted)}"
         ".plan-benefits li::before{content:'✓';position:absolute;left:0;color:var(--green);"
         "font-weight:700}"
@@ -287,12 +306,21 @@ def _page(title: str, body: str) -> str:
         "Arial,sans-serif;margin-bottom:.15rem}.captcha-row{display:flex;align-items:center;"
         "gap:.75rem;flex-wrap:wrap}.captcha-image{width:184px;height:62px;border:1px solid "
         "var(--rule);background:#fff}.captcha-row input{width:10rem}"
+        ".order-list{list-style:none;padding:0;margin:.8rem 0 1.5rem;border-top:1px solid "
+        "var(--rule)}.order-list li{display:grid;grid-template-columns:minmax(0,1fr) auto;"
+        "gap:.45rem 1rem;align-items:center;padding:.8rem 0;border-bottom:1px solid var(--rule)}"
+        ".order-meta{min-width:0}.order-number{display:block;font:600 .82rem/1.4 "
+        "Arial,sans-serif;overflow-wrap:anywhere}.order-plan{color:var(--muted);font-size:.9rem}"
+        ".order-action{display:inline;margin:0;padding:0;border:0;background:transparent}"
+        ".order-action button{margin:0}.order-state{font:700 .82rem/1.4 Arial,sans-serif;"
+        "white-space:nowrap}"
         ".site-foot{border-top:1px solid var(--rule);padding:1rem 1.25rem 2rem;"
         "text-align:center;color:var(--muted);font-size:.82rem}"
         "@keyframes page-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;"
         "transform:none}}@media(max-width:480px){.site-head{padding:.85rem 1rem}"
         ".wrap{padding:1.7rem 1rem 3rem}form{padding:.85rem}input,select,textarea,button{"
         "width:100%}.plans-grid{grid-template-columns:1fr}.plan-summary{min-height:0}"
+        ".order-list li{grid-template-columns:1fr}.order-action,.order-action button{width:100%}"
         ".captcha-row input{width:100%}.site-nav{display:grid;"
         "grid-template-columns:repeat(2,minmax(0,1fr));"
         "gap:.45rem .8rem}}@media(prefers-reduced-motion:reduce){.wrap{animation:none}}"
@@ -312,16 +340,17 @@ def _page(title: str, body: str) -> str:
 
 def _plan_price_html(settings: dict[str, str], plan: str, label: str) -> str:
     base = accounts.base_price_cents(settings, plan)
-    discount = accounts.discount_percent(settings, plan)
+    discount = accounts.discount_basis_points(settings, plan)
+    discount_label = accounts.discount_label(settings, plan)
     current = accounts.price_cents(settings, plan)
     if discount:
         price = (
-            f"<span class=\"price-original\">¥{base / 100:g}</span>"
-            f"<span class=\"discount-badge\">-{discount}%</span>"
-            f"<span class=\"price-current\">¥{current / 100:g}</span>"
+            f"<span class=\"price-original\">¥{accounts.format_cents(base)}</span>"
+            f"<span class=\"discount-badge\">-{discount_label}%</span>"
+            f"<span class=\"price-current\">¥{accounts.format_cents(current)}</span>"
         )
     else:
-        price = f"<span class=\"price-current\">¥{base / 100:g}</span>"
+        price = f"<span class=\"price-current\">¥{accounts.format_cents(base)}</span>"
     return f"<div class=\"price-row\"><strong>{html.escape(label)}</strong>{price}</div>"
 
 
@@ -333,13 +362,15 @@ def _plan_card_html(
     target: str,
     *,
     csrf_token: str | None = None,
+    action_available: bool = True,
 ) -> str:
     base = accounts.base_price_cents(settings, plan)
-    discount = accounts.discount_percent(settings, plan)
+    discount = accounts.discount_basis_points(settings, plan)
+    discount_label = accounts.discount_label(settings, plan)
     current = accounts.price_cents(settings, plan)
     original = (
-        f"<span class=\"price-original\">¥{base / 100:g}</span>"
-        f"<span class=\"discount-badge\">-{discount}%</span>"
+        f"<span class=\"price-original\">¥{accounts.format_cents(base)}</span>"
+        f"<span class=\"discount-badge\">-{discount_label}%</span>"
         if discount
         else ""
     )
@@ -347,7 +378,12 @@ def _plan_card_html(
     marker = "<span class=\"plan-mark\">推荐</span>" if featured else ""
     summary = "适合长期稳定阅读，按年开通更省心。" if featured else "适合按月体验完整会员内容。"
     duration = "366 天会员有效期" if featured else "31 天会员有效期"
-    if csrf_token is None:
+    if not action_available:
+        action = (
+            '<span class="plan-cta is-disabled" aria-disabled="true">'
+            "在线支付暂不可用</span>"
+        )
+    elif csrf_token is None:
         action = f"<a class=\"plan-cta\" href=\"{target}\">立即订阅</a>"
     else:
         action = (
@@ -361,7 +397,8 @@ def _plan_card_html(
         f"<div class=\"plan-head\"><h3 class=\"plan-name\">{html.escape(label)}</h3>"
         f"{marker}</div><p class=\"plan-summary\">{summary}</p>"
         f"<div class=\"plan-price\">{original}<span class=\"price-current\">"
-        f"¥{current / 100:g}</span><span class=\"plan-period\">/{period}</span></div>"
+        f"¥{accounts.format_cents(current)}</span>"
+        f"<span class=\"plan-period\">/{period}</span></div>"
         f"{action}"
         "<ul class=\"plan-benefits\"><li>阅读全部主文章与往期归档</li>"
         "<li>可开启每日邮件简报</li><li>中英对照与学习内容</li>"
@@ -393,7 +430,10 @@ class SiteHandler(BaseHTTPRequestHandler):
         except ValueError:
             return str(peer_address)
 
-    def _security_headers(self) -> None:
+    def _security_headers(self, form_action_origin: str | None = None) -> None:
+        form_action = "'self'"
+        if form_action_origin is not None:
+            form_action += f" {form_action_origin}"
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
@@ -402,15 +442,22 @@ class SiteHandler(BaseHTTPRequestHandler):
             "default-src 'self'; img-src 'self' data: https:;"
             " style-src 'self' 'unsafe-inline';"
             " frame-ancestors 'none';"
-            " base-uri 'none'; form-action 'self'",
+            f" base-uri 'none'; form-action {form_action}",
         )
         self.send_header("Cache-Control", "no-store")
 
-    def _html(self, status: int, body: str, headers: list[tuple[str, str]] | None = None) -> None:
+    def _html(
+        self,
+        status: int,
+        body: str,
+        headers: list[tuple[str, str]] | None = None,
+        *,
+        form_action_origin: str | None = None,
+    ) -> None:
         body = body.replace(_ADMIN_NAV_MARKER, self._admin_nav_html())
         payload = body.encode("utf-8")
         self.send_response(status)
-        self._security_headers()
+        self._security_headers(form_action_origin)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         for name, value in headers or []:
@@ -435,9 +482,16 @@ class SiteHandler(BaseHTTPRequestHandler):
             return ""
         return '<a class="admin-entry" href="/admin/">管理后台</a>'
 
-    def _redirect(self, location: str, headers: list[tuple[str, str]] | None = None) -> None:
-        self.send_response(HTTPStatus.FOUND)
-        self._security_headers()
+    def _redirect(
+        self,
+        location: str,
+        headers: list[tuple[str, str]] | None = None,
+        *,
+        form_action_origin: str | None = None,
+        status: HTTPStatus = HTTPStatus.FOUND,
+    ) -> None:
+        self.send_response(status)
+        self._security_headers(form_action_origin)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
         for name, value in headers or []:
@@ -638,7 +692,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 self._render_reset()
                 return
             if path == "/account":
-                self._render_account()
+                redeemed = parse_qs(parsed.query).get("redeemed") == ["1"]
+                self._render_account(redeemed=redeemed)
                 return
             if path == "/subscribe":
                 self._render_subscribe()
@@ -1012,7 +1067,7 @@ class SiteHandler(BaseHTTPRequestHandler):
         )
         self._html(200, _page("重置密码", body), self._flush_cookie([]))
 
-    def _render_account(self) -> None:
+    def _render_account(self, *, redeemed: bool = False) -> None:
         session = self._session_user()
         if session is None:
             self._redirect("/login")
@@ -1034,6 +1089,13 @@ class SiteHandler(BaseHTTPRequestHandler):
                 and order.settlement_expires_at
                 and order.settlement_expires_at > now.isoformat()
                 and (now - dt.datetime.fromisoformat(order.updated_at)).total_seconds() >= 15
+                and (
+                    order.last_error_code != "GATEWAY_CREATE_RUNNING"
+                    or (
+                        now - dt.datetime.fromisoformat(order.updated_at)
+                    ).total_seconds()
+                    >= db.PAYMENT_CREATION_LEASE_SECONDS
+                )
             ),
             None,
         )
@@ -1051,48 +1113,61 @@ class SiteHandler(BaseHTTPRequestHandler):
         settings = self._load_settings()
         paid = accounts.is_paid(user.paid_until, dt.datetime.now(dt.UTC))
         plan_labels = {"monthly": "月刊会员", "yearly": "年刊会员"}
+        token, _cookie = self._csrf_pair()
         status_line = (
-            f"会员有效至 {user.paid_until[:10]}"
+            f"会员有效期至 {user.paid_until[:10]}"
             f" · {plan_labels.get(user.plan or '', '会员')}"
             if paid
             else "当前为免费账号:每天可阅读最新一期中的 1 篇主文章。"
         )
+        redemption_html = (
+            "<div class=\"msg\"><strong>"
+            f"{plan_labels.get(user.plan or '', '会员')}已兑换。</strong><br>"
+            f"会员有效期至 {html.escape(user.paid_until[:10])}，感谢支持！</div>"
+            if redeemed and paid and user.paid_until
+            else ""
+        )
         status_labels = {
             "pending": "等待支付",
             "paid": "已支付",
-            "expired": "已过期",
+            "expired": "已过期 / 已取消",
             "failed": "支付异常",
-            "approved": "已人工开通",
-            "rejected": "已拒绝",
+            "approved": "已开通",
+            "rejected": "已过期 / 已取消",
         }
         order_items = []
         for order in orders:
-            expiry_note = (
-                f" · 请于 {order.expires_at[:19]} 前完成支付"
-                if order.status == "pending" and order.expires_at
-                else ""
+            action = (
+                f"<span class=\"order-state\">"
+                f"{status_labels.get(order.status, '状态未知')}</span>"
             )
-            payment_link = (
-                f" · <a href=\"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
-                if order.status == "pending" and order.payment_url
-                else ""
-            )
+            if order.status == "pending" and order.payment_url:
+                action = (
+                    f"<a class=\"order-state\" href=\""
+                    f"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
+                )
+            elif _payment_order_creation_retryable(order, now):
+                action = (
+                    "<form class=\"order-action\" method=\"post\" action=\"/order\">"
+                    f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
+                    f"<input type=\"hidden\" name=\"plan\" value=\"{order.plan}\">"
+                    "<button type=\"submit\">继续支付</button></form>"
+                )
+            order_number = order.merchant_order_no or f"#{order.id}"
             order_items.append(
-                f"<li>{order.created_at[:10]} · "
-                f"{plan_labels.get(order.plan, order.plan)} · "
-                f"基准 ¥{order.base_amount_cents / 100:.2f} · "
-                f"实付 ¥{order.amount_cents / 100:.2f} · "
-                f"{status_labels.get(order.status, '状态未知')}"
-                f"{expiry_note}{payment_link}</li>"
+                "<li><span class=\"order-meta\"><span class=\"order-number\">"
+                f"订单编号 {html.escape(order_number)}</span>"
+                f"<span class=\"order-plan\">{plan_labels.get(order.plan, order.plan)}</span>"
+                f"</span>{action}</li>"
             )
         order_rows = "".join(order_items) or "<li class=\"muted\">暂无订单</li>"
-        monthly = accounts.price_cents(settings, "monthly") / 100
-        yearly = accounts.price_cents(settings, "yearly") / 100
+        monthly = accounts.format_cents(accounts.price_cents(settings, "monthly"))
+        yearly = accounts.format_cents(accounts.price_cents(settings, "yearly"))
         pricing = _plan_price_html(settings, "monthly", "月刊会员") + _plan_price_html(
             settings, "yearly", "年刊会员"
         )
-        token, _cookie = self._csrf_pair()
-        if self.server.current_payment_config() is None:
+        payment_config = self.server.current_payment_config()
+        if payment_config is None:
             payment_html = (
                 "<div class=\"msg\">在线支付暂不可用，请稍后再试。</div>"
             )
@@ -1102,14 +1177,15 @@ class SiteHandler(BaseHTTPRequestHandler):
                 f"<form method=\"post\" action=\"/order\">"
                 f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
                 "<select name=\"plan\">"
-                f"<option value=\"monthly\">月刊会员 ¥{monthly:g}/月</option>"
-                f"<option value=\"yearly\">年刊会员 ¥{yearly:g}/年</option>"
+                f"<option value=\"monthly\">月刊会员 ¥{monthly}/月</option>"
+                f"<option value=\"yearly\">年刊会员 ¥{yearly}/年</option>"
                 "</select> "
                 "<button type=\"submit\">前往支付</button></form>"
                 "<p class=\"muted\">支付成功后自动开通，无需人工审核。</p>"
             )
         body = (
-            f"<p>{html.escape(status_line)}</p><p class=\"muted\">{html.escape(session.email)}</p>"
+            f"{redemption_html}<p>{html.escape(status_line)}</p>"
+            f"<p class=\"muted\">{html.escape(session.email)}</p>"
             f"<h2>订阅方案</h2>{pricing}"
             f"{payment_html}"
             "<h2>卡密兑换</h2>"
@@ -1117,19 +1193,32 @@ class SiteHandler(BaseHTTPRequestHandler):
             f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
             "<input name=\"code\" placeholder=\"XXXX-XXXX\"> "
             "<button type=\"submit\">兑换</button></form>"
-            f"<h2>我的订单</h2><ul>{order_rows}</ul>"
+            f"<h2>我的订单</h2><ul class=\"order-list\">{order_rows}</ul>"
             "<p><a href=\"/forgot\">使用邮箱验证码修改密码</a></p>"
             "<p><form method=\"post\" action=\"/logout\">"
             f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
             "<button type=\"submit\">退出登录</button></form></p>"
         )
-        self._html(200, _page("我的账户", body), self._flush_cookie([]))
+        self._html(
+            200,
+            _page("我的账户", body),
+            self._flush_cookie([]),
+            form_action_origin=(
+                payments.payment_origin(payment_config) if payment_config is not None else None
+            ),
+        )
 
     def _render_subscribe(self, message: str = "") -> None:
         settings = self._load_settings()
         session = self._session_user()
         plan_target = "/account" if session is not None else "/register"
-        plan_csrf = self._csrf_pair()[0] if session is not None else None
+        payment_config = self.server.current_payment_config()
+        payment_available = session is None or payment_config is not None
+        plan_csrf = (
+            self._csrf_pair()[0]
+            if session is not None and payment_config is not None
+            else None
+        )
         pricing = (
             "<div class=\"plans-grid\">"
             + _plan_card_html(
@@ -1139,6 +1228,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 "月",
                 plan_target,
                 csrf_token=plan_csrf,
+                action_available=payment_available,
             )
             + _plan_card_html(
                 settings,
@@ -1147,6 +1237,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 "年",
                 plan_target,
                 csrf_token=plan_csrf,
+                action_available=payment_available,
             )
             + "</div>"
         )
@@ -1164,41 +1255,63 @@ class SiteHandler(BaseHTTPRequestHandler):
         )
         message_html = f"<div class=\"msg\">{html.escape(message)}</div>" if message else ""
         if session is None:
+            membership_help = (
+                "<p><a href=\"/register\">注册</a>或<a href=\"/login\">登录</a>后，"
+                "选择会员方案并前往支付。在线支付成功后自动开通，无需人工审核。</p>"
+            )
             newsletter_html = (
                 "<p>每日简报是付费会员权益。请先<a href=\"/login\">登录</a>，"
                 "或<a href=\"/register\">注册账号</a>后开通会员。</p>"
             )
-        elif not paid:
-            newsletter_html = (
-                "<p>当前账号尚无有效付费会员。在线支付成功后会自动开通，"
-                "或在「我的账户」兑换卡密后，即可订阅每日简报。</p>"
-                "<p><a href=\"/account\">前往我的账户</a></p>"
-            )
-        elif newsletter is not None and newsletter.status == "disabled":
-            newsletter_html = "<p>该邮箱的简报订阅已由管理员停用，请联系管理员处理。</p>"
         else:
-            token = plan_csrf or self._csrf_pair()[0]
-            active = newsletter is not None and newsletter.status == "active"
-            action = "disable" if active else "enable"
-            label = "停止每日简报" if active else "订阅每日简报"
-            state = "已开启，期刊会发送到你的注册邮箱。" if active else "尚未开启。"
-            newsletter_html = (
-                f"<p>{state}</p><form method=\"post\" action=\"/newsletter\">"
-                f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
-                f"<input type=\"hidden\" name=\"action\" value=\"{action}\">"
-                f"<button type=\"submit\">{label}</button></form>"
-            )
+            if payment_config is None:
+                membership_help = (
+                    '<div class="msg">在线支付暂不可用，请稍后再试。'
+                    "你仍可在「我的账户」兑换已有卡密。</div>"
+                )
+            else:
+                membership_help = (
+                    "<p>点击会员方案会直接前往支付；也可以在「我的账户」兑换卡密。"
+                    "卡密流程：进入「我的账户」→ 在「卡密兑换」输入卡密 → 点击「兑换」，"
+                    "会员时长会立即到账。</p>"
+                )
+            if not paid:
+                newsletter_html = (
+                    "<p>当前账号尚无有效付费会员。在线支付成功后会自动开通，"
+                    "或在「我的账户」兑换卡密后，即可订阅每日简报。</p>"
+                    "<p><a href=\"/account\">前往我的账户</a></p>"
+                )
+            elif newsletter is not None and newsletter.status == "disabled":
+                newsletter_html = "<p>该邮箱的简报订阅已由管理员停用，请联系管理员处理。</p>"
+            else:
+                token = plan_csrf or self._csrf_pair()[0]
+                active = newsletter is not None and newsletter.status == "active"
+                action = "disable" if active else "enable"
+                label = "停止每日简报" if active else "订阅每日简报"
+                state = "已开启，期刊会发送到你的注册邮箱。" if active else "尚未开启。"
+                newsletter_html = (
+                    f"<p>{state}</p><form method=\"post\" action=\"/newsletter\">"
+                    f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
+                    f"<input type=\"hidden\" name=\"action\" value=\"{action}\">"
+                    f"<button type=\"submit\">{label}</button></form>"
+                )
         body = (
             f"{message_html}<h2>付费会员</h2>"
             f"{pricing}"
             "<p>付费后可阅读全部主文章与完整归档;免费读者每天可读最新一期中的 1 篇。</p>"
-            "<p><a href=\"/register\">注册</a>或<a href=\"/login\">登录</a>后，"
-            "在「我的账户」在线支付或兑换卡密。在线支付成功后自动开通，无需人工审核。</p>"
+            f"{membership_help}"
             "<h2>每日简报</h2>"
             "<p class=\"muted\">每日邮件期刊仅向有效付费会员开放，会员到期后自动停止投递。</p>"
             f"{newsletter_html}"
         )
-        self._html(200, _page("订阅", body), self._flush_cookie([]))
+        self._html(
+            200,
+            _page("订阅", body),
+            self._flush_cookie([]),
+            form_action_origin=(
+                payments.payment_origin(payment_config) if payment_config is not None else None
+            ),
+        )
 
     def _handle_newsletter(self, form: dict[str, str]) -> None:
         if not self._csrf_valid(form.get("csrf", "")):
@@ -1579,6 +1692,7 @@ class SiteHandler(BaseHTTPRequestHandler):
         recovering_waiting_without_url = (
             not created and order.last_error_code == "PAYMENT_WAITING_NO_URL"
         )
+        allow_amount_reallocation = created
         if not created:
             if order.plan != plan:
                 self._html(
@@ -1592,12 +1706,12 @@ class SiteHandler(BaseHTTPRequestHandler):
                 )
                 return
             if order.status == "pending" and order.payment_url:
-                self._redirect(order.payment_url)
+                self._redirect(
+                    order.payment_url,
+                    form_action_origin=payments.payment_origin(config),
+                )
                 return
-            if order.status != "pending" and not (
-                order.status == "expired"
-                and order.last_error_code == "PAYMENT_WAITING_NO_URL"
-            ):
+            if not _payment_order_creation_retryable(order, dt.datetime.now(dt.UTC)):
                 self._html(
                     409,
                     _page(
@@ -1632,6 +1746,7 @@ class SiteHandler(BaseHTTPRequestHandler):
         subject = "Cheapcoding News " + ("monthly" if plan == "monthly" else "yearly")
         rejected_amounts: set[int] = set()
         creation = None
+        creation_generation = order.updated_at
         while creation is None:
             try:
                 creation = self.server.payment_create_callback(
@@ -1641,7 +1756,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                     subject=subject,
                 )
             except payments.PaymentError as error:
-                if error.code != "AMOUNT_OCCUPIED" or recovering_waiting_without_url:
+                if error.code != "AMOUNT_OCCUPIED" or not allow_amount_reallocation:
                     break
                 rejected_amounts.add(order.amount_cents)
                 conn = db.connect(self.server.db_path)
@@ -1650,8 +1765,10 @@ class SiteHandler(BaseHTTPRequestHandler):
                         conn,
                         order_id=order.id,
                         rejected_amounts=rejected_amounts,
+                        creation_generation=creation_generation,
                         now=dt.datetime.now(dt.UTC).isoformat(),
                     )
+                    creation_generation = order.updated_at
                 except RuntimeError:
                     break
                 finally:
@@ -1659,12 +1776,29 @@ class SiteHandler(BaseHTTPRequestHandler):
         if creation is None:
             conn = db.connect(self.server.db_path)
             try:
-                db.record_payment_order_create_error(
-                    conn,
-                    order_id=order.id,
-                    now=dt.datetime.now(dt.UTC).isoformat(),
-                    waiting_recovery=recovering_waiting_without_url,
-                )
+                try:
+                    updated_order = db.record_payment_order_create_error(
+                        conn,
+                        order_id=order.id,
+                        creation_generation=creation_generation,
+                        now=dt.datetime.now(dt.UTC).isoformat(),
+                        waiting_recovery=recovering_waiting_without_url,
+                    )
+                    if updated_order.status == "paid":
+                        self._redirect("/account", status=HTTPStatus.SEE_OTHER)
+                        return
+                except RuntimeError as error:
+                    if str(error) != "payment creation claim is stale":
+                        raise
+                    self._html(
+                        409,
+                        _page(
+                            "订单处理中",
+                            "<div class=\"msg\">订单已由另一请求接管，请稍后刷新账户页。</div>"
+                            "<p><a href=\"/account\">返回我的账户</a></p>",
+                        ),
+                    )
+                    return
             finally:
                 conn.close()
             self._html(
@@ -1678,16 +1812,36 @@ class SiteHandler(BaseHTTPRequestHandler):
             return
         conn = db.connect(self.server.db_path)
         try:
-            db.record_payment_order_created(
-                conn,
-                order_id=order.id,
-                provider_trade_no=creation.provider_trade_no,
-                payment_url=creation.payment_url,
-                now=dt.datetime.now(dt.UTC).isoformat(),
-            )
+            try:
+                updated_order = db.record_payment_order_created(
+                    conn,
+                    order_id=order.id,
+                    provider_trade_no=creation.provider_trade_no,
+                    payment_url=creation.payment_url,
+                    creation_generation=creation_generation,
+                    now=dt.datetime.now(dt.UTC).isoformat(),
+                )
+                if updated_order.status == "paid":
+                    self._redirect("/account", status=HTTPStatus.SEE_OTHER)
+                    return
+            except RuntimeError as error:
+                if str(error) != "payment creation claim is stale":
+                    raise
+                self._html(
+                    409,
+                    _page(
+                        "订单处理中",
+                        "<div class=\"msg\">订单已由另一请求接管，请稍后刷新账户页。</div>"
+                        "<p><a href=\"/account\">返回我的账户</a></p>",
+                    ),
+                )
+                return
         finally:
             conn.close()
-        self._redirect(creation.payment_url)
+        self._redirect(
+            creation.payment_url,
+            form_action_origin=payments.payment_origin(config),
+        )
 
     def _settlement_config_for_order(self, order: db.Order) -> EpayConfig:
         config = self.server.settlement_payment_config()
@@ -1757,6 +1911,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 conn,
                 order_id=order.id,
                 trade_status=result.trade_status,
+                expected_updated_at=order.updated_at,
                 now=dt.datetime.now(dt.UTC).isoformat(),
             )
         finally:
@@ -1826,14 +1981,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 return
         finally:
             conn.close()
-        self._html(
-            200,
-            _page(
-                "兑换成功",
-                "<div class=\"msg\">会员已开通,感谢支持!</div>"
-                "<p><a href=\"/\">立即阅读</a></p>",
-            ),
-        )
+        self._redirect("/account?redeemed=1", status=HTTPStatus.SEE_OTHER)
 
 
 class SiteServer(ThreadingHTTPServer):

@@ -18,6 +18,8 @@ DEFAULT_SETTINGS = {
     "paywall_enabled": "false",
     "monthly_price_cents": "990",
     "yearly_price_cents": "9900",
+    "monthly_list_price_cents": "",
+    "yearly_list_price_cents": "",
     "monthly_discount_percent": "0",
     "yearly_discount_percent": "0",
     "payment_info": "",
@@ -41,7 +43,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def normalize_email(value: str) -> str:
     email = value.strip().lower()
-    if not _EMAIL_RE.match(email) or len(email) > 254:
+    if not email.isascii() or not _EMAIL_RE.match(email) or len(email) > 254:
         raise AccountError("邮箱格式不正确")
     return email
 
@@ -122,7 +124,10 @@ def paid_until_from(base: dt.datetime, plan: str) -> str:
 
 
 def base_price_cents(settings: dict[str, str], plan: str) -> int:
-    key = f"{plan}_price_cents"
+    price_key = f"{plan}_price_cents"
+    list_key = f"{plan}_list_price_cents"
+    raw_list = settings.get(list_key, "").strip()
+    key = list_key if raw_list else price_key
     try:
         return max(0, int(settings.get(key, DEFAULT_SETTINGS.get(key, "0"))))
     except ValueError:
@@ -139,7 +144,41 @@ def discount_percent(settings: dict[str, str], plan: str) -> int:
 
 def price_cents(settings: dict[str, str], plan: str) -> int:
     base = base_price_cents(settings, plan)
+    list_key = f"{plan}_list_price_cents"
+    if settings.get(list_key, "").strip():
+        price_key = f"{plan}_price_cents"
+        try:
+            current = int(settings.get(price_key, DEFAULT_SETTINGS.get(price_key, "0")))
+        except ValueError:
+            return 0
+        return current if 0 <= current <= base else 0
     return base * (100 - discount_percent(settings, plan)) // 100
+
+
+def discount_basis_points(settings: dict[str, str], plan: str) -> int:
+    """Return the displayed price reduction in hundredths of one percent."""
+    base = base_price_cents(settings, plan)
+    current = price_cents(settings, plan)
+    if base <= 0 or current >= base:
+        return 0
+    return (base - current) * 10_000 // base
+
+
+def discount_label(settings: dict[str, str], plan: str) -> str:
+    basis_points = discount_basis_points(settings, plan)
+    whole, fraction = divmod(basis_points, 100)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction:02d}".rstrip("0")
+
+
+def format_cents(value: int) -> str:
+    whole, fraction = divmod(max(0, value), 100)
+    if fraction == 0:
+        return str(whole)
+    if fraction % 10 == 0:
+        return f"{whole}.{fraction // 10}"
+    return f"{whole}.{fraction:02d}"
 
 
 # --- 卡密 --------------------------------------------------------------------

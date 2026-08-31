@@ -1253,13 +1253,17 @@ Admin UI
 每日简报 = 与会员订阅合并为统一页面，仅有效付费会员可为已验证注册邮箱启停；
 后台可一键关闭付费开关（关闭时全站免费，等同现状）。
 
-1. **数据（schema v9）**：`users`（email 唯一、pbkdf2 口令、status、paid_until、plan）、
+1. **数据（schema v10）**：`users`（email 唯一、pbkdf2 口令、status、paid_until、plan）、
    `email_codes`（code_digest、purpose、过期、尝试上限）、`orders`（plan、基准/实付金额、
    尾差、商户订单号、网关交易号、过期/支付时间、错误代码、pending/paid/expired/failed；
    approved/rejected 仅保留旧人工订单兼容）、`redemption_codes`（hash+前缀；升级后新生成的
    未使用卡密同时持久保存明文供 Admin 查看）、`site_settings`（paywall_enabled、月/年价格、收款说明）、
    `free_reads`（anon_key/user_id × edition_date 唯一）。每日简报只允许有效付费会员为自己的
-   已验证注册邮箱启停；底层订阅表继续保存投递状态与退订审计，不再提供匿名 public 注册入口。
+    已验证注册邮箱启停；底层订阅表继续保存投递状态与退订审计。旧匿名 public CSRF、提交和确认
+    端点固定返回 `404`，不得因旧环境开关重新开启，不写库、不发确认邮件、不激活历史 pending；
+    一键退订端点继续可用。投递中的 `pending/failed/unknown` 收件人失去 active 付费资格后，
+    原状态会写入 `ineligible_from_status` 并进入 `ineligible` 终态；该刊续费后不补发，且
+    fresh `sending`/`unknown` 仍阻止刊期误报已投递。
 2. **站点服务**：新增 `site` 容器（复用 worker 镜像，127.0.0.1:8620，host 网络），
    静态托管 + 付费墙门控 + 用户端点（注册/登录/账户/订阅/兑换）；nginx `/` 改指 8620。
    当前 Compose 仍保留 `web`（8618）、`site`（8620）与 `admin`（8619）三个常驻服务，动态读者
@@ -1272,12 +1276,15 @@ Admin UI
    `/subscribe/api/payment/easypay` 与同步 `/payment/return` 验签并核对商户号、支付类型、
    订单号、网关交易号及精确金额，在单一事务中
    将订单置 `paid` 并顺延会员；重复回调成功返回但不重复加时。同一网关交易号全局唯一。
-   实付金额在折后基准价 `±0.10` 范围按 `0,-0.01,+0.01,...,-0.10,+0.10` 分配，全部使用
+   实付金额在现价 `±0.10` 范围按 `0,-0.01,+0.01,...,-0.10,+0.10` 分配，全部使用
    整数分；21 个槽位并发占满时拒绝创建，订单过期后金额继续冻结，避免迟付错配。
-   新「用户与付费」工作区包含用户列表/停用/延期、只读支付订单状态、卡密生成与
-   前缀列表、付费开关、月/年基准价与独立折扣设置。折扣前端以划线原价、
-   绿色百分比标识和折后现价展示，订单创建时冻结折后金额。Admin 基准价以元输入并允许
-   最多两位小数（如 `9.9`），接口、数据库和订单快照仍使用整数分。运维管理员可授予或
+   Admin 设独立顶级「用户管理」工作区，包含账号启停、管理员权限、会员计划、剩余天数、
+   到期时间、延期/清除权益及每日简报状态和操作；不与订单或卡密同屏，也不再保留独立
+   「订阅管理」工作区。「付费管理」仅包含只读支付订单状态、卡密生成与列表、付费开关、
+   EasyPay 配置以及月/年划线基准价和现价。前端以划线原价、绿色优惠百分比和现价展示，
+   订单创建时冻结现价。Admin 金额以元输入并允许最多两位小数（如基准 `36`、现价 `9.9`），
+   接口、数据库和订单快照仍使用整数分；旧库只有价格与整数折扣时，首次读取/保存保持原
+   有效价格并迁移为划线价 + 精确现价。运维管理员可授予或
    撤销任意 active 站点账号的管理员角色；主站仅向管理员账号动态显示后台入口并签发
    同源 Admin 会话，停用、撤权或改密后其 Admin 会话立即失效。完整邮箱仅 Admin 可见。
 4. **安全**：注册获取邮箱码前必须通过两遍密码一致性与短期随机 PNG 图形验证码；
@@ -1378,3 +1385,5 @@ Admin UI
 | 2026-08-31 | 阶段 9 | v1.4.0t1 最终本地门禁通过 | News 离线全量 `799 passed, 1 skipped, 7 deselected(network)`，Ruff、`uv build`、Shell 语法、PowerShell AST 与 diff check 全绿；FastPay adapter `46 passed`，Server Java 17/Maven `18 passed`，网络级 fake EasyPay E2E 覆盖 pending、paid 与重复 callback 幂等。浏览器桌面/移动端和 Admin 交互复核通过。生产 `v1.2.19` 数据库仅对 online backup 副本执行 schema `7 -> 9` 隔离迁移，前后 integrity 为 `ok`，13 个旧关键表计数不变、8 个新表存在，live DB 未写入。剩余门禁为 commit/tag、候选 CI/GHCR、FastPay/News 生产部署与唯一真实闭环；仍禁止补发历史刊期或发布稳定 `v1.4.0`。 |
 | 2026-08-31 | 阶段 9 | v1.4.0t1-t5 候选发布与生产闭环完成 | `v1.4.0t1` 至 `v1.4.0t5` 均以不可变 annotated tag 和 GitHub prerelease 发布，生产当前运行 t5，稳定 `v1.4.0` 尚未发布。部署前 SQLite online backup 与 SHA-256 核验通过，生产 schema `9` 且 `integrity_check=ok`；当日翻译 `6/6`、上线 `6/6`，真实 EasyPay 回调、重复通知幂等和会员权益闭环完成。因内容完成时间超过 `08:00 + 6h`，自动投递按设计拒绝迟发；确认当日无投递批次且无 `unknown` 后，仅人工正式投递当日一次，结果 `sent=1`、`failed=0`、`unknown=0` 且归档成功，未补发历史刊期。旧 `complete + DELIVERY_FAILED` 汇总通过正式数据库状态机归并为 `delivered` 并清除旧错误；真实账号、订单、邮件正文及完整上游响应均未记录。 |
 | 2026-08-31 | 阶段 9 | v1.4.0t6 投递状态原子归并已发布并部署 | 根因是收件人结果和 `email_delivery_runs` 已成功持久化后，人工投递路径未同步 `automation_editions`，使刊期仍显示 `complete + DELIVERY_FAILED`。t6 使用 `BEGIN IMMEDIATE` 与条件更新，仅归并已完成且无 `failed/unknown` 的 `manual/retry_failed/retry_unknown`；未全部翻译或上线、存在 `sending/unknown`、当前有效付费目标仍待处理时返回 `blocked`。租约未过期的 `delivery_pending` 不覆盖，过期认领也只在不存在未决收件人时原子收口。同步异常不回滚既有投递事实，也不把成功发送改成可重试失败，而是返回 `state_sync_failed` 与“禁止重发”；Admin 人工投递、失败重试和 unknown 风险重试直接显示后端告警。定向回归 `127 passed, 1 skipped`，独立竞态复审无 P0/P1/P2；最终离线全量 `817 passed, 1 skipped, 7 deselected(network)`，Ruff、`uv build`、Shell/PowerShell 语法与 diff check 全绿。全新 annotated t6、GitHub Linux test、GHCR 双镜像和 prerelease bundle 均完成；生产前体检、SQLite online backup/SHA-256、固定 digest 部署与只读核验通过，schema `9`、integrity `ok`、timer/path active、无残留 worker，业务聚合未丢失。t6 部署未重复真实 provider、SMTP 或支付，未重试 `unknown`，未补发历史刊期；剩余门禁仅为用户登录权限、账户显示与收件箱人工验收。 |
+| 2026-08-31 | 阶段 9 | 支付跳转与定价 UX 本地修复，待人工验收 | 浏览器真实路径暴露 `/subscribe` 和 `/account` 的 `form-action 'self'` 会拦截 `/order` 跨源 `302`，造成订单已创建但只能从账户页“继续支付”；修复为仅在支付表单页面和支付重定向响应中加入经过校验的 EasyPay 精确 origin，支付关闭时仍只允许本站。Admin 定价改为直接输入划线基准价和现价，金额使用整数分，自动显示现价占比与实际优惠；旧折扣键仅作兼容回退。账户订单精简为订单编号、会员类型和支付状态/动作；登录状态下订阅页隐藏注册/登录提示并展示卡密兑换步骤。禁止在人工验收前发布稳定版或再次触发真实支付。 |
+| 2026-09-01 | 阶段 9 | v1.4.0t7 最终本地门禁通过，待生产闭环 | 独立“用户管理”改为服务端邮箱搜索与分页；旧匿名订阅 CSRF/提交/确认固定 404；schema v10 以 `ineligible_from_status` 终结失去资格的旧刊任务。投递在每次 SMTP DATA 前按实时 UTC 复检会员，最后收件人退订/停用/删除后以零收件人 completed run 收口。支付创建、金额重分配、失败写回及 WAIT/CLOSED 对账全部 generation/CAS；账户和 Admin 不打断 30 秒创建 lease，Admin 按查询完成时刻检查绝对结算期限，已付款异步回调优先于同步创建错误，自动订单禁止旧人工审批。部署链在数据库备份前强制核对 worker/web OCI version 与一致 revision。最终离线全量 `877 passed, 1 skipped, 7 deselected(network)`；Ruff、build、Shell/PowerShell、Admin JavaScript、归档纯度和 diff check 全绿；独立复审无剩余 P0/P1/P2。用户已授权直接生产验收；下一步只能创建全新 annotated `v1.4.0t7` prerelease，以同一 Release digest 备份迁移并验证，不发布稳定 `v1.4.0`，不补发历史邮件。 |

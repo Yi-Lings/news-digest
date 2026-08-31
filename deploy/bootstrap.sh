@@ -385,6 +385,29 @@ section "6/10 拉取镜像并启动 web 与 admin"
 docker pull "$WORKER_IMAGE"
 docker pull "$WEB_IMAGE"
 
+verify_release_image_labels() {
+  local worker_version web_version worker_revision web_revision
+  worker_version="$(docker image inspect "$WORKER_IMAGE" \
+    --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  web_version="$(docker image inspect "$WEB_IMAGE" \
+    --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
+  worker_revision="$(docker image inspect "$WORKER_IMAGE" \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  web_revision="$(docker image inspect "$WEB_IMAGE" \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  [ "$worker_version" = "$TAG" ] ||
+    die "worker 镜像 version label 与部署版本不一致"
+  [ "$web_version" = "$TAG" ] ||
+    die "web 镜像 version label 与部署版本不一致"
+  [ -n "$worker_revision" ] && [ "$worker_revision" != "UNKNOWN" ] ||
+    die "worker 镜像缺少有效 revision label"
+  [ "$worker_revision" = "$web_revision" ] ||
+    die "worker/web 镜像 revision label 不一致"
+  echo "镜像标签已核验：version=${TAG}，worker/web revision 一致"
+}
+
+verify_release_image_labels
+
 # Admin 与 worker 打开旧数据库时会自动执行 schema 迁移；任何数据库消费者启动前，先用
 # SQLite online backup 生成 WAL 一致快照。无既有卷或无有效 news.db 时才允许明确跳过。
 backup_database_before_migration() {
@@ -735,18 +758,6 @@ echo "下次触发（NEXT 列）："
 systemctl list-timers news-digest.timer --no-pager || true
 SITE_LINE="$(curl -skI --max-time 15 "https://${DOMAIN}/" | head -n1 || true)"
 echo "https://${DOMAIN}/ ：${SITE_LINE:-（无响应——若本次跳过了 HTTPS 属预期，可先验证 http://${DOMAIN}/）}"
-# 版本自检：核对实际拉到的 worker 镜像 OCI version label 是否等于本次部署 TAG（CI 用
-# github.ref_name=完整 tag 注入该 label，故二者应完全相等）。仅在 tag 模式校验——按 digest
-# 固定时 TAG 可能只是默认占位、与 digest 指向的版本无关，比对无意义。不一致仅告警不中止。
-if [ -z "$WORKER_DIGEST" ]; then
-  IMG_VER="$(docker image inspect "$WORKER_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
-  if [ -n "$IMG_VER" ] && [ "$IMG_VER" != "$TAG" ]; then
-    warnbox "worker 镜像 version label（${IMG_VER}）与部署 TAG（${TAG}）不一致——请确认 GHCR 上该 tag 是否指向预期构建"
-  else
-    echo "版本自检         ：worker 镜像 label=${IMG_VER:-未标注} 与 TAG=${TAG} 一致"
-  fi
-fi
-
 cat <<DONEEOF
 
 部署完成。

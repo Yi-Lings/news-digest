@@ -1,10 +1,10 @@
 # Codex 交接文档：news-digest v1.4.0
 
-更新时间：2026-08-31（Asia/Hong_Kong）
+更新时间：2026-09-01（Asia/Hong_Kong）
 
 ## 1. 当前结论
 
-- 当前分支：`main`；测试候选 `v1.4.0t6` 已发布并部署生产，候选 tag 指向投递状态归并提交且不可移动。
+- 当前分支：`main`；生产仍运行不可移动的测试候选 `v1.4.0t6`。下一候选固定为 `v1.4.0t7`，本地门禁已通过但尚未发布或部署。
 - 当前源码版本：`1.4.0`；稳定 `v1.4.0` Release 尚未授权、尚未发布。
 - `v1.4.0t1` 至 `v1.4.0t6` 的 GitHub prerelease、CI/GHCR 和生产部署已经完成，旧 tag 与镜像不可移动。
 - t5 已完成受控生产业务闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，部署时未调用真实 provider、SMTP 或支付，也未补发历史刊期。
@@ -45,7 +45,8 @@ tests/unit/test_state_machine_governance.py
 - 用户启用/停用；停用用户不能登录。
 - 运维管理员可授予/撤销 active 站点账号的管理员角色；只有管理员账号在主站显示 Admin 入口，并通过同一数据库会话直接进入后台；停用、撤权或改密后 Admin 会话立即失效。
 - 原运维管理员入口始终保留；站点管理员不能修改运维管理员口令。
-- 每日简报只允许有效付费会员为自己的已验证注册邮箱启停；不再把匿名 public double opt-in 作为 v1.4 新用户入口。底层订阅表仍承担投递状态与退订审计。
+- 每日简报只允许有效付费会员为自己的已验证注册邮箱启停；匿名 public double opt-in 的 CSRF、提交与确认端点固定 `404`，旧开关不能重开且不得写库、发确认邮件或激活历史 pending 记录。底层订阅表仍承担投递状态与退订审计，一键退订继续可用。
+- schema v10 将已失去 active 付费资格的 `pending/failed/unknown` 投递终结为 `ineligible`，并在 `ineligible_from_status` 保留原状态；续费不补发旧刊，fresh `sending`/`unknown` 仍会阻止刊期完成。
 
 ### 3.2 付费权益
 
@@ -57,19 +58,23 @@ tests/unit/test_state_machine_governance.py
 
 ### 3.3 价格、折扣和订单
 
-- Admin 分别以元设置月付/年付基准价（最多两位小数）与 `0–100%` 折扣。
+- Admin 分别以元设置月付/年付划线基准价与现价，均允许最多两位小数。
 - Admin 会把 `9.9` 精确转换为 `990` 分；接口、数据库和订单金额均继续使用整数分。
-- 前端有折扣时显示划线原价、绿色百分比标识和折后现价。
-- 折扣计算向下取整到分。
-- 订单创建时冻结折后金额，后续调价不改变旧订单。
+- 基准价 `36`、现价 `9.9` 时，Admin 自动显示现价占比 `27.5%`，前端绿色标识显示实际优惠 `-72.5%`。
+- 订单创建时冻结现价金额，后续调价不改变旧订单；旧库仅有整数折扣键时继续按旧公式读取，不会在升级时改价。
 - 正常支付订单由验签回调自动开通，不进入人工审批；旧人工订单接口仅为历史数据兼容保留。
-- 用户账户页只查询自己的订单，不受全站订单列表截断影响。
+- 用户账户页只查询自己的订单，不受全站订单列表截断影响；读者订单列表仅展示订单编号、会员类型和支付状态/动作。
+- 支付创建、金额重分配、失败写回和非成功对账均使用 generation/CAS；旧创建或旧查询不得覆盖新 lease。有效的 30 秒创建 lease 不会被账户自动对账或 Admin 手动对账打断。
+- Admin 对账使用远程查询完成时刻执行绝对结算截止门禁；异步回调已先付款时，同步创建响应失败或迟到不会再显示 502 或引导重复付款。
+- 旧人工订单审批仅兼容无 `merchant_order_no` 的历史手工订单；EasyPay 自动订单固定拒绝人工批准或驳回。
 
 设置键：
 
 ```text
 monthly_price_cents
 yearly_price_cents
+monthly_list_price_cents
+yearly_list_price_cents
 monthly_discount_percent
 yearly_discount_percent
 ```
@@ -80,12 +85,14 @@ yearly_discount_percent
 - 新卡密同时保存 digest、prefix 与未使用期间的明文，供 Admin 持续显示；使用或删除后不再返回明文。
 - 批量生成遇到碰撞会受限重试，不会把唯一约束异常直接暴露给用户。
 - Admin 可配置 EasyPay API Base、PID、PKey、支付类型、订单有效期和金额冻结期；PKey 留空保留旧值，页面和 API 只返回是否已保存，不回显明文。
-- News 按 `sub2api` 的 API 模式向 `${EPAY_API_BASE}/mapi.php` 服务端 POST，订单号使用 `news_` 前缀，下单成功后跳转 adapter 返回的支付页。
+- News 按 `sub2api` 的 API 模式向 `${EPAY_API_BASE}/mapi.php` 服务端 POST，订单号使用 `news_` 前缀，下单成功后直接跳转 adapter 返回的支付页。公开页面与支付重定向的 CSP 只加入经过配置校验的 EasyPay origin，不能包含 path、query 或通配域名。
 - adapter 必须将 `${NEWS_SITE_URL}/subscribe/api/payment/easypay` 加入 `EPAY_ADDITIONAL_NOTIFY_URLS`。回调验签并核对 PID、支付类型、订单号、网关交易号和精确金额后，才在单一事务中开通会员；重复回调不重复加时。
 
 ### 3.5 Admin 和读者 UI
 
-- Admin 新增“用户与付费”工作区，包含用户、自动支付订单、卡密、EasyPay 配置、付费墙、价格和折扣。
+- Admin 将“用户管理”作为独立顶级工作区，统一承载账号状态、管理员角色、会员计划、剩余天数、到期时间和每日简报操作。
+- 用户管理采用服务端邮箱搜索和稳定分页，默认每页 20 条、最大 100 条，不再截断最近 200 个账号或在浏览器内假分页。
+- 原“用户与付费”更名为“付费管理”，仅包含自动支付订单、卡密、EasyPay 配置、付费墙、划线基准价和现价；不再与用户表同屏，也不保留独立“订阅管理”工作区。
 - 公共主页导航包含“会员订阅”和“登录 / 账户”。
 - 主页底部“按日期浏览”只保留真实刊期选择器；往期归档页在完整列表上方提供同一选择器。
 - `/subscribe`、`/login`、`/forgot`、`/reset`、`/account` 使用主站报纸编辑风格。
@@ -106,8 +113,8 @@ yearly_discount_percent
 ```text
 src/news_digest/accounts.py          账号、价格、折扣、卡密和付费墙纯逻辑
 src/news_digest/site_server.py       读者站点、账号端点、订单、兑换与访问控制
-src/news_digest/storage/db.py        schema v9、用户/会话/订单/卡密/免费阅读数据操作
-src/news_digest/preview_server.py    Admin“用户与付费”API 与 UI
+src/news_digest/storage/db.py        schema v10、用户/会话/订单/卡密/免费阅读与投递终态
+src/news_digest/preview_server.py    Admin 独立“用户管理”与“付费管理”API/UI
 src/news_digest/delivery/mailer.py   注册/重置验证码邮件
 src/news_digest/delivery/delivery_service.py  投递批次、收件人事实与刊期状态归并
 src/news_digest/cli.py               site 子命令和运行配置
@@ -130,7 +137,7 @@ FastPay Server（Java 17 / Maven）：18 passed，BUILD SUCCESS
 网络级 fake EasyPay E2E：pending -> paid -> duplicate callback 幂等，通过
 ```
 
-浏览器已复核首页桌面与 `390x844` 手机端、会员价格、登录/角色、账户订单和 Admin“用户与付费”工作区；无横向溢出或新增 console error。Admin 窄屏最后两个页签需要横向滑动，属于非阻断可发现性风险。
+浏览器已复核首页桌面与 `390x844` 手机端、会员价格、登录/角色和账户订单；此前候选的 Admin“用户与付费”工作区已在当前未发布源码中拆为独立“用户管理”与“付费管理”，需重新执行桌面/移动端人工验收。Admin 窄屏最后两个页签需要横向滑动，属于非阻断可发现性风险。
 
 生产部署前的 SQLite online backup 与 SHA-256 核验通过；部署后 schema 为 `9`，`integrity_check=ok`。当日正式任务达到翻译 `6/6`、上线 `6/6`，数字质量门误判已消失。真实 EasyPay 订单完成回调、重复通知幂等与会员权益闭环。
 
@@ -142,10 +149,12 @@ t6 最新定向回归为 `127 passed, 1 skipped`，独立竞态复审未发现 P
 
 t6 GitHub Linux test、worker/web 镜像构建和 release bundle 全绿；Release 为 prerelease，稳定 latest 仍为 `v1.2.19`。生产部署前体检 `18/18` 通过，SQLite online backup 与 SHA-256 校验通过；部署后 Web/Site/Admin 使用 t6 immutable digest 与同一提交，HTTPS/回环健康为 200，schema `9`、`integrity_check=ok`，timer/path active，daily/resume inactive，无残留 worker。生产仍为翻译任务全部成功、当日刊期 `delivered`、无未决投递，账号、会员、订单和订阅聚合未丢失；邮件和支付开关保持启用。部署后未执行真实业务调用。
 
+t7 本地候选新增：独立用户管理的服务端分页；旧匿名订阅入口永久关闭；schema v10 `ineligible` 投递终态；会员资格在每次 SMTP DATA 前按实时 UTC 复检；最后收件人退订、停用或删除后以 `total_count=0` 的 completed run 收口；支付创建/对账 fencing、完成时钟和 paid-before-error 竞态修复；部署前强制核对 worker/web OCI version 与 revision。最终离线全量为 `877 passed, 1 skipped, 7 deselected(network)`；Ruff、`uv build`、Shell 语法、PowerShell AST、Admin JavaScript UTF-8 语法、源码包纯度与 `git diff --check` 全部通过。两轮独立复审未再发现 P0/P1/P2。
+
 ## 6. 待完成门禁
 
-1. 用户人工验收：用已注册账号登录；确认顶部显示“管理后台”；进入 `/admin/` 时使用同一管理员账号而非独立运维身份；账户页显示月刊会员、有效期和已支付订单；确认当日邮件实际到达。文档和日志不得记录账号、订单号或邮件正文。
-2. 稳定 `v1.4.0` 是否发布必须等待用户对候选的单独明确授权；不得移动 t6 tag 或把 prerelease 直接改成稳定 latest。
+1. 用户已授权 `v1.4.0t7` 直接进入生产闭环；必须先以全新 annotated tag 发布 prerelease，并使用同一 Release 的 immutable worker/web digest 部署。部署前冻结 timer/path/daily/resume、完成 SQLite online backup 与聚合基线；部署后验证 schema v10、数据计数、三服务和公网 HTTPS，再验收用户管理、付费管理、角色、会员与简报资格。
+2. 稳定 `v1.4.0` 仍未授权；不得移动 t6/t7 tag，也不得把候选 prerelease 改成稳定 latest。
 
 ## 7. 最终本地门禁命令
 
@@ -170,8 +179,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产环境当前为 `v1.4.0t6`；稳定版仍未发布。
-- 已推送 tag 永不移动；t6 后的任何代码变化必须使用新提交和新候选 tag，稳定版才使用 `v1.4.0`。
+- 生产环境当前为 `v1.4.0t6`；下一不可变候选为 `v1.4.0t7`，稳定版仍未发布。
+- 已推送 tag 永不移动；t6 后的当前变化只能使用新提交和 t7，稳定版才使用 `v1.4.0`。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
-- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；t5 已完成的真实闭环未在 t6 重复执行。
+- 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；除非生产验收确有必要，不重复真实 provider、SMTP 或扣款请求。

@@ -343,6 +343,7 @@ def deliver_published(
     edition_date: str | None = None,
     environ: Mapping[str, str] | None = None,
     now: dt.datetime | None = None,
+    clock: Callable[[], dt.datetime] | None = None,
     just_built_release_name: str | None = None,
     confirm_unknown: bool = False,
     archive_dir: Path | None = Path("var/mail"),
@@ -354,7 +355,8 @@ def deliver_published(
         raise DeliveryServiceError("configuration", "未知投递模式")
     if mode == "retry_unknown" and not confirm_unknown:
         raise DeliveryServiceError("confirmation", "unknown 可能已送达，必须显式确认重复风险")
-    now = now or dt.datetime.now(dt.UTC)
+    clock = clock or (lambda: dt.datetime.now(dt.UTC))
+    now = now or clock()
     now_iso = _utc_iso(now)
     release = _load_release(output_root, edition_date)
     if mode == "auto":
@@ -411,13 +413,12 @@ def deliver_published(
         if mode != "test":
             stale_before = _utc_iso(now - dt.timedelta(minutes=10))
             db.recover_interrupted_deliveries(conn, now_iso, stale_before=stale_before)
+            db.finalize_ineligible_deliveries(conn, release.release_date, now_iso)
         all_recipients = (
             normalize_recipients(list(smtp.recipients))
             if mode == "test"
             else _coordinated_recipients(conn, smtp, now)
         )
-        if not all_recipients:
-            raise DeliveryServiceError("configuration", "没有可投递的 active 收件人")
         if mode == "test" and len(all_recipients) != 1:
             raise DeliveryServiceError(
                 "configuration", "测试邮件每次只能选择一个 active 订阅账号"
@@ -444,17 +445,23 @@ def deliver_published(
                 rendered.metadata.degraded,
             )
             if not recipients:
-                db.finish_delivery_run(conn, run_id, "completed", now_iso)
+                finished_at = _utc_iso(clock())
+                db.finish_delivery_run(conn, run_id, "completed", finished_at)
                 state_sync_result = _reconcile_completed_run_safely(
-                    conn, run_id, release.release_date, now_iso
+                    conn, run_id, release.release_date, finished_at
                 )
-                state_sync_ok = state_sync_result in {"reconciled", "not_applicable"}
+                completion_ready = db.delivery_completion_ready(
+                    conn, release.release_date, finished_at
+                )
+                state_sync_ok = state_sync_result == "reconciled" or (
+                    state_sync_result == "not_applicable" and completion_ready
+                )
                 return DeliveryServiceReport(
                     run_id,
                     release.release_name,
                     release.release_date,
                     mode,
-                    "skipped",
+                    "failed" if mode == "auto" and not state_sync_ok else "skipped",
                     0,
                     0,
                     0,
@@ -537,12 +544,9 @@ def deliver_published(
                     smtp_factory=smtp_factory,
                     resolver=resolver,
                     pre_send_check=lambda recipient=recipient: (
-                        (
-                            (state := db.subscription_by_email(conn, recipient)) is not None
-                            and state.status == "active"
+                        db.paid_subscription_recipient_active(
+                            conn, recipient, _utc_iso(clock())
                         )
-                        if mode == "test"
-                        else db.paid_subscription_recipient_active(conn, recipient, now_iso)
                     ),
                 )
             except BaseException:
@@ -569,7 +573,7 @@ def deliver_published(
                     release.release_date,
                     recipient,
                     result.status,
-                    _utc_iso(dt.datetime.now(dt.UTC)),
+                    _utc_iso(clock()),
                     result.error_category,
                 )
 
@@ -596,10 +600,13 @@ def deliver_published(
         error_stage = _result_error_stage(results)
         state_sync_ok = True
         if mode != "test":
+            finished_at = _utc_iso(clock())
             if archive_status == "failed":
-                db.mark_archive(conn, release.release_date, "failed", now_iso, "archive_failed")
+                db.mark_archive(
+                    conn, release.release_date, "failed", finished_at, "archive_failed"
+                )
             elif archive_status == "archived":
-                db.mark_archive(conn, release.release_date, "archived", now_iso)
+                db.mark_archive(conn, release.release_date, "archived", finished_at)
             run_status = (
                 "completed"
                 if status in {"sent", "skipped"} and archive_status != "failed"
@@ -611,7 +618,7 @@ def deliver_published(
                 conn,
                 run_id,
                 run_status,
-                _utc_iso(dt.datetime.now(dt.UTC)),
+                finished_at,
                 sent_count=sent_count,
                 failed_count=failed_count,
                 unknown_count=unknown_count,
@@ -619,7 +626,7 @@ def deliver_published(
             )
             if run_status == "completed":
                 state_sync_result = _reconcile_completed_run_safely(
-                    conn, run_id, release.release_date, now_iso
+                    conn, run_id, release.release_date, finished_at
                 )
                 state_sync_ok = state_sync_result in {"reconciled", "not_applicable"}
         if archive_status == "failed":

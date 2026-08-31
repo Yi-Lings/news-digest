@@ -983,6 +983,77 @@ def test_delivery_state_retry_and_archive_are_independent(tmp_path):
     conn.close()
 
 
+def test_unknown_becomes_terminal_when_recipient_loses_paid_eligibility(tmp_path):
+    conn = db.connect(Path(tmp_path) / "news.db")
+    date = "2026-07-27"
+    now = "2026-07-27T00:00:00+00:00"
+    later = "2026-07-27T00:05:00+00:00"
+    recipient = "reader@example.com"
+    recipient_key = db.delivery_recipient_key(recipient)
+    user = db.upsert_pending_user(
+        conn,
+        email=recipient,
+        email_key=recipient_key,
+        password_hash="test-password-hash",
+        now=now,
+    )
+    db.activate_user(conn, email_key=recipient_key, now=now)
+    db.grant_paid_until(
+        conn,
+        user.id,
+        plan="monthly",
+        paid_until="2026-08-27T00:00:00+00:00",
+        now=now,
+    )
+    db.add_admin_test_recipient(conn, recipient, now)
+    db.ensure_delivery_recipients(conn, date, (recipient,), now)
+    assert db.claim_delivery(conn, date, recipient, now, run_id="uncertain-run")
+    db.finish_delivery(conn, date, recipient, "unknown", now, "worker_interrupted")
+
+    db.clear_user_subscription(conn, user.id, now=later)
+    assert db.finalize_ineligible_deliveries(conn, date, later) == 1
+    assert db.finalize_ineligible_deliveries(conn, date, later) == 0
+    state = db.delivery_states(conn, date)[0]
+    assert state.status == "ineligible"
+    assert state.ineligible_from_status == "unknown"
+    assert state.error_category == "worker_interrupted"
+    assert db.delivery_summary(conn, date).ineligible == 1
+
+    db.grant_paid_until(
+        conn,
+        user.id,
+        plan="monthly",
+        paid_until="2026-08-27T00:00:00+00:00",
+        now="2026-07-27T00:06:00+00:00",
+    )
+    assert db.unknown_delivery_recipients(
+        conn, date, "2026-07-27T00:06:00+00:00"
+    ) == ()
+    assert db.eligible_delivery_recipients(
+        conn, date, "2026-07-27T00:06:00+00:00"
+    ) == ()
+    conn.close()
+
+
+def test_fresh_delivery_schema_enforces_ineligible_status_and_source_together(tmp_path):
+    conn = db.connect(Path(tmp_path) / "news.db")
+    with pytest.raises(sqlite3.IntegrityError), conn:
+        conn.execute(
+            "INSERT INTO email_deliveries"
+            " (edition_date, recipient_key, status, updated_at)"
+            " VALUES ('2026-07-27', 'missing-source', 'ineligible',"
+            " '2026-07-27T00:00:00+00:00')"
+        )
+    with pytest.raises(sqlite3.IntegrityError), conn:
+        conn.execute(
+            "INSERT INTO email_deliveries"
+            " (edition_date, recipient_key, status, updated_at, ineligible_from_status)"
+            " VALUES ('2026-07-27', 'unexpected-source', 'unknown',"
+            " '2026-07-27T00:00:00+00:00', 'unknown')"
+        )
+    conn.close()
+
+
 def test_interrupted_sending_is_recovered_as_unknown(tmp_path):
     conn = db.connect(Path(tmp_path) / "news.db")
     now = "2026-07-27T00:00:00+00:00"

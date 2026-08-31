@@ -262,6 +262,45 @@ def test_password_update_and_session_revocation_share_one_transaction(tmp_path):
     conn.close()
 
 
+def test_user_listing_has_stable_server_pagination_and_literal_search(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    created = []
+    for index in range(5):
+        email = f"reader-{index}@example.com"
+        created.append(
+            db.upsert_pending_user(
+                conn,
+                email=email,
+                email_key=db.delivery_recipient_key(email),
+                password_hash="password-hash",
+                now="2026-08-30T12:00:00+00:00",
+            )
+        )
+    wildcard_email = "literal_%@example.com"
+    wildcard_user = db.upsert_pending_user(
+        conn,
+        email=wildcard_email,
+        email_key=db.delivery_recipient_key(wildcard_email),
+        password_hash="password-hash",
+        now="2026-08-30T12:00:00+00:00",
+    )
+
+    first_page = db.list_users(conn, limit=3, offset=0)
+    second_page = db.list_users(conn, limit=3, offset=3)
+    assert [user.id for user in first_page + second_page] == [
+        wildcard_user.id,
+        *[user.id for user in reversed(created)],
+    ]
+    assert db.count_users(conn) == 6
+    assert db.count_users(conn, query="READER-0") == 1
+    assert [user.email for user in db.list_users(conn, query="READER-0")] == [
+        "reader-0@example.com"
+    ]
+    assert db.count_users(conn, query="_%") == 1
+    assert [user.email for user in db.list_users(conn, query="_%")] == [wildcard_email]
+    conn.close()
+
+
 def test_upsert_and_get_edition_round_trip(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     early = _article("https://example.com/early", published_at="2026-07-26T06:00:00+00:00")
@@ -454,6 +493,47 @@ def test_expired_payment_amount_remains_held_before_reuse(tmp_path):
     conn.close()
 
 
+def test_failed_uncertain_payment_amount_remains_held(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    first_user = _active_payment_user(
+        conn, "buyer-failed@example.com", "2026-08-30T12:00:00+00:00"
+    )
+    first = db.create_payment_order(
+        conn,
+        user_id=first_user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="ND-FAILED",
+        now="2026-08-30T12:00:00+00:00",
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    with conn:
+        conn.execute(
+            "UPDATE orders SET status = 'failed', "
+            "last_error_code = 'PAYMENT_WAITING_NO_URL' WHERE id = ?",
+            (first.id,),
+        )
+
+    second_user = _active_payment_user(
+        conn, "buyer-after-failed@example.com", "2026-08-30T12:06:00+00:00"
+    )
+    second = db.create_payment_order(
+        conn,
+        user_id=second_user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="ND-AFTER-FAILED",
+        now="2026-08-30T12:06:00+00:00",
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+
+    assert first.amount_offset_cents == 0
+    assert second.amount_offset_cents == -1
+    conn.close()
+
+
 def test_payment_confirmation_is_atomic_and_idempotent(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     user = _active_payment_user(conn, "buyer@example.com", "2026-08-30T12:00:00+00:00")
@@ -508,6 +588,7 @@ def test_payment_confirmation_matches_gateway_trade_number_from_creation(tmp_pat
         conn,
         order_id=order.id,
         provider_trade_no="TRADE-EXPECTED",
+        creation_generation=order.updated_at,
         now="2026-08-30T12:00:01+00:00",
     )
     with pytest.raises(RuntimeError, match="trade number does not match"):
@@ -599,10 +680,236 @@ def test_payment_order_reservation_reuses_one_active_order_per_user(tmp_path):
     assert second_is_new is False
     assert second.id == first.id
     assert second.plan == "monthly"
+    assert second.merchant_order_no == first.merchant_order_no
+    assert second.base_amount_cents == second.amount_cents == 990
     assert second.settlement_expires_at == "2026-08-30T13:00:00+00:00"
     assert second.payment_type == "alipay"
     assert second.payment_config_id == "a" * 64
     assert len(db.list_user_orders(conn, user_id=user.id)) == 1
+    conn.close()
+
+
+def test_expired_gateway_create_failure_can_be_claimed_for_retry(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    now = "2026-08-30T12:00:00+00:00"
+    user = _active_payment_user(conn, "expired-retry@example.com", now)
+    order, _ = db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_expired_retry",
+        payment_type="alipay",
+        payment_config_id="a" * 64,
+        now=now,
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    db.record_payment_order_create_error(
+        conn,
+        order_id=order.id,
+        creation_generation=order.updated_at,
+        now="2026-08-30T12:00:01+00:00",
+    )
+    db.expire_payment_orders(conn, now="2026-08-30T12:05:01+00:00")
+
+    claimed = db.claim_payment_order_creation(
+        conn,
+        order_id=order.id,
+        now="2026-08-30T12:05:02+00:00",
+        checkout_ttl_seconds=300,
+    )
+
+    assert claimed is not None
+    assert claimed.status == "pending"
+    assert claimed.merchant_order_no == order.merchant_order_no
+    assert claimed.amount_cents == order.amount_cents
+    conn.close()
+
+
+def test_retry_checkout_deadline_is_clamped_to_settlement_deadline(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    now = "2026-08-30T12:00:00+00:00"
+    user = _active_payment_user(conn, "deadline-retry@example.com", now)
+    order, _ = db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_deadline_retry",
+        payment_type="alipay",
+        payment_config_id="a" * 64,
+        now=now,
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    with conn:
+        conn.execute(
+            "UPDATE orders SET status = 'failed', "
+            "last_error_code = 'PAYMENT_WAITING_NO_URL' WHERE id = ?",
+            (order.id,),
+        )
+
+    claimed = db.claim_payment_order_creation(
+        conn,
+        order_id=order.id,
+        now="2026-08-30T12:59:55+00:00",
+        checkout_ttl_seconds=300,
+    )
+
+    assert claimed is not None
+    assert claimed.expires_at == claimed.settlement_expires_at
+    assert claimed.expires_at == "2026-08-30T13:00:00+00:00"
+    conn.close()
+
+
+def test_concurrent_failed_order_retry_claims_once(tmp_path):
+    db_path = tmp_path / "digest.db"
+    conn = db.connect(db_path)
+    now = "2026-08-30T12:00:00+00:00"
+    user = _active_payment_user(conn, "concurrent-retry@example.com", now)
+    order, _ = db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_concurrent_retry",
+        payment_type="alipay",
+        payment_config_id="a" * 64,
+        now=now,
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    with conn:
+        conn.execute(
+            "UPDATE orders SET status = 'failed', "
+            "last_error_code = 'GATEWAY_CREATE_FAILED' WHERE id = ?",
+            (order.id,),
+        )
+    conn.close()
+
+    def claim():
+        worker = db.connect(db_path)
+        try:
+            return db.claim_payment_order_creation(
+                worker,
+                order_id=order.id,
+                now="2026-08-30T12:01:00+00:00",
+                checkout_ttl_seconds=300,
+            )
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: claim(), range(2)))
+
+    assert sum(result is not None for result in results) == 1
+
+
+def test_stale_payment_creation_holder_cannot_overwrite_new_claim(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    first = _active_payment_user(
+        conn, "stale-creation@example.com", "2026-08-30T12:00:00+00:00"
+    )
+    original, _ = db.reserve_payment_order(
+        conn,
+        user_id=first.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_stale_creation",
+        payment_type="alipay",
+        payment_config_id="a" * 64,
+        now="2026-08-30T12:00:00+00:00",
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    current = db.claim_payment_order_creation(
+        conn,
+        order_id=original.id,
+        now="2026-08-30T12:00:31+00:00",
+    )
+    assert current is not None and current.updated_at != original.updated_at
+
+    with pytest.raises(RuntimeError, match="creation claim is stale"):
+        db.record_payment_order_create_error(
+            conn,
+            order_id=original.id,
+            creation_generation=original.updated_at,
+            now="2026-08-30T12:00:32+00:00",
+        )
+    with pytest.raises(RuntimeError, match="cannot be changed"):
+        db.reallocate_payment_order_amount(
+            conn,
+            order_id=original.id,
+            rejected_amounts={990},
+            creation_generation=original.updated_at,
+            now="2026-08-30T12:00:33+00:00",
+        )
+
+    recorded = db.record_payment_order_created(
+        conn,
+        order_id=current.id,
+        provider_trade_no="TRADE-CURRENT",
+        payment_url="https://pay.example.test/pay/current",
+        creation_generation=current.updated_at,
+        now="2026-08-30T12:00:34+00:00",
+    )
+    with pytest.raises(RuntimeError, match="creation claim is stale"):
+        db.record_payment_order_created(
+            conn,
+            order_id=original.id,
+            provider_trade_no="TRADE-STALE",
+            payment_url="https://pay.example.test/pay/stale",
+            creation_generation=original.updated_at,
+            now="2026-08-30T12:00:35+00:00",
+        )
+    assert recorded.provider_trade_no == "TRADE-CURRENT"
+    assert db.order_by_id(conn, original.id).payment_url.endswith("/current")
+    conn.close()
+
+
+def test_stale_payment_query_cannot_fence_new_creation_claim(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    user = _active_payment_user(
+        conn, "stale-query@example.com", "2026-08-30T12:00:00+00:00"
+    )
+    queried, _ = db.reserve_payment_order(
+        conn,
+        user_id=user.id,
+        plan="monthly",
+        base_amount_cents=990,
+        merchant_order_no="news_stale_query",
+        payment_type="alipay",
+        payment_config_id="a" * 64,
+        now="2026-08-30T12:00:00+00:00",
+        ttl_seconds=300,
+        amount_hold_seconds=3600,
+    )
+    current = db.claim_payment_order_creation(
+        conn,
+        order_id=queried.id,
+        now="2026-08-30T12:00:31+00:00",
+    )
+    assert current is not None
+
+    with pytest.raises(RuntimeError, match="reconciliation is stale"):
+        db.record_payment_query_status(
+            conn,
+            order_id=queried.id,
+            trade_status="WAIT_BUYER_PAY",
+            expected_updated_at=queried.updated_at,
+            now="2026-08-30T12:00:32+00:00",
+        )
+    created = db.record_payment_order_created(
+        conn,
+        order_id=current.id,
+        provider_trade_no="TRADE-CURRENT-QUERY",
+        payment_url="https://pay.example.test/pay/current-query",
+        creation_generation=current.updated_at,
+        now="2026-08-30T12:00:33+00:00",
+    )
+    assert created.provider_trade_no == "TRADE-CURRENT-QUERY"
+    assert created.payment_url.endswith("/current-query")
     conn.close()
 
 
@@ -660,6 +967,7 @@ def test_rejected_gateway_amount_moves_order_to_next_slot(tmp_path):
         conn,
         order_id=order.id,
         rejected_amounts={990},
+        creation_generation=order.updated_at,
         now="2026-08-30T12:00:01+00:00",
     )
     assert moved.amount_cents == 989
@@ -687,6 +995,7 @@ def test_closed_gateway_order_releases_amount_and_configuration_lock(tmp_path):
         conn,
         order_id=first.id,
         trade_status="TRADE_CLOSED",
+        expected_updated_at=first.updated_at,
         now="2026-08-30T12:01:00+00:00",
     )
     assert closed.status == "expired"
@@ -734,6 +1043,7 @@ def test_payment_config_update_lock_prevents_old_config_order_race(tmp_path):
         conn,
         order_id=first.id,
         trade_status="TRADE_CLOSED",
+        expected_updated_at=first.updated_at,
         now="2026-08-30T12:01:00+00:00",
     )
     second_user = _active_payment_user(

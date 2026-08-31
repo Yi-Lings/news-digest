@@ -210,6 +210,7 @@ def _deliver(tmp_path, mode="manual", *, smtp=None, archive_dir=None, **kwargs):
     else:
         _add_paid_users(tmp_path / "news.db", smtp_config.recipients)
     now = kwargs.pop("now", NOW)
+    clock = kwargs.pop("clock", lambda: now)
     report = deliver_published(
         mode,
         output_root=root,
@@ -218,6 +219,7 @@ def _deliver(tmp_path, mode="manual", *, smtp=None, archive_dir=None, **kwargs):
         timezone="Asia/Shanghai",
         smtp_config=smtp_config,
         now=now,
+        clock=clock,
         archive_dir=archive_dir,
         smtp_factory=FakeSMTP,
         **kwargs,
@@ -423,6 +425,107 @@ def test_completed_manual_delivery_reconciles_automation_summary(tmp_path):
         conn.close()
 
 
+def test_membership_is_rechecked_with_current_time_before_each_smtp_data(tmp_path):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipients = ("first@example.com", "second@example.com")
+    _add_paid_users(database, recipients)
+    _complete_automation_edition(database)
+    expired = NOW + dt.timedelta(days=32)
+
+    class DecisionClock:
+        calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return NOW if self.calls <= 2 else expired
+
+    clock = DecisionClock()
+    report = deliver_published(
+        "manual",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp(recipients),
+        now=NOW,
+        clock=clock,
+        archive_dir=None,
+        smtp_factory=FakeSMTP,
+    )
+
+    assert report.status == "sent"
+    assert report.sent_count == 1
+    assert report.skipped_count == 1
+    assert [str(message["To"]) for message in FakeSMTP.messages] == [recipients[0]]
+    assert clock.calls >= 3
+    conn = db.connect(database)
+    try:
+        run = db.latest_delivery_run(conn)
+        assert run is not None and run.status == "completed"
+        assert run.total_count == 2 and run.sent_count == 1
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None and edition.status == "delivered"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("withdrawal", ["unsubscribe", "disable", "delete"])
+def test_manual_zero_recipient_run_closes_after_last_recipient_withdraws(
+    tmp_path, withdrawal
+):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipient = "reader@example.com"
+    _add_paid_users(database, (recipient,))
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
+        db.import_legacy_smtp_recipients_once(
+            conn, (recipient,), NOW.isoformat()
+        )
+        state = db.subscription_by_email(conn, recipient)
+        assert state is not None
+        if withdrawal == "unsubscribe":
+            db.set_member_newsletter_subscription(
+                conn, recipient, enabled=False, now=NOW.isoformat()
+            )
+        elif withdrawal == "disable":
+            assert db.disable_subscription_id(conn, state.id, NOW.isoformat())
+        else:
+            assert db.delete_subscription_id(conn, state.id)
+    finally:
+        conn.close()
+
+    report = deliver_published(
+        "manual",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp((recipient,)),
+        now=NOW,
+        clock=lambda: NOW,
+        archive_dir=None,
+        smtp_factory=FakeSMTP,
+    )
+
+    assert report.status == "skipped"
+    assert report.total_count == 0
+    assert report.error_category is None
+    assert FakeSMTP.messages == []
+    conn = db.connect(database)
+    try:
+        run = db.latest_delivery_run(conn)
+        assert run is not None and run.mode == "manual"
+        assert run.status == "completed" and run.total_count == 0
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None and edition.status == "delivered"
+    finally:
+        conn.close()
+
+
 def test_skipped_manual_run_does_not_hide_unresolved_unknown(tmp_path):
     database = tmp_path / "news.db"
     recipients = ("sent@example.com", "unknown@example.com")
@@ -463,6 +566,173 @@ def test_skipped_manual_run_does_not_hide_unresolved_unknown(tmp_path):
         run = db.latest_delivery_run(conn)
         assert run is not None
         assert edition.delivery_finished_at == run.finished_at
+    finally:
+        conn.close()
+
+
+def test_completed_zero_recipient_run_finalizes_ineligible_unknown(tmp_path):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipient = "reader@example.com"
+    _add_paid_users(database, (recipient,))
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
+        db.ensure_delivery_recipients(conn, DATE, (recipient,), NOW.isoformat())
+        assert db.claim_delivery(
+            conn, DATE, recipient, NOW.isoformat(), run_id="uncertain-run"
+        )
+        db.finish_delivery(
+            conn,
+            DATE,
+            recipient,
+            "unknown",
+            NOW.isoformat(),
+            "worker_interrupted",
+        )
+        user = db.user_by_email_key(conn, db.delivery_recipient_key(recipient))
+        assert user is not None
+        db.clear_user_subscription(conn, user.id, now=NOW.isoformat())
+    finally:
+        conn.close()
+
+    report = deliver_published(
+        "manual",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp((recipient,)),
+        now=NOW,
+        archive_dir=None,
+        smtp_factory=FakeSMTP,
+    )
+
+    assert report.status == "skipped"
+    assert report.error_category is None
+    assert FakeSMTP.messages == []
+    conn = db.connect(database)
+    try:
+        state = db.delivery_states(conn, DATE)[0]
+        assert state.status == "ineligible"
+        assert state.ineligible_from_status == "unknown"
+        assert db.automation_edition(conn, DATE).status == "delivered"
+    finally:
+        conn.close()
+
+
+def test_automatic_claim_completes_when_last_unknown_recipient_unsubscribes(tmp_path):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipient = "reader@example.com"
+    _add_paid_users(database, (recipient,))
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        subscription = db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
+        assert subscription
+        db.ensure_delivery_recipients(conn, DATE, (recipient,), NOW.isoformat())
+        assert db.claim_delivery(
+            conn, DATE, recipient, NOW.isoformat(), run_id="uncertain-run"
+        )
+        db.finish_delivery(
+            conn,
+            DATE,
+            recipient,
+            "unknown",
+            NOW.isoformat(),
+            "worker_interrupted",
+        )
+        state = db.subscription_by_email(conn, recipient)
+        assert state is not None
+        assert db.disable_subscription_id(conn, state.id, NOW.isoformat())
+        delivery_key = db.claim_automation_delivery(conn, DATE, now=NOW.isoformat())
+        assert delivery_key is not None
+    finally:
+        conn.close()
+
+    report = deliver_published(
+        "auto",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp((recipient,)),
+        now=NOW,
+        archive_dir=None,
+        smtp_factory=FakeSMTP,
+    )
+    assert report.succeeded
+    assert report.total_count == 0
+    assert FakeSMTP.messages == []
+
+    conn = db.connect(database)
+    try:
+        db.finish_automation_delivery(
+            conn,
+            DATE,
+            delivery_key=delivery_key,
+            now=(NOW + dt.timedelta(seconds=1)).isoformat(),
+            succeeded=report.succeeded,
+        )
+        assert db.automation_edition(conn, DATE).status == "delivered"
+        delivery = db.delivery_states(conn, DATE)[0]
+        assert delivery.status == "ineligible"
+        assert delivery.ineligible_from_status == "unknown"
+    finally:
+        conn.close()
+
+
+def test_automatic_zero_targets_stays_incomplete_while_delivery_is_sending(tmp_path):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipient = "reader@example.com"
+    _add_paid_users(database, (recipient,))
+    _complete_automation_edition(database)
+    conn = db.connect(database)
+    try:
+        db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
+        db.ensure_delivery_recipients(conn, DATE, (recipient,), NOW.isoformat())
+        assert db.claim_delivery(
+            conn, DATE, recipient, NOW.isoformat(), run_id="active-run"
+        )
+        state = db.subscription_by_email(conn, recipient)
+        assert state is not None
+        assert db.disable_subscription_id(conn, state.id, NOW.isoformat())
+        delivery_key = db.claim_automation_delivery(conn, DATE, now=NOW.isoformat())
+        assert delivery_key is not None
+    finally:
+        conn.close()
+
+    report = deliver_published(
+        "auto",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp((recipient,)),
+        now=NOW,
+        archive_dir=None,
+        smtp_factory=FakeSMTP,
+    )
+    assert report.status == "failed"
+    assert report.succeeded is False
+    assert report.error_category == "state_sync_failed"
+    assert FakeSMTP.messages == []
+
+    conn = db.connect(database)
+    try:
+        db.finish_automation_delivery(
+            conn,
+            DATE,
+            delivery_key=delivery_key,
+            now=(NOW + dt.timedelta(seconds=1)).isoformat(),
+            succeeded=report.succeeded,
+        )
+        edition = db.automation_edition(conn, DATE)
+        assert edition is not None and edition.status == "complete"
+        assert db.delivery_states(conn, DATE)[0].status == "sending"
     finally:
         conn.close()
 
@@ -591,6 +861,7 @@ def test_partial_translation_records_degraded_status(tmp_path):
         timezone="Asia/Shanghai",
         smtp_config=_smtp(),
         now=NOW,
+        clock=lambda: NOW,
         archive_dir=None,
         smtp_factory=FakeSMTP,
     )
@@ -621,6 +892,7 @@ def test_partial_retry_failed_no_duplicate_and_unknown_requires_confirmation(tmp
         timezone="Asia/Shanghai",
         smtp_config=smtp,
         now=NOW,
+        clock=lambda: NOW,
         archive_dir=None,
         smtp_factory=FakeSMTP,
     )
@@ -646,6 +918,7 @@ def test_partial_retry_failed_no_duplicate_and_unknown_requires_confirmation(tmp
         timezone="Asia/Shanghai",
         smtp_config=smtp,
         now=NOW,
+        clock=lambda: NOW,
         confirm_unknown=True,
         archive_dir=None,
         smtp_factory=FakeSMTP,
@@ -752,6 +1025,7 @@ def test_unsubscribed_tombstone_excludes_saved_admin_and_public_is_merged(tmp_pa
         timezone="Asia/Shanghai",
         smtp_config=_smtp(("blocked@example.com", "admin@example.com")),
         now=NOW,
+        clock=lambda: NOW,
         archive_dir=None,
         smtp_factory=FakeSMTP,
     )
@@ -820,6 +1094,54 @@ def test_unsubscribe_after_claim_is_rechecked_immediately_before_data(tmp_path):
     conn.close()
 
 
+@pytest.mark.parametrize("eligibility_change", ["disable_user", "clear_subscription"])
+def test_paid_eligibility_loss_after_claim_prevents_data_and_cancels_claim(
+    tmp_path, eligibility_change
+):
+    root, _ = _published(tmp_path)
+    database = tmp_path / "news.db"
+    recipient = "reader@example.com"
+    _add_paid_users(database, (recipient,))
+
+    class CountingSMTP(FakeSMTP):
+        data_calls = 0
+
+        def data(self, *args, **kwargs):
+            type(self).data_calls += 1
+            return super().data(*args, **kwargs)
+
+    def remove_paid_eligibility_during_smtp_setup():
+        CountingSMTP.on_ehlo = None
+        other = db.connect(database)
+        user = db.user_by_email_key(other, db.delivery_recipient_key(recipient))
+        assert user is not None
+        if eligibility_change == "disable_user":
+            db.set_user_status(other, user.id, status="disabled", now=NOW.isoformat())
+        else:
+            db.clear_user_subscription(other, user.id, now=NOW.isoformat())
+        other.close()
+
+    CountingSMTP.on_ehlo = remove_paid_eligibility_during_smtp_setup
+    report = deliver_published(
+        "manual",
+        output_root=root,
+        database=database,
+        site_url=SITE,
+        timezone="Asia/Shanghai",
+        smtp_config=_smtp((recipient,)),
+        now=NOW,
+        archive_dir=None,
+        smtp_factory=CountingSMTP,
+    )
+
+    assert report.status == "skipped" and report.skipped_count == 1
+    assert CountingSMTP.data_calls == 0
+    assert CountingSMTP.messages == []
+    conn = db.connect(database)
+    assert db.delivery_states(conn, DATE) == []
+    conn.close()
+
+
 def test_unsubscribe_after_rcpt_prevents_data_and_cancels_claim(tmp_path):
     root, _ = _published(tmp_path)
     database = tmp_path / "news.db"
@@ -876,6 +1198,7 @@ def test_archive_failure_fails_service_without_changing_sent(tmp_path, monkeypat
         timezone="Asia/Shanghai",
         smtp_config=_smtp(),
         now=NOW,
+        clock=lambda: NOW,
         archive_dir=tmp_path / "mail",
         smtp_factory=FakeSMTP,
     )
@@ -1008,7 +1331,14 @@ def test_schema_v2_migrates_delivery_attempt_and_run_columns(tmp_path):
     legacy.close()
     conn = db.connect(path)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(email_deliveries)")}
-    assert {"attempt_count", "run_id", "started_at", "finished_at", "degraded"} <= columns
+    assert {
+        "attempt_count",
+        "run_id",
+        "started_at",
+        "finished_at",
+        "degraded",
+        "ineligible_from_status",
+    } <= columns
     row = conn.execute(
         "SELECT status, attempt_count, degraded FROM email_deliveries"
         " WHERE recipient_key = 'existing-key'"
@@ -1016,3 +1346,105 @@ def test_schema_v2_migrates_delivery_attempt_and_run_columns(tmp_path):
     assert tuple(row) == ("sent", 0, 0)
     assert db.latest_delivery_run(conn) is None
     conn.close()
+
+
+def test_schema_v9_migrates_delivery_rows_and_index_without_data_loss(tmp_path):
+    path = tmp_path / "legacy-v9.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+        "INSERT INTO meta VALUES ('schema_version', '9');"
+        "CREATE TABLE email_deliveries ("
+        "edition_date TEXT NOT NULL, recipient_key TEXT NOT NULL,"
+        "status TEXT NOT NULL CHECK(status IN "
+        "('pending', 'sending', 'sent', 'failed', 'unknown')) ,"
+        "error_category TEXT, updated_at TEXT NOT NULL,"
+        "attempt_count INTEGER NOT NULL DEFAULT 0, run_id TEXT, started_at TEXT,"
+        "finished_at TEXT, degraded INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(degraded IN (0, 1)), PRIMARY KEY (edition_date, recipient_key));"
+        "CREATE INDEX idx_email_deliveries_date_status "
+        "ON email_deliveries(edition_date, status);"
+        "INSERT INTO email_deliveries VALUES ("
+        "'2026-07-27', 'existing-key', 'unknown', 'worker_interrupted',"
+        "'2026-07-27T00:05:00+00:00', 3, 'run-1',"
+        "'2026-07-27T00:00:00+00:00', '2026-07-27T00:05:00+00:00', 1);"
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = db.connect(path)
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()["value"] == "10"
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute("SELECT COUNT(*) FROM email_deliveries").fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT edition_date, recipient_key, status, error_category, updated_at,"
+        " attempt_count, run_id, started_at, finished_at, degraded,"
+        " ineligible_from_status FROM email_deliveries"
+    ).fetchone()
+    assert tuple(row) == (
+        "2026-07-27",
+        "existing-key",
+        "unknown",
+        "worker_interrupted",
+        "2026-07-27T00:05:00+00:00",
+        3,
+        "run-1",
+        "2026-07-27T00:00:00+00:00",
+        "2026-07-27T00:05:00+00:00",
+        1,
+        None,
+    )
+    indexes = {
+        item["name"] for item in conn.execute("PRAGMA index_list(email_deliveries)")
+    }
+    assert "idx_email_deliveries_date_status" in indexes
+    assert [
+        item["name"]
+        for item in conn.execute("PRAGMA index_info(idx_email_deliveries_date_status)")
+    ] == ["edition_date", "status"]
+    with pytest.raises(sqlite3.IntegrityError), conn:
+        conn.execute(
+            "UPDATE email_deliveries SET ineligible_from_status = 'unknown'"
+            " WHERE recipient_key = 'existing-key'"
+        )
+    with pytest.raises(sqlite3.IntegrityError), conn:
+        conn.execute(
+            "UPDATE email_deliveries SET status = 'ineligible'"
+            " WHERE recipient_key = 'existing-key'"
+        )
+    with conn:
+        conn.execute(
+            "UPDATE email_deliveries SET status = 'ineligible',"
+            " ineligible_from_status = 'unknown' WHERE recipient_key = 'existing-key'"
+        )
+    conn.close()
+
+    backup = sqlite3.connect(path.with_name("legacy-v9.db.pre-v10.bak"))
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "9"
+        assert backup.execute("SELECT COUNT(*) FROM email_deliveries").fetchone()[0] == 1
+    finally:
+        backup.close()
+
+
+def test_v10_migration_failure_closes_connection(tmp_path):
+    path = tmp_path / "migration-failure.db"
+    conn = db.connect(path)
+    with conn:
+        conn.execute(
+            "UPDATE meta SET value = '9' WHERE key = 'schema_version'"
+        )
+    conn.close()
+    path.with_name("migration-failure.db.pre-v10.bak").touch()
+
+    with pytest.raises(RuntimeError, match="schema v10 迁移前数据库备份"):
+        db.connect(path)
+
+    path.unlink()
+    assert not path.exists()

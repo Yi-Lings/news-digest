@@ -5,8 +5,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.pytest-tmp/
-.pytest-tmp-*/
+/.pytest-*/
+/.codex-*/
+/大创文档.md
 .ruff_cache/
 
 # Build artifacts

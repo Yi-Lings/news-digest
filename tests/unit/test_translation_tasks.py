@@ -882,7 +882,7 @@ def test_complete_edition_delivery_claim_is_persistent_and_single(tmp_path):
     assert db.claim_automation_delivery(reopened, "2026-07-28", now=_at(7)) is None
 
 
-def test_v4_to_v9_migration_writes_verified_online_backups(tmp_path):
+def test_v4_to_v10_migration_writes_verified_online_backups(tmp_path):
     path = tmp_path / "digest.db"
     conn = db.connect(path)
     conn.executescript(
@@ -899,7 +899,7 @@ def test_v4_to_v9_migration_writes_verified_online_backups(tmp_path):
     migrated = db.connect(path)
     assert migrated.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "9"
+    ).fetchone()["value"] == "10"
     assert migrated.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert "is_admin" in {
         row["name"] for row in migrated.execute("PRAGMA table_info(users)")
@@ -914,6 +914,17 @@ def test_v4_to_v9_migration_writes_verified_online_backups(tmp_path):
         assert backup.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0] == "4"
+    finally:
+        backup.close()
+
+    v10_backup = path.with_name("digest.db.pre-v10.bak")
+    assert v10_backup.is_file()
+    backup = db.sqlite3.connect(v10_backup)
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "9"
     finally:
         backup.close()
 
@@ -951,7 +962,7 @@ def test_v4_to_v9_migration_writes_verified_online_backups(tmp_path):
         backup.close()
 
 
-def test_v8_to_v9_migration_removes_legacy_login_codes(tmp_path):
+def test_v8_to_v10_migration_removes_legacy_login_codes(tmp_path):
     path = tmp_path / "digest.db"
     conn = db.connect(path)
     conn.executescript(
@@ -991,7 +1002,7 @@ def test_v8_to_v9_migration_removes_legacy_login_codes(tmp_path):
     ).fetchone()[0] == 0
     assert migrated.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "9"
+    ).fetchone()["value"] == "10"
     migrated.close()
 
     v9_backup = path.with_name("digest.db.pre-v9.bak")
