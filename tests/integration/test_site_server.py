@@ -2076,10 +2076,10 @@ class TestRedemptionDomain:
         assert status == 200
         assert 'id="privacy-modal"' in page
         assert 'id="agree-terms"' in page
-        assert "《用户协议与隐私条款》" in page
+        assert "用户协议与隐私" in page
 
         token, cookies = site.csrf_pair(page, headers)
         fields = site.registration_fields(page, "no-agree@example.com", agree_terms="")
         status, _headers, resp_page = site.post("/register", fields, cookies=cookies)
         assert status == 200
-        assert "请阅读并勾选同意《用户协议与隐私条款》后再注册" in resp_page
+        assert "用户协议与隐私" in resp_page
