@@ -279,69 +279,267 @@
     });
   }
 
-  /* ── 往期归档：月份日历单月切换器 ── */
+  /* ── 往期归档：年月日逐级穿透日历与日期直达 ── */
   var calBox = document.getElementById("archive-calendar-box");
   if (calBox) {
-    var months = calBox.querySelectorAll(".calendar-month");
-    var prevBtn = document.getElementById("cal-prev-btn");
-    var nextBtn = document.getElementById("cal-next-btn");
-    var monthSelect = document.getElementById("cal-month-select");
-    var currentMonthIndex = 0;
-    var totalMonths = months.length;
-
-    var showMonth = function (index) {
-      if (index < 0) {
-        index = 0;
+    var availableDates = [];
+    try {
+      var raw = calBox.getAttribute("data-available-dates");
+      if (raw) {
+        availableDates = JSON.parse(raw);
       }
-      if (index >= totalMonths) {
-        index = totalMonths - 1;
-      }
-      currentMonthIndex = index;
+    } catch (e) {
+      availableDates = [];
+    }
 
-      for (var i = 0; i < totalMonths; i++) {
-        if (i === currentMonthIndex) {
-          months[i].classList.add("is-active");
-        } else {
-          months[i].classList.remove("is-active");
+    var availableDatesSet = {};
+    var availableMonthsSet = {};
+    var availableYearsSet = {};
+    var latestYear = new Date().getFullYear();
+    var latestMonth = new Date().getMonth() + 1;
+
+    for (var dIdx = 0; dIdx < availableDates.length; dIdx++) {
+      var dStr = availableDates[dIdx];
+      availableDatesSet[dStr] = true;
+      var yPart = dStr.substring(0, 4);
+      var ymPart = dStr.substring(0, 7);
+      availableYearsSet[yPart] = true;
+      availableMonthsSet[ymPart] = true;
+      if (dIdx === 0) {
+        var pYear = parseInt(yPart, 10);
+        var pMonth = parseInt(dStr.substring(5, 7), 10);
+        if (!isNaN(pYear)) { latestYear = pYear; }
+        if (!isNaN(pMonth)) { latestMonth = pMonth; }
+      }
+    }
+
+    var currentView = "day"; // "day" | "month" | "year"
+    var curYear = latestYear;
+    var curMonth = latestMonth;
+    var yearRangeStart = Math.floor(curYear / 10) * 10 - 1;
+
+    var kickerEl = document.getElementById("cal-card-kicker");
+    var titleTextEl = document.getElementById("cal-title-text");
+    var titleBtnEl = document.getElementById("cal-title-btn");
+    var titleCaretEl = document.getElementById("cal-title-caret");
+    var navPrevEl = document.getElementById("cal-nav-prev");
+    var navNextEl = document.getElementById("cal-nav-next");
+
+    var viewDaysEl = document.getElementById("cal-view-days");
+    var viewMonthsEl = document.getElementById("cal-view-months");
+    var viewYearsEl = document.getElementById("cal-view-years");
+    var daysGridEl = document.getElementById("cal-days-grid");
+    var monthsGridEl = document.getElementById("cal-months-grid");
+    var yearsGridEl = document.getElementById("cal-years-grid");
+
+    var pad2 = function (n) {
+      return n < 10 ? "0" + n : String(n);
+    };
+
+    var renderDaysView = function () {
+      if (kickerEl) { kickerEl.textContent = "MONTHLY ARCHIVE"; }
+      if (titleTextEl) { titleTextEl.textContent = curYear + " 年 " + curMonth + " 月"; }
+      if (titleCaretEl) { titleCaretEl.style.display = "inline"; }
+
+      if (daysGridEl) {
+        daysGridEl.innerHTML = "";
+        // 0=Sun -> 6, 1=Mon -> 0, etc.
+        var firstDayOfWeek = new Date(curYear, curMonth - 1, 1).getDay();
+        var mondayOffset = (firstDayOfWeek + 6) % 7;
+        var totalDays = new Date(curYear, curMonth, 0).getDate();
+
+        for (var e = 0; e < mondayOffset; e++) {
+          var emptyCell = document.createElement("span");
+          emptyCell.className = "cal-day is-empty";
+          daysGridEl.appendChild(emptyCell);
         }
-      }
 
-      if (monthSelect) {
-        monthSelect.value = String(currentMonthIndex);
-      }
-      if (prevBtn) {
-        prevBtn.disabled = currentMonthIndex >= totalMonths - 1;
-      }
-      if (nextBtn) {
-        nextBtn.disabled = currentMonthIndex <= 0;
+        for (var dayNum = 1; dayNum <= totalDays; dayNum++) {
+          var isoDate = curYear + "-" + pad2(curMonth) + "-" + pad2(dayNum);
+          if (availableDatesSet[isoDate]) {
+            var dayLink = document.createElement("a");
+            dayLink.href = "/issues/" + isoDate + "/";
+            dayLink.className = "cal-day has-edition";
+            dayLink.title = isoDate;
+            dayLink.innerHTML = '<span class="cal-day-num">' + dayNum + '</span><span class="cal-edition-dot" aria-hidden="true"></span>';
+            daysGridEl.appendChild(dayLink);
+          } else {
+            var noDay = document.createElement("span");
+            noDay.className = "cal-day no-edition";
+            noDay.textContent = String(dayNum);
+            daysGridEl.appendChild(noDay);
+          }
+        }
       }
     };
 
-    if (prevBtn) {
-      prevBtn.addEventListener("click", function () {
-        if (currentMonthIndex < totalMonths - 1) {
-          showMonth(currentMonthIndex + 1);
+    var renderMonthsView = function () {
+      if (kickerEl) { kickerEl.textContent = "ANNUAL ARCHIVE"; }
+      if (titleTextEl) { titleTextEl.textContent = curYear + " 年"; }
+      if (titleCaretEl) { titleCaretEl.style.display = "inline"; }
+
+      if (monthsGridEl) {
+        monthsGridEl.innerHTML = "";
+        for (var m = 1; m <= 12; m++) {
+          var ymKey = curYear + "-" + pad2(m);
+          var hasEd = availableMonthsSet[ymKey];
+          var mBtn = document.createElement("button");
+          mBtn.type = "button";
+          mBtn.className = "cal-tile" + (hasEd ? " has-edition" : " no-edition") + (m === curMonth ? " is-active" : "");
+          mBtn.innerHTML = '<span class="cal-tile-label">' + m + ' 月</span>' + (hasEd ? '<span class="cal-edition-dot" aria-hidden="true"></span>' : '');
+          (function (targetM) {
+            mBtn.addEventListener("click", function () {
+              curMonth = targetM;
+              switchView("day");
+            });
+          })(m);
+          monthsGridEl.appendChild(mBtn);
         }
-      });
-    }
-    if (nextBtn) {
-      nextBtn.addEventListener("click", function () {
-        if (currentMonthIndex > 0) {
-          showMonth(currentMonthIndex - 1);
+      }
+    };
+
+    var renderYearsView = function () {
+      if (kickerEl) { kickerEl.textContent = "DECADE ARCHIVE"; }
+      var endYear = yearRangeStart + 11;
+      if (titleTextEl) { titleTextEl.textContent = yearRangeStart + " 年 - " + endYear + " 年"; }
+      if (titleCaretEl) { titleCaretEl.style.display = "none"; }
+
+      if (yearsGridEl) {
+        yearsGridEl.innerHTML = "";
+        for (var y = yearRangeStart; y <= endYear; y++) {
+          var yKey = String(y);
+          var hasEdYear = availableYearsSet[yKey];
+          var yBtn = document.createElement("button");
+          yBtn.type = "button";
+          yBtn.className = "cal-tile" + (hasEdYear ? " has-edition" : " no-edition") + (y === curYear ? " is-active" : "");
+          yBtn.innerHTML = '<span class="cal-tile-label">' + y + '</span>' + (hasEdYear ? '<span class="cal-edition-dot" aria-hidden="true"></span>' : '');
+          (function (targetY) {
+            yBtn.addEventListener("click", function () {
+              curYear = targetY;
+              switchView("month");
+            });
+          })(y);
+          yearsGridEl.appendChild(yBtn);
         }
-      });
-    }
-    if (monthSelect) {
-      monthSelect.addEventListener("change", function (e) {
-        var idx = parseInt(e.target.value, 10);
-        if (!isNaN(idx)) {
-          showMonth(idx);
+      }
+    };
+
+    var switchView = function (view) {
+      currentView = view;
+      if (viewDaysEl) { viewDaysEl.classList.toggle("is-active", view === "day"); }
+      if (viewMonthsEl) { viewMonthsEl.classList.toggle("is-active", view === "month"); }
+      if (viewYearsEl) { viewYearsEl.classList.toggle("is-active", view === "year"); }
+
+      if (view === "day") {
+        renderDaysView();
+      } else if (view === "month") {
+        renderMonthsView();
+      } else if (view === "year") {
+        yearRangeStart = Math.floor(curYear / 10) * 10 - 1;
+        renderYearsView();
+      }
+    };
+
+    // 绑定标题向上穿透点击
+    if (titleBtnEl) {
+      titleBtnEl.addEventListener("click", function () {
+        if (currentView === "day") {
+          switchView("month");
+        } else if (currentView === "month") {
+          switchView("year");
         }
       });
     }
 
-    if (totalMonths > 0) {
-      showMonth(0);
+    // 绑定左右箭头切换
+    if (navPrevEl) {
+      navPrevEl.addEventListener("click", function () {
+        if (currentView === "day") {
+          curMonth--;
+          if (curMonth < 1) {
+            curMonth = 12;
+            curYear--;
+          }
+          renderDaysView();
+        } else if (currentView === "month") {
+          curYear--;
+          renderMonthsView();
+        } else if (currentView === "year") {
+          yearRangeStart -= 10;
+          renderYearsView();
+        }
+      });
+    }
+
+    if (navNextEl) {
+      navNextEl.addEventListener("click", function () {
+        if (currentView === "day") {
+          curMonth++;
+          if (curMonth > 12) {
+            curMonth = 1;
+            curYear++;
+          }
+          renderDaysView();
+        } else if (currentView === "month") {
+          curYear++;
+          renderMonthsView();
+        } else if (currentView === "year") {
+          yearRangeStart += 10;
+          renderYearsView();
+        }
+      });
+    }
+
+    // 初始化展示日视图
+    switchView("day");
+
+    /* ── 日期直接输入查阅 ── */
+    var dateInput = document.getElementById("archive-date-input");
+    var jumpBtn = document.getElementById("archive-date-jump-btn");
+    var msgEl = document.getElementById("cal-dispatch-msg");
+
+    var handleDateJump = function () {
+      if (!dateInput) { return; }
+      var val = (dateInput.value || "").trim();
+      if (!val) {
+        if (msgEl) { msgEl.textContent = "请先选择或输入要查阅的日期（如 2026-07-26）"; }
+        return;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+        if (msgEl) { msgEl.textContent = "日期格式有误，请输入标准格式 YYYY-MM-DD"; }
+        return;
+      }
+
+      if (availableDatesSet[val]) {
+        if (msgEl) { msgEl.textContent = ""; }
+        window.location.href = "/issues/" + val + "/";
+      } else {
+        var parts = val.split("-");
+        var yVal = parseInt(parts[0], 10);
+        var mVal = parseInt(parts[1], 10);
+        if (!isNaN(yVal) && !isNaN(mVal) && mVal >= 1 && mVal <= 12) {
+          curYear = yVal;
+          curMonth = mVal;
+          switchView("day");
+          if (msgEl) {
+            msgEl.textContent = val + " 暂无刊期，日历已为您定位到 " + yVal + " 年 " + mVal + " 月。";
+          }
+        } else if (msgEl) {
+          msgEl.textContent = val + " 暂无刊期记录。";
+        }
+      }
+    };
+
+    if (jumpBtn) {
+      jumpBtn.addEventListener("click", handleDateJump);
+    }
+    if (dateInput) {
+      dateInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.keyCode === 13) {
+          e.preventDefault();
+          handleDateJump();
+        }
+      });
     }
   }
 })();

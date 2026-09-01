@@ -9,34 +9,27 @@
 <section class="archive" aria-label="往期归档">
   <div class="archive-calendar-wrap">
     <h2 class="section-title">按日期浏览</h2>
-    <div class="archive-calendar-box" id="archive-calendar-box">
-      {% if calendar_months|length > 1 %}
-      <div class="cal-switch-bar">
-        <button type="button" class="cal-switch-btn" id="cal-prev-btn" title="查看更早月份" aria-label="查看更早月份">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
-          <span>上一月</span>
-        </button>
-        <div class="cal-month-select-wrap">
-          <select class="cal-month-select" id="cal-month-select" aria-label="选择月份">
-            {% for month_data in calendar_months %}
-            <option value="{{ loop.index0 }}">{{ month_data.label }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <button type="button" class="cal-switch-btn" id="cal-next-btn" title="查看更新月份" aria-label="查看更新月份">
-          <span>下一月</span>
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-        </button>
-      </div>
-      {% endif %}
-      <div class="calendar-container archive-calendar">
-        {% for month_data in calendar_months %}
-        <div class="calendar-month{% if loop.first %} is-active{% endif %}" data-month-index="{{ loop.index0 }}">
-          <div class="cal-month-head">
-            <span class="cal-month-kicker">MONTHLY ARCHIVE</span>
-            <h3 class="calendar-month-title">{{ month_data.label }}</h3>
+    <div class="archive-calendar-box" id="archive-calendar-box" data-available-dates="{{ all_dates|tojson }}">
+      <div class="calendar-card">
+        <div class="cal-card-head">
+          <span class="cal-card-kicker" id="cal-card-kicker">MONTHLY ARCHIVE</span>
+          <div class="cal-card-nav">
+            <button type="button" class="cal-nav-arrow" id="cal-nav-prev" title="上一区间" aria-label="上一区间">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <button type="button" class="cal-title-btn" id="cal-title-btn" title="点击向上切换层级">
+              <span id="cal-title-text">{{ calendar_months[0].label if calendar_months else '往期日历' }}</span>
+              <span class="cal-title-caret" id="cal-title-caret">▾</span>
+            </button>
+            <button type="button" class="cal-nav-arrow" id="cal-nav-next" title="下一区间" aria-label="下一区间">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </button>
           </div>
-          <div class="calendar-grid">
+        </div>
+
+        <!-- 1. 日视图 -->
+        <div class="cal-view is-active" id="cal-view-days">
+          <div class="cal-week-head">
             <span class="cal-head">一</span>
             <span class="cal-head">二</span>
             <span class="cal-head">三</span>
@@ -44,23 +37,50 @@
             <span class="cal-head">五</span>
             <span class="cal-head">六</span>
             <span class="cal-head">日</span>
-            {% for week in month_data.weeks %}
-              {% for cell in week %}
-                {% if cell.day and cell.has_edition %}
-                  <a href="{{ cell.url }}" class="cal-day has-edition{% if cell.is_current %} is-current{% endif %}" title="{{ cell.date }}">
-                    <span class="cal-day-num">{{ cell.day }}</span>
-                    <span class="cal-edition-dot" aria-hidden="true"></span>
-                  </a>
-                {% elif cell.day %}
-                  <span class="cal-day no-edition">{{ cell.day }}</span>
-                {% else %}
-                  <span class="cal-day is-empty"></span>
-                {% endif %}
+          </div>
+          <div class="calendar-grid" id="cal-days-grid">
+            {% if calendar_months %}
+              {% for week in calendar_months[0].weeks %}
+                {% for cell in week %}
+                  {% if cell.day and cell.has_edition %}
+                    <a href="{{ cell.url }}" class="cal-day has-edition{% if cell.is_current %} is-current{% endif %}" title="{{ cell.date }}">
+                      <span class="cal-day-num">{{ cell.day }}</span>
+                      <span class="cal-edition-dot" aria-hidden="true"></span>
+                    </a>
+                  {% elif cell.day %}
+                    <span class="cal-day no-edition">{{ cell.day }}</span>
+                  {% else %}
+                    <span class="cal-day is-empty"></span>
+                  {% endif %}
+                {% endfor %}
               {% endfor %}
-            {% endfor %}
+            {% endif %}
           </div>
         </div>
-        {% endfor %}
+
+        <!-- 2. 月视图 -->
+        <div class="cal-view" id="cal-view-months">
+          <div class="cal-grid-12" id="cal-months-grid">
+            <!-- 动态渲染 12 个月份格子 -->
+          </div>
+        </div>
+
+        <!-- 3. 年视图 -->
+        <div class="cal-view" id="cal-view-years">
+          <div class="cal-grid-12" id="cal-years-grid">
+            <!-- 动态渲染 12 个年份格子 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 日期直接输入直达条 -->
+      <div class="cal-date-dispatch">
+        <label for="archive-date-input" class="cal-dispatch-label">直接输入或选择日期查阅：</label>
+        <div class="cal-dispatch-row">
+          <input type="date" id="archive-date-input" class="cal-dispatch-input" aria-label="输入或选择日期">
+          <button type="button" id="archive-date-jump-btn" class="cal-dispatch-btn">查阅该期 →</button>
+        </div>
+        <div id="cal-dispatch-msg" class="cal-dispatch-msg" aria-live="polite"></div>
       </div>
     </div>
   </div>
