@@ -1686,17 +1686,17 @@ class SiteHandler(BaseHTTPRequestHandler):
         if not self._csrf_valid(form.get("csrf", "")):
             self._render_register("会话过期,请重试。")
             return
-        if form.get("agree_terms", "").strip() not in {"1", "true", "on"}:
-            self._render_register(
-                "请阅读并勾选同意《用户协议与隐私条款》后再注册。",
-                form.get("email", ""),
-            )
-            return
         if form.get("website", "").strip():
             self._render_register(
                 _REGISTRATION_ACCEPTED_MESSAGE,
                 raw_email,
                 verify_step=True,
+            )
+            return
+        if form.get("agree_terms", "").strip() not in {"1", "true", "on"}:
+            self._render_register(
+                "请阅读并勾选同意《用户协议与隐私条款》后再注册。",
+                form.get("email", ""),
             )
             return
         if form.get("password", "") != form.get("password_confirm", ""):
