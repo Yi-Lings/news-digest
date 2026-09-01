@@ -2,6 +2,30 @@
 
 更新时间：2026-09-01（Asia/Hong_Kong）
 
+## 0.1 接回进度（2026-09-01）
+
+本轮已按用户提供的新交接任务接回开发。此前 t15-t18 的 release workflow 均在 Linux
+离线测试阶段失败，未生成对应镜像或 GitHub Release；生产最后确认版本为 `v1.4.0t14`。
+
+已复现并修复失败根因：`SiteHandler._render_register(verify_step=True)` 只构造验证码
+页面，没有调用 `_html()` 发送 HTTP 响应。t18 将 honeypot 判断提前后，首次注册测试即
+命中该分支，客户端等待 10 秒超时，随后同类注册测试连锁超时。修复已加入
+`src/news_digest/site_server.py`，不会改变注册/验证码业务逻辑。
+
+本地验证结果：
+
+```text
+TestRegistration: 18 passed
+offline suite: 883 passed, 1 skipped, 7 deselected
+ruff: passed
+uv build: passed
+PowerShell AST: passed
+git diff --check: passed
+```
+
+当前修复已准备作为下一不可变 `v1.4.0t19` 候选内容；本次接回期间未运行生产连接、真实
+provider、SMTP 或支付。
+
 ## 0. 本次暂停点
 
 用户于 2026-09-01 明确要求暂停当前全部工作并交接给 Antigravity。收到暂停指令后，
@@ -13,19 +37,19 @@
 
 ```text
 branch: main
-HEAD: 1583c122ad35408f3b87f978058429416e72e60f
-tag: v1.4.0t7 (annotated, immutable)
-origin/main: 1583c122ad35408f3b87f978058429416e72e60f
-GitHub Release: v1.4.0t7, prerelease, published
-GitHub release workflow: success
-working tree before this HANDOFF edit: clean
+HEAD: a92c411 (tag: v1.4.0t18, annotated, immutable)
+origin/main: a92c411
+GitHub Release: v1.4.0t7 and earlier published; t15-t18 absent because CI failed
+GitHub release workflow: t7 success; t15-t18 failure in offline test job
+working tree before the pending fix: clean except untracked .env
 source version: 1.4.0
 stable v1.4.0 Release: not published
 ```
 
 `v1.4.0t7` Release 已包含 `digests.env`、`news-digest-deploy.tgz` 和对应 SHA-256
-文件。生产状态在本次暂停前没有重新查询；本文后续沿用的最后确认事实仍是生产运行
-`v1.4.0t6`，不能据此断言当前线上一定还是 t6，也不能断言已经部署 t7。
+文件。t15-t18 的 tag 已推送但没有可用 Release/digest，不能用于部署。生产状态在本次
+接回前没有重新查询；最后确认事实是生产运行 `v1.4.0t14`，不能据此断言当前线上一定
+仍是 t14。
 
 本地页面最后一个待辨析项已经从源码确认：主页和归档页的日期选择器采用显式表单提交，
 用户选择日期后还必须点击“查看刊期”；`app.js` 只在 `submit` 时调用
@@ -34,9 +58,9 @@ stable v1.4.0 Release: not published
 
 ## 1. 当前结论
 
-- 当前分支：`main`；`v1.4.0t7` 已发布为不可移动的测试候选，CI/GHCR/Release 均成功。生产是否已经部署 t7 尚未重新核实；最后确认版本为 `v1.4.0t6`。
+- 当前分支：`main`；源码 HEAD 为 `v1.4.0t18`，但 t15-t18 的 Linux release workflow 均失败，因此尚无可部署的 t15-t18 Release。生产最后确认版本为 `v1.4.0t14`，当前实际版本待只读核验。
 - 当前源码版本：`1.4.0`；稳定 `v1.4.0` Release 尚未授权、尚未发布。
-- `v1.4.0t1` 至 `v1.4.0t7` 的 GitHub prerelease、CI/GHCR 已完成；已发布 tag 与镜像不可移动。生产部署只确认到 t6。
+- `v1.4.0t1` 至 `v1.4.0t7` 的 GitHub prerelease、CI/GHCR 已完成；t15-t18 只有不可移动 tag，没有成功 Release。已发布 tag 与镜像不可移动。
 - t5 已完成受控生产业务闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，部署时未调用真实 provider、SMTP 或支付，也未补发历史刊期。
 - 不得读取或输出 provider/API key、SMTP 密码、用户密码、验证码、卡密明文、邮件正文或完整上游响应。
 - 未跟踪文件 `大创文档.md` 属于用户内容，不得删除或覆盖。
@@ -183,11 +207,12 @@ t7 本地候选新增：独立用户管理的服务端分页；旧匿名订阅�
 
 ## 6. 待完成门禁
 
-1. 先只读核验生产：worker/web/site/admin 的 OCI version、revision 和 digest，schema version、`integrity_check`、关键业务聚合、systemd timer/path 及公网/回环健康。查询必须脱敏，不输出账号、邮箱、卡密、密钥、邮件正文或完整上游响应。
-2. 若生产仍是 t6，只有在用户重新确认继续后，才使用现有 `v1.4.0t7` Release 的 immutable worker/web digest 部署；禁止重打或移动 t7。部署前冻结 timer/path/daily/resume、执行 SQLite online backup 和 SHA-256 核验，部署后验证 schema v10、数据计数、三服务和公网 HTTPS。
-3. 生产 UI 验收：独立“用户管理”的搜索/分页、授予与撤销管理员、会员延期/清除/剩余天数、每日简报资格；独立“付费管理”的元价小数、折扣、EasyPay 配置和卡密；读者端注册/登录/重置、订阅页、账户订单及归档日期提交。
-4. 自动支付只做用户明确授权的单订单闭环；不得创建多笔真实订单，不得补发历史邮件。真实 SMTP、provider、抓取也必须逐项确认范围，部署本身不得触发这些业务操作。
-5. 稳定 `v1.4.0` 仍未授权；不得把候选 prerelease 改成稳定 latest。只有候选生产验收完成且用户明确放行，才能另行发布稳定版本。
+1. 提交当前修复并创建全新的不可变 `v1.4.0t19` annotated tag；推送后等待该 tag 的 Linux release workflow 完整成功，并确认 Release 具备 `digests.env`。不得移动 t15-t18 或 t7 标签。
+2. 生产部署前先只读核验：worker/web/site/admin 的 OCI version、revision 和 digest，schema version、`integrity_check`、关键业务聚合、systemd timer/path 及公网/回环健康。查询必须脱敏，不输出账号、邮箱、卡密、密钥、邮件正文或完整上游响应。
+3. 只有在 t19 CI、镜像 digest 和部署包门禁全部通过后，才使用同一 Release 的 immutable worker/web digest 部署；生产最后确认是 t14。部署前冻结 timer/path/daily/resume、执行 SQLite online backup 和 SHA-256 核验，部署后验证 schema v10、数据计数、三服务和公网 HTTPS。
+4. 生产 UI 验收：独立“用户管理”的搜索/分页、授予与撤销管理员、会员延期/清除/剩余天数、每日简报资格；独立“付费管理”的元价小数、折扣、EasyPay 配置和卡密；读者端注册/登录/重置、订阅页、账户订单及归档日期提交。
+5. 自动支付只做用户明确授权的单订单闭环；不得创建多笔真实订单，不得补发历史邮件。真实 SMTP、provider、抓取也必须逐项确认范围，部署本身不得触发这些业务操作。
+6. 稳定 `v1.4.0` 仍未授权；不得把候选 prerelease 改成稳定 latest。只有候选生产验收完成且用户明确放行，才能另行发布稳定版本。
 
 ## 7. 最终本地门禁命令
 
@@ -212,8 +237,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产最后确认版本为 `v1.4.0t6`，当前实际版本待只读核验；`v1.4.0t7` prerelease 已发布，稳定版仍未发布。
-- 已推送 tag 永不移动；t7 如发现缺陷，必须使用新提交和新的测试候选 tag，不能覆盖 t7。
+- 生产最后确认版本为 `v1.4.0t14`，当前实际版本待只读核验；t19 是修复后的下一候选，稳定版仍未发布。
+- 已推送 tag 永不移动；t19 如发现缺陷，必须使用新提交和新的测试候选 tag，不能覆盖任何旧 tag。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
 - 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；除非生产验收确有必要，不重复真实 provider、SMTP 或扣款请求。

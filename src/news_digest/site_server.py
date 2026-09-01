@@ -1170,6 +1170,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 "<p class=\"muted\">验证码 10 分钟内有效；没有收到时可返回重新获取。</p>"
                 "<p><a href=\"/register\">返回重新获取验证码</a></p>"
             )
+            self._html(200, _page("注册", body), self._flush_cookie([]))
+            return
         else:
             captcha_id, captcha_image = self._new_captcha()
             privacy_modal_html = (
