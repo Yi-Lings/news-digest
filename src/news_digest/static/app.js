@@ -283,13 +283,13 @@
   var calBox = document.getElementById("archive-calendar-box");
   if (calBox) {
     var availableDates = [];
-    try {
-      var raw = calBox.getAttribute("data-available-dates");
-      if (raw) {
-        availableDates = JSON.parse(raw);
+    var datesScript = document.getElementById("archive-available-dates-json");
+    if (datesScript) {
+      try {
+        availableDates = JSON.parse(datesScript.textContent || "[]");
+      } catch (e) {
+        availableDates = [];
       }
-    } catch (e) {
-      availableDates = [];
     }
 
     var availableDatesSet = {};

@@ -9,7 +9,8 @@
 <section class="archive" aria-label="往期归档">
   <div class="archive-calendar-wrap">
     <h2 class="section-title">按日期浏览</h2>
-    <div class="archive-calendar-box" id="archive-calendar-box" data-available-dates="{{ all_dates|tojson }}">
+    <div class="archive-calendar-box" id="archive-calendar-box">
+      <script id="archive-available-dates-json" type="application/json">{{ all_dates|tojson }}</script>
       <div class="calendar-card">
         <div class="cal-card-head">
           <span class="cal-card-kicker" id="cal-card-kicker">MONTHLY ARCHIVE</span>
