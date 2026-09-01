@@ -118,6 +118,10 @@ class TranslationConfig:
     cache_dir: Path
     api_type: Literal["openai_chat", "anthropic_messages"] = "openai_chat"
     stream: bool = True
+    # 空字符串表示自动：不向接口发送 reasoning_effort。
+    reasoning_effort: Literal[
+        "", "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = ""
 
 
 _TRANSLATION_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._~-]+")
@@ -196,6 +200,23 @@ def translation_config_from_env(environ: Mapping[str, str] | None = None) -> Tra
     api_type = env.get("TRANSLATION_API_TYPE", "openai_chat").strip()
     if api_type not in {"openai_chat", "anthropic_messages"}:
         raise ValueError("TRANSLATION_API_TYPE must be openai_chat or anthropic_messages")
+    reasoning_effort = env.get("TRANSLATION_REASONING_EFFORT", "").strip().lower()
+    if reasoning_effort == "auto":
+        reasoning_effort = ""
+    if reasoning_effort not in {
+        "",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }:
+        raise ValueError(
+            "TRANSLATION_REASONING_EFFORT must be empty, none, minimal, low, "
+            "medium, high, xhigh, or max"
+        )
     return TranslationConfig(
         base_url=normalize_translation_base_url(env.get("TRANSLATION_API_BASE_URL", "")),
         api_key=env.get("TRANSLATION_API_KEY", ""),
@@ -207,6 +228,10 @@ def translation_config_from_env(environ: Mapping[str, str] | None = None) -> Tra
         cache_dir=Path(env.get("NEWS_DATA_DIR", "var/data")) / "translations",
         api_type=api_type,
         stream=_boolean_env(env, "TRANSLATION_STREAM", True),
+        reasoning_effort=cast(
+            Literal["", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            reasoning_effort,
+        ),
     )
 
 

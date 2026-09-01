@@ -522,18 +522,34 @@
 
     /* ── 日期直接输入查阅 ── */
     var dateInput = document.getElementById("archive-date-input");
+    var datePicker = document.getElementById("archive-date-picker");
+    var datePickerBtn = document.getElementById("archive-date-picker-btn");
     var jumpBtn = document.getElementById("archive-date-jump-btn");
     var msgEl = document.getElementById("cal-dispatch-msg");
 
+    var formatDisplayDate = function (value) {
+      var match = String(value || "").match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+      if (!match) { return ""; }
+      var year = parseInt(match[1], 10);
+      var month = parseInt(match[2], 10);
+      var day = parseInt(match[3], 10);
+      var candidate = new Date(Date.UTC(year, month - 1, day));
+      if (candidate.getUTCFullYear() !== year || candidate.getUTCMonth() !== month - 1 ||
+          candidate.getUTCDate() !== day) { return ""; }
+      return year + "年" + pad2(month) + "月" + pad2(day) + "日";
+    };
+
+    var normalizeDate = function (value) {
+      var display = formatDisplayDate(value);
+      if (!display) { return ""; }
+      return display.substring(0, 4) + "-" + display.substring(5, 7) + "-" + display.substring(8, 10);
+    };
+
     var handleDateJump = function () {
       if (!dateInput) { return; }
-      var val = (dateInput.value || "").trim();
+      var val = normalizeDate(dateInput.value);
       if (!val) {
-        if (msgEl) { msgEl.textContent = "请先选择或输入要查阅的日期（如 2026-07-26）"; }
-        return;
-      }
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) {
-        if (msgEl) { msgEl.textContent = "日期格式有误，请输入标准格式 YYYY-MM-DD"; }
+        if (msgEl) { msgEl.textContent = "日期格式有误，请输入 YYYY年MM月DD日"; }
         return;
       }
 
@@ -560,7 +576,28 @@
     if (jumpBtn) {
       jumpBtn.addEventListener("click", handleDateJump);
     }
+    if (datePickerBtn) {
+      datePickerBtn.addEventListener("click", function () {
+        if (!datePicker) { return; }
+        if (datePicker.showPicker) { datePicker.showPicker(); }
+        else { datePicker.click(); }
+      });
+    }
+    if (datePicker) {
+      datePicker.addEventListener("change", function () {
+        if (!dateInput) { return; }
+        dateInput.value = formatDisplayDate(datePicker.value);
+        if (msgEl) { msgEl.textContent = ""; }
+      });
+    }
     if (dateInput) {
+      dateInput.addEventListener("blur", function () {
+        var display = formatDisplayDate(dateInput.value);
+        if (display) {
+          dateInput.value = display;
+          if (datePicker) { datePicker.value = normalizeDate(display); }
+        }
+      });
       dateInput.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.keyCode === 13) {
           e.preventDefault();

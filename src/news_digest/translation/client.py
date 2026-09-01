@@ -156,11 +156,22 @@ class _PinnedHTTPTransport(httpx.HTTPTransport):
         )
 
 
-def translation_cache_identity(api_type: ApiType, base_url: str, model: str) -> str:
+def translation_cache_identity(
+    api_type: ApiType,
+    base_url: str,
+    model: str,
+    reasoning_effort: str = "",
+) -> str:
     """Return a safe cache namespace hash without exposing gateway or model names."""
     normalized = normalize_translation_base_url(base_url)
     raw = f"{api_type}\n{normalized}\n{model}"
+    if reasoning_effort:
+        raw += f"\n{reasoning_effort}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _is_gpt_model(model: str) -> bool:
+    return model.strip().casefold().startswith("gpt")
 
 
 def _request_spec(
@@ -171,18 +182,21 @@ def _request_spec(
     max_tokens: int,
 ) -> _RequestSpec:
     if config.api_type == "openai_chat":
+        payload: dict[str, Any] = {
+            "model": config.model,
+            "max_tokens": max_tokens,
+            "stream": config.stream,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if config.reasoning_effort and _is_gpt_model(config.model):
+            payload["reasoning_effort"] = config.reasoning_effort
         return _RequestSpec(
             path="chat/completions",
             headers={"Authorization": f"Bearer {config.api_key}"},
-            payload={
-                "model": config.model,
-                "max_tokens": max_tokens,
-                "stream": config.stream,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            },
+            payload=payload,
         )
     if config.api_type == "anthropic_messages":
         return _RequestSpec(
@@ -510,6 +524,7 @@ class ApiTranslator:
             self._config.api_type,
             self._base_url,
             self._config.model,
+            self._config.reasoning_effort,
         )
 
     def translate(self, article: Article) -> str:

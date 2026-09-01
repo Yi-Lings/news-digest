@@ -40,6 +40,7 @@ _ENV_KEYS = (
     "TRANSLATION_MODEL",
     "TRANSLATION_API_TYPE",
     "TRANSLATION_STREAM",
+    "TRANSLATION_REASONING_EFFORT",
 )
 
 
@@ -60,6 +61,20 @@ def _normalize_provider(name: str, raw: dict[str, Any], *, legacy_default: bool)
     is_default = raw.get("is_default", legacy_default)
     if not all(isinstance(value, bool) for value in (stream, enabled, is_default)):
         raise AdminConfigError(f"档案 {name} 的布尔字段无效")
+    reasoning_effort = str(raw.get("reasoning_effort", "")).strip().lower()
+    if reasoning_effort == "auto":
+        reasoning_effort = ""
+    if reasoning_effort not in {
+        "",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }:
+        raise AdminConfigError(f"档案 {name} 的推理强度无效")
     provider = {
         "name": name,
         "base_url": str(raw.get("base_url", "")).strip().rstrip("/"),
@@ -67,6 +82,7 @@ def _normalize_provider(name: str, raw: dict[str, Any], *, legacy_default: bool)
         "model": str(raw.get("model", "")).strip(),
         "api_type": api_type,
         "stream": stream,
+        "reasoning_effort": reasoning_effort,
         "enabled": enabled,
         "is_default": is_default,
     }
@@ -155,7 +171,16 @@ def default_provider(data: dict[str, Any]) -> dict[str, Any]:
 def provider_from_request(
     body: dict[str, Any], existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    allowed = {"name", "base_url", "api_key", "model", "api_type", "stream", "enabled"}
+    allowed = {
+        "name",
+        "base_url",
+        "api_key",
+        "model",
+        "api_type",
+        "stream",
+        "reasoning_effort",
+        "enabled",
+    }
     unknown = set(body) - allowed
     if unknown:
         raise AdminConfigError(f"不支持的字段：{', '.join(sorted(unknown))}")
@@ -170,6 +195,9 @@ def provider_from_request(
         "model": str(body.get("model", "")).strip(),
         "api_type": body.get("api_type", existing.get("api_type", "openai_chat")),
         "stream": body.get("stream", existing.get("stream", True)),
+        "reasoning_effort": body.get(
+            "reasoning_effort", existing.get("reasoning_effort", "")
+        ),
         "enabled": body.get("enabled", existing.get("enabled", True)),
         "is_default": existing.get("is_default", False),
     }
@@ -197,6 +225,7 @@ def translation_config(
         cache_dir=Path("var/data/translations"),
         api_type=provider["api_type"],
         stream=provider["stream"],
+        reasoning_effort=provider.get("reasoning_effort", ""),
     )
 
 
@@ -207,6 +236,7 @@ def write_env_local(root: Path, provider: dict[str, Any], filename: str = ENV_FI
         "TRANSLATION_MODEL": provider["model"],
         "TRANSLATION_API_TYPE": provider["api_type"],
         "TRANSLATION_STREAM": str(provider["stream"]).lower(),
+        "TRANSLATION_REASONING_EFFORT": provider.get("reasoning_effort", ""),
     }
     path = Path(root) / filename
 
@@ -236,6 +266,7 @@ def mask_provider(provider: dict[str, Any]) -> dict[str, Any]:
         "model": provider["model"],
         "api_type": provider["api_type"],
         "stream": provider["stream"],
+        "reasoning_effort": provider.get("reasoning_effort", ""),
         "enabled": provider["enabled"],
         "is_default": provider["is_default"],
     }
@@ -253,8 +284,16 @@ def _fingerprint_secret(root: Path) -> bytes:
 
 def provider_fingerprint(root: Path, provider: dict[str, Any]) -> str:
     public = {
-        key: provider[key]
-        for key in ("name", "base_url", "model", "api_type", "stream", "enabled")
+        key: provider.get(key, "")
+        for key in (
+            "name",
+            "base_url",
+            "model",
+            "api_type",
+            "stream",
+            "reasoning_effort",
+            "enabled",
+        )
     }
     public_digest = hashlib.sha256(
         json.dumps(public, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -422,6 +461,7 @@ def runtime_translation_config(
             "TRANSLATION_MODEL": provider["model"],
             "TRANSLATION_API_TYPE": provider["api_type"],
             "TRANSLATION_STREAM": str(provider["stream"]).lower(),
+            "TRANSLATION_REASONING_EFFORT": provider.get("reasoning_effort", ""),
         }
     )
     try:

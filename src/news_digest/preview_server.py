@@ -2636,7 +2636,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             matched = None
             for provider in profiles["providers"].values():
                 identity = translation_cache_identity(
-                    provider["api_type"], provider["base_url"], provider["model"]
+                    provider["api_type"],
+                    provider["base_url"],
+                    provider["model"],
+                    provider.get("reasoning_effort", ""),
                 )
                 if task.provider_id in {
                     provider["name"],
@@ -3869,6 +3872,18 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
           <option value="openai_chat">OpenAI Chat</option>
           <option value="anthropic_messages">Anthropic Messages</option>
         </select>
+        <label for="f-reasoning">GPT 推理强度</label>
+        <select id="f-reasoning">
+          <option value="">自动（不发送参数）</option>
+          <option value="none">none</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+        <p class="meta">仅 OpenAI GPT 模型发送该参数；其他协议或模型自动忽略。</p>
         <div class="checks">
           <label><input id="f-stream" type="checkbox" checked> 流式</label>
           <label><input id="f-enabled" type="checkbox" checked> 启用</label>
@@ -4127,6 +4142,7 @@ function formBody() {
     api_key: field("f-key").value,
     model: field("f-model").value,
     api_type: field("f-type").value,
+    reasoning_effort: field("f-reasoning").value,
     stream: field("f-stream").checked,
     enabled: field("f-enabled").checked
   };
@@ -4193,6 +4209,7 @@ function loadForm(name) {
   field("f-key").value = "";
   field("f-model").value = item.model;
   field("f-type").value = item.api_type;
+  field("f-reasoning").value = item.reasoning_effort || "";
   field("f-stream").checked = item.stream;
   field("f-enabled").checked = item.enabled;
   field("dirty").textContent = "已载入保存档案；修改后请重新测试";
@@ -4226,6 +4243,7 @@ function render(data) {
       item.api_type + " · " + item.model + " · " + (item.stream ? "流式" : "非流式"),
       "meta"
     );
+    addText(card, "span", "推理强度：" + (item.reasoning_effort || "自动"), "meta");
     if (item.last_test) {
       var text = item.last_test.stale ? "最近测试已过期" :
         (item.last_test.status === "success" ? "最近测试成功" : "最近测试失败");

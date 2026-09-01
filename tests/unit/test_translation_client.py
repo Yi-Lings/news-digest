@@ -35,6 +35,7 @@ def _config(**overrides) -> TranslationConfig:
         "cache_dir": Path("unused"),
         "api_type": "openai_chat",
         "stream": True,
+        "reasoning_effort": "",
     }
     values.update(overrides)
     return TranslationConfig(**values)
@@ -153,6 +154,24 @@ def test_translation_config_defaults_openai_stream_and_normalizes_base():
     assert config.api_type == "openai_chat"
     assert config.stream is True
     assert config.base_url == "https://api.example.com/openai/v1"
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+def test_translation_config_accepts_openai_reasoning_effort(effort):
+    config = translation_config_from_env({"TRANSLATION_REASONING_EFFORT": effort})
+    assert config.reasoning_effort == effort
+
+
+def test_translation_config_maps_auto_reasoning_effort_to_omitted():
+    config = translation_config_from_env({"TRANSLATION_REASONING_EFFORT": "auto"})
+    assert config.reasoning_effort == ""
+
+
+def test_translation_config_rejects_non_openai_reasoning_effort_value():
+    with pytest.raises(ValueError, match="TRANSLATION_REASONING_EFFORT"):
+        translation_config_from_env({"TRANSLATION_REASONING_EFFORT": "ultra"})
 
 
 @pytest.mark.parametrize(
@@ -449,6 +468,47 @@ def test_provider_modes_switch_path_headers_payload_and_parser(api_type, stream,
     assert translator.label == f"claude-or-gpt-model@{PROMPT_VERSION}"
 
 
+@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+def test_gpt_request_sends_selected_reasoning_effort(effort):
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["reasoning_effort"] == effort
+        return httpx.Response(200, json=_openai_non_stream("ok"))
+
+    translator = _translator(
+        handler,
+        stream=False,
+        model="gpt-5.6-terra",
+        reasoning_effort=effort,
+    )
+    assert translator.probe() == "ok"
+
+
+@pytest.mark.parametrize(
+    ("api_type", "model"),
+    [("openai_chat", "regular-model"), ("anthropic_messages", "gpt-5.6-terra")],
+)
+def test_reasoning_effort_is_not_sent_for_non_gpt_requests(api_type, model):
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert "reasoning_effort" not in payload
+        body = (
+            _openai_non_stream("ok")
+            if api_type == "openai_chat"
+            else _anthropic_non_stream("ok")
+        )
+        return httpx.Response(200, json=body)
+
+    translator = _translator(
+        handler,
+        api_type=api_type,
+        stream=False,
+        model=model,
+        reasoning_effort="high",
+    )
+    assert translator.probe() == "ok"
+
+
 @pytest.mark.parametrize(
     ("status", "category"),
     [
@@ -666,3 +726,21 @@ def test_cache_identity_is_safe_normalized_and_isolated_by_protocol_and_model():
     assert len({openai, claude, other_model, other_gateway}) == 4
     assert "api.example.com" not in openai
     assert "gpt-5" not in openai
+
+
+def test_cache_identity_isolated_by_reasoning_effort():
+    legacy = translation_cache_identity(
+        "openai_chat", "https://api.example.com/v1", "gpt-5"
+    )
+    automatic = translation_cache_identity(
+        "openai_chat", "https://api.example.com/v1", "gpt-5", ""
+    )
+    low = translation_cache_identity(
+        "openai_chat", "https://api.example.com/v1", "gpt-5", "low"
+    )
+    high = translation_cache_identity(
+        "openai_chat", "https://api.example.com/v1", "gpt-5", "high"
+    )
+    assert legacy == automatic
+    assert low != high
+    assert low != legacy

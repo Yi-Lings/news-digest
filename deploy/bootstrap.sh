@@ -232,6 +232,7 @@ TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
+TRANSLATION_REASONING_EFFORT=
 
 # ---- EasyPay 兼容支付；完成公网 HTTPS 回调验收前保持关闭 ----
 EPAY_ENABLED=false
@@ -322,8 +323,10 @@ else
   P_MODEL="$(env_get TRANSLATION_MODEL)"
   P_TYPE="$(env_get TRANSLATION_API_TYPE)"
   P_STREAM="$(env_get TRANSLATION_STREAM)"
+  P_REASONING="$(env_get TRANSLATION_REASONING_EFFORT)"
   [ -n "$P_TYPE" ] || P_TYPE="openai_chat"
   [ -n "$P_STREAM" ] || P_STREAM="true"
+  [ "$P_REASONING" = "auto" ] && P_REASONING=""
   case "$P_TYPE" in
     openai_chat|anthropic_messages) ;;
     *) die "TRANSLATION_API_TYPE 必须是 openai_chat 或 anthropic_messages" ;;
@@ -331,6 +334,10 @@ else
   case "$P_STREAM" in
     true|false) ;;
     *) die "TRANSLATION_STREAM 必须是 true 或 false" ;;
+  esac
+  case "$P_REASONING" in
+    ""|none|minimal|low|medium|high|xhigh|max) ;;
+    *) die "TRANSLATION_REASONING_EFFORT 必须是 none、minimal、low、medium、high、xhigh 或 max" ;;
   esac
   if [ -n "$P_URL" ] && [ -n "$P_KEY" ] && [ -n "$P_MODEL" ]; then
     # 用 .env 已填好的字段生成首个唯一默认档案
@@ -343,6 +350,7 @@ else
    "model": "$(json_escape "$P_MODEL")",
    "api_type": "$(json_escape "$P_TYPE")",
    "stream": $P_STREAM,
+   "reasoning_effort": "$(json_escape "$P_REASONING")",
    "enabled": true,
    "is_default": true
   }

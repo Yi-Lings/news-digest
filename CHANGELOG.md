@@ -5,9 +5,14 @@
 
 ## [Unreleased]
 
-- 当前发布目标为测试候选 `v1.4.0t1`。该 tag 创建 GitHub prerelease，明确不成为
+- 当前发布目标为测试候选 `v1.4.0t20`。该 tag 创建 GitHub prerelease，明确不成为
   `releases/latest`；生产受控验收只使用同一 Release 的 immutable digest，经
   `server-push.ps1` 部署。正式 `v1.4.0` 与稳定 Release 尚未发布。
+
+- t20：归档日期输入改为紧凑的 `yyyy年mm月dd日` 显示，同时保留原生日期选择器和日期直达；
+  Admin 模型接口增加 GPT 推理强度配置，参数贯通 provider 配置、缓存身份和 OpenAI Chat
+  请求。对 GPT 模型可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，
+  非 GPT 或 Anthropic 请求不会发送该字段。
 
 ## [1.4.0] - 待稳定发布
 

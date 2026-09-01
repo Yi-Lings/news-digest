@@ -157,6 +157,7 @@ TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
+TRANSLATION_REASONING_EFFORT=
 
 EPAY_ENABLED=false
 EPAY_API_BASE=
@@ -194,7 +195,9 @@ bootstrap/Admin 会把 `NEWS_SITE_URL`、SMTP、EasyPay 等 Site 必需字段原
 `/srv/news-digest/site-config/.env`。Site 以目录只读 bind 读取该投影，既能看到原子替换后的
 新 inode，又不会接触 provider 配置或整份 `/config`；不得改回单文件 bind。
 
-`TRANSLATION_API_TYPE` 只能是 `openai_chat` 或 `anthropic_messages`；`SMTP_SECURITY`
+`TRANSLATION_API_TYPE` 只能是 `openai_chat` 或 `anthropic_messages`；GPT 模型的
+`TRANSLATION_REASONING_EFFORT` 可留空（自动）或设置为 `none`、`minimal`、`low`、`medium`、
+`high`、`xhigh`、`max`，具体可用值由上游模型决定；`SMTP_SECURITY`
 只能是 `implicit_tls`（通常 465）或 `starttls`（通常 587/2525）。先保持两个 enable
 开关为 `false`，通过 Admin 的真实 provider 测试、SMTP 连接测试和测试邮件后再开启。
 账号注册、会员简报和 EasyPay 回调都要求公网 HTTPS 站点就绪。正式版的 timer 固定为 `Asia/Shanghai` 每日

@@ -13,6 +13,7 @@ PROVIDER = {
     "model": "test-model",
     "api_type": "openai_chat",
     "stream": True,
+    "reasoning_effort": "",
     "enabled": True,
     "is_default": True,
 }

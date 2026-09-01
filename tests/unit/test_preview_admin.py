@@ -59,6 +59,7 @@ PROVIDER = {
     "model": "demo-model",
     "api_type": "openai_chat",
     "stream": True,
+    "reasoning_effort": "",
     "enabled": True,
     "is_default": False,
 }
@@ -615,6 +616,7 @@ def test_legacy_profiles_migrate_schema_and_active_to_unique_default(tmp_path):
         "model": "m",
         "api_type": "openai_chat",
         "stream": True,
+        "reasoning_effort": "",
         "enabled": True,
         "is_default": True,
     }
@@ -642,6 +644,7 @@ def test_atomic_writes_are_0600_and_preserve_unmanaged_env_keys(tmp_path):
     assert "TRANSLATION_API_BASE_URL=https://api.example.com/v1" in content
     assert "TRANSLATION_API_TYPE=openai_chat" in content
     assert "TRANSLATION_STREAM=true" in content
+    assert "TRANSLATION_REASONING_EFFORT=" in content
     assert "old-model" not in content
     if os.name != "nt":
         assert stat.S_IMODE(env.stat().st_mode) == 0o600
@@ -674,6 +677,7 @@ def test_runtime_translation_uses_unique_default_not_stale_env(tmp_path):
     assert config.api_key == PROVIDER["api_key"]
     assert config.model == PROVIDER["model"]
     assert config.api_type == "anthropic_messages"
+    assert config.reasoning_effort == ""
     assert config.timeout_seconds == 42
 
     save_profiles(tmp_path, {"providers": {"claude": PROVIDER}}, "providers.json")
@@ -1058,6 +1062,21 @@ def test_probe_fingerprint_includes_secret_change_without_exposing_it(tmp_path):
     changed_model = provider_fingerprint(tmp_path, {**PROVIDER, "model": "other"})
     assert len({first, changed_key, changed_model}) == 3
     assert PROVIDER["api_key"] not in first
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+def test_provider_reasoning_effort_is_persisted_and_returned(local_server, effort):
+    root, port, _, _ = local_server
+    body = {**FORM, "reasoning_effort": effort}
+    status, _data, _ = _request(port, "POST", "/admin/api/providers", body)
+    assert status == 200
+    stored = load_profiles(root)["providers"]["claude"]
+    assert stored["reasoning_effort"] == effort
+    status, data, _ = _request(port, "GET", "/admin/api/providers", content_type=None)
+    assert status == 200
+    assert data["providers"]["claude"]["reasoning_effort"] == effort
 
 
 def test_saved_test_state_becomes_stale_after_saved_config_change(local_server):
@@ -3659,6 +3678,7 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert 'id="test"' in lowered
     assert 'id="f-type"' in lowered
     assert 'id="f-stream"' in lowered
+    assert 'id="f-reasoning"' in lowered
     assert 'name="message"' not in lowered
     assert 'id="message"' not in lowered
     assert 'id="m-recipients"' not in lowered

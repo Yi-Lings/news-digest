@@ -41,6 +41,7 @@
 | `TRANSLATION_MODEL` | 空 | **同上必填**；模型名 |
 | `TRANSLATION_API_TYPE` | `openai_chat` | `openai_chat` 或 `anthropic_messages`；不按模型名猜协议 |
 | `TRANSLATION_STREAM` | true | 是否使用对应 adapter 的流式 parser |
+| `TRANSLATION_REASONING_EFFORT` | 空 | GPT 模型可选 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`；空值按模型默认，不同模型支持子集可能不同 |
 | `TRANSLATION_TIMEOUT_SECONDS` | 180 | 单请求硬总超时；连接 10 秒、流读取静默 30 秒，正式翻译的可恢复重试总预算 95 秒 |
 | `TRANSLATION_MAX_TOKENS` | 8192 | 译文长度余量；Claude 系后端必填此参数 |
 | `EMAIL_DELIVERY_ENABLED` | false | 每日自动投递总开关；关闭时不解析残留 SMTP 字段 |
@@ -61,7 +62,7 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 用于避免 Compose 对 `$`、引号、空格和 `#` 的 dotenv 解释改变密码；这只是传输编码，
 不是加密。旧明文配置仍可读取，下一次 Admin 保存时自动迁移。
 
-**Admin：** preview 运行中访问 `http://127.0.0.1:8618/admin/`。供应商档案存于 `.env.providers.local`（生产为 `/config/providers.json`）；每档案显式保存协议、stream、启用和默认状态。每日翻译只使用唯一默认档案。页面只返回 `key_set`，编辑时 key 留空表示沿用。点击“测试连接”前会确认一次固定 `Hi` 的真实生成请求（2 字符输入、最多 8 output tokens、可能计费），不提供任意测试消息输入框。
+**Admin：** preview 运行中访问 `http://127.0.0.1:8618/admin/`。供应商档案存于 `.env.providers.local`（生产为 `/config/providers.json`）；每档案显式保存协议、stream、推理强度、启用和默认状态。每日翻译只使用唯一默认档案。页面只返回 `key_set`，编辑时 key 留空表示沿用。点击“测试连接”前会确认一次固定 `Hi` 的真实生成请求（2 字符输入、最多 8 output tokens、可能计费），不提供任意测试消息输入框。推理强度下拉仅对 OpenAI GPT 模型生效；非 GPT 模型或 Anthropic 请求不会发送该字段。
 
 邮件区的连接测试使用当前表单但不写配置、不发信；测试邮件可使用当前 SMTP 表单，但内容组合和收件人强制使用已保存值，且必须从 active 订阅行按单个 `subscription_id` 选择。预览、测试、08:00 自动投递和指定刊期人工发送共用同一内容选择器。投递状态按收件人记录；`unknown` 表示 SMTP 可能已接受 DATA，自动任务不得重试。
 
@@ -147,7 +148,7 @@ uv run pytest                       # 可选自检，应全绿
 
 **Admin 管理面板。** 浏览器访问 `https://news.example.com/admin/`（替换为实际 `ND_DOMAIN`），进入面板自带的网页登录页（用户名默认 `admin`，登录后发放会话 Cookie）。首次口令在服务器上查看：`sudo cat /srv/news-digest/config/admin-password.initial`（口令不出现在部署日志里）。**登录后请立即在面板网页修改口令**：修改成功会轮换会话密钥、使所有已登录端失效，并自动删除初始口令文件。忘记口令：`sudo rm /srv/news-digest/config/htpasswd-admin /srv/news-digest/config/session-secret` 后重跑 bootstrap。面板管理 provider 唯一默认档案、SMTP/内容组合、订阅与逐收件人投递状态；worker 每次启动都重新读取 `/config`，无需重启容器。
 
-**换密钥的正确姿势。** 优先在 Admin 编辑档案（key 留空沿用）并重新执行固定 `Hi` 测试；也可 ssh 编辑 `/srv/news-digest/config/providers.json`。该文件是生产 provider 权威源，档案字段为 `base_url`、`api_key`、`model`、`api_type`、`stream`、`enabled`、`is_default`，同一时刻至多一个默认档案。改完不需要重启，下一次一次性 worker 会重读。
+**换密钥的正确姿势。** 优先在 Admin 编辑档案（key 留空沿用）并重新执行固定 `Hi` 测试；也可 ssh 编辑 `/srv/news-digest/config/providers.json`。该文件是生产 provider 权威源，档案字段为 `base_url`、`api_key`、`model`、`api_type`、`stream`、`reasoning_effort`、`enabled`、`is_default`，同一时刻至多一个默认档案。改完不需要重启，下一次一次性 worker 会重读。
 
 - `providers.json` 的唯一默认档案决定每日翻译；`.env` 的 `TRANSLATION_*` 仅保留迁移兼容，不在缺少默认档案时回退；
 - 保存或设默认前会统一验证公网 HTTPS 目标；实际测试和正式翻译同样执行该校验。

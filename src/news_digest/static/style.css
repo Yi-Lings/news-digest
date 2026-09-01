@@ -613,6 +613,20 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
   background: var(--paper); color: var(--ink); border-radius: 2px;
   box-sizing: border-box; outline: none;
 }
+.cal-dispatch-picker {
+  position: absolute; width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; pointer-events: none;
+}
+.cal-dispatch-picker-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--paper); color: var(--ink); font-family: var(--font-ui);
+  font-size: 0.8125rem; font-weight: 700; padding: 0.45rem 0.7rem;
+  border: 1.5px solid var(--ink); border-radius: 2px; cursor: pointer; white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.cal-dispatch-picker-btn:hover {
+  background: var(--ink); color: #fff; border-color: var(--ink);
+}
 .cal-dispatch-input:focus {
   border-color: var(--cinnabar); background: #fff;
 }
@@ -630,6 +644,11 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
 .cal-dispatch-msg {
   margin-top: 0.4rem; font-family: var(--font-ui); font-size: 0.75rem;
   color: var(--cinnabar); min-height: 0; line-height: 1.4;
+}
+@media (max-width: 32rem) {
+  .cal-dispatch-row { flex-wrap: wrap; }
+  .cal-dispatch-input { flex-basis: 100%; }
+  .cal-dispatch-picker-btn, .cal-dispatch-btn { flex: 1; }
 }
 .cal-day-num { line-height: 1; font-size: 0.875rem; }
 .cal-edition-dot {

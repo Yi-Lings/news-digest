@@ -78,7 +78,11 @@
       <div class="cal-date-dispatch">
         <label for="archive-date-input" class="cal-dispatch-label">直接输入或选择日期查阅：</label>
         <div class="cal-dispatch-row">
-          <input type="date" id="archive-date-input" class="cal-dispatch-input" aria-label="输入或选择日期">
+          <input type="text" id="archive-date-input" class="cal-dispatch-input" inputmode="numeric"
+                 autocomplete="off" placeholder="2026年08月24日" aria-label="输入日期，例如 2026年08月24日">
+          <input type="date" id="archive-date-picker" class="cal-dispatch-picker" tabindex="-1"
+                 aria-label="选择日期">
+          <button type="button" id="archive-date-picker-btn" class="cal-dispatch-picker-btn">选择日期</button>
           <button type="button" id="archive-date-jump-btn" class="cal-dispatch-btn">查阅该期 →</button>
         </div>
         <div id="cal-dispatch-msg" class="cal-dispatch-msg" aria-live="polite"></div>

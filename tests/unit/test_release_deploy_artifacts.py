@@ -73,8 +73,8 @@ def test_candidate_release_docs_require_server_push_and_immutable_digests():
     )
 
     assert "v1.4.0t1" in docs
-    assert "生产环境当前运行测试候选 `v1.4.0t6`" in docs
-    assert "v1.4.0t6" in docs
+    assert re.search(r"当前修复已准备作为下一不可变 `v1\.4\.0t\d+` 候选内容", docs)
+    assert re.search(r"生产最后确认版本为 `v1\.4\.0t\d+`", docs)
     assert "prerelease" in docs
     assert "不成为 `releases/latest`" in docs
     assert "server-push.ps1" in docs

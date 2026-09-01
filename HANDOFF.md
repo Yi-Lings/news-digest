@@ -23,7 +23,7 @@ PowerShell AST: passed
 git diff --check: passed
 ```
 
-当前修复已准备作为下一不可变 `v1.4.0t19` 候选内容；本次接回期间未运行生产连接、真实
+当前修复已准备作为下一不可变 `v1.4.0t20` 候选内容；本次接回期间未运行生产连接、真实
 provider、SMTP 或支付。
 
 ## 0. 本次暂停点
@@ -207,9 +207,9 @@ t7 本地候选新增：独立用户管理的服务端分页；旧匿名订阅�
 
 ## 6. 待完成门禁
 
-1. 提交当前修复并创建全新的不可变 `v1.4.0t19` annotated tag；推送后等待该 tag 的 Linux release workflow 完整成功，并确认 Release 具备 `digests.env`。不得移动 t15-t18 或 t7 标签。
+1. 提交当前修复并创建全新的不可变 `v1.4.0t20` annotated tag；推送后等待该 tag 的 Linux release workflow 完整成功，并确认 Release 具备 `digests.env`。不得移动 t15-t19 或 t7 标签。
 2. 生产部署前先只读核验：worker/web/site/admin 的 OCI version、revision 和 digest，schema version、`integrity_check`、关键业务聚合、systemd timer/path 及公网/回环健康。查询必须脱敏，不输出账号、邮箱、卡密、密钥、邮件正文或完整上游响应。
-3. 只有在 t19 CI、镜像 digest 和部署包门禁全部通过后，才使用同一 Release 的 immutable worker/web digest 部署；生产最后确认是 t14。部署前冻结 timer/path/daily/resume、执行 SQLite online backup 和 SHA-256 核验，部署后验证 schema v10、数据计数、三服务和公网 HTTPS。
+3. 只有在 t20 CI、镜像 digest 和部署包门禁全部通过后，才使用同一 Release 的 immutable worker/web digest 部署；生产最后确认是 t14。部署前冻结 timer/path/daily/resume、执行 SQLite online backup 和 SHA-256 核验，部署后验证 schema v10、数据计数、三服务和公网 HTTPS。
 4. 生产 UI 验收：独立“用户管理”的搜索/分页、授予与撤销管理员、会员延期/清除/剩余天数、每日简报资格；独立“付费管理”的元价小数、折扣、EasyPay 配置和卡密；读者端注册/登录/重置、订阅页、账户订单及归档日期提交。
 5. 自动支付只做用户明确授权的单订单闭环；不得创建多笔真实订单，不得补发历史邮件。真实 SMTP、provider、抓取也必须逐项确认范围，部署本身不得触发这些业务操作。
 6. 稳定 `v1.4.0` 仍未授权；不得把候选 prerelease 改成稳定 latest。只有候选生产验收完成且用户明确放行，才能另行发布稳定版本。
@@ -237,8 +237,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产最后确认版本为 `v1.4.0t14`，当前实际版本待只读核验；t19 是修复后的下一候选，稳定版仍未发布。
-- 已推送 tag 永不移动；t19 如发现缺陷，必须使用新提交和新的测试候选 tag，不能覆盖任何旧 tag。
+- 生产最后确认版本为 `v1.4.0t14`，当前实际版本待只读核验；t20 是本轮修复后的下一候选，稳定版仍未发布。
+- 已推送 tag 永不移动；t20 如发现缺陷，必须使用新提交和新的测试候选 tag，不能覆盖任何旧 tag。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
 - 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；除非生产验收确有必要，不重复真实 provider、SMTP 或扣款请求。
