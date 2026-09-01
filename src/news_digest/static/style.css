@@ -987,3 +987,254 @@ html[data-mode="zh"] .gloss-mark { display: none; }
     width: 100%;
   }
 }
+
+/* ── 订阅支付弹窗 ───────────────────────────────────── */
+.pay-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(28, 27, 23, 0.68);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-sizing: border-box;
+}
+
+.pay-modal-card {
+  background: var(--sheet);
+  border: 2px solid var(--ink);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25), 4px 4px 0 var(--ink);
+  border-radius: 6px;
+  width: 100%;
+  max-width: 390px;
+  margin: auto;
+  max-height: calc(100vh - 2rem);
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  box-sizing: border-box;
+  animation: modalPop 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes modalPop {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.pay-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1.5px solid var(--rule);
+  background: var(--paper);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.pay-modal-title {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.pay-modal-close {
+  background: transparent;
+  border: none;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.2rem 0.45rem;
+  line-height: 1;
+  border-radius: 3px;
+  transition: all 0.15s ease;
+}
+
+.pay-modal-close:hover {
+  color: #fff;
+  background: var(--red);
+}
+
+.pay-modal-body {
+  padding: 1rem;
+  box-sizing: border-box;
+}
+
+.pay-modal-plan-info {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.45rem 0.75rem;
+  background: var(--paper);
+  border: 1.5px solid var(--rule);
+  border-radius: 4px;
+  margin-bottom: 0.65rem;
+}
+
+.pay-modal-plan-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.pay-modal-plan-price {
+  font-weight: 700;
+  font-size: 1.3rem;
+  color: var(--cinnabar);
+  font-family: Arial, sans-serif;
+}
+
+.pay-modal-tip {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+  line-height: 1.4;
+}
+
+.pay-modal-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.pay-channel-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  background: var(--paper);
+  border: 1.5px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+.pay-channel-btn:hover {
+  border-color: var(--ink);
+  background: #fff;
+  transform: translateY(-1px);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.pay-icon-lg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  font-size: 1rem;
+  font-weight: 900;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.pay-icon-alipay { background: #1677ff; }
+.pay-icon-wxpay { background: #07c160; }
+
+.pay-channel-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pay-channel-text strong {
+  font-size: 0.92rem;
+  color: var(--ink);
+}
+
+.pay-channel-text small {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.05rem;
+}
+
+.pay-channel-arrow {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.pay-channel-btn:hover .pay-channel-arrow {
+  color: var(--ink);
+  transform: translateX(2px);
+}
+
+@media (max-height: 550px) {
+  .pay-modal-card {
+    max-height: calc(100vh - 1rem);
+  }
+  .pay-modal-body {
+    padding: 0.65rem;
+  }
+  .pay-channel-btn {
+    padding: 0.5rem 0.75rem;
+  }
+}
+
+/* ── 我的账户：订单列表滚动卡片 ─────────────────────── */
+.order-list-wrap {
+  max-height: 240px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1.5px solid var(--rule);
+  background: var(--sheet);
+  border-radius: 4px;
+  padding: 0 0.85rem;
+  margin: 0.8rem 0 1.5rem;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.03);
+}
+
+.order-list-wrap::-webkit-scrollbar {
+  width: 6px;
+}
+
+.order-list-wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.order-list-wrap::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 3px;
+}
+
+.order-list-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+.order-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.order-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem 1rem;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.order-list li:last-child {
+  border-bottom: 0;
+}

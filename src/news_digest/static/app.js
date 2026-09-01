@@ -584,20 +584,19 @@
     if (payModalPlanPrice) { payModalPlanPrice.textContent = planPrice || ""; }
     payModal.style.display = "flex";
     payModal.setAttribute("aria-hidden", "false");
-    document.body.style.overflow = "hidden";
   };
 
   var closePayModal = function () {
     if (!payModal) { return; }
     payModal.style.display = "none";
     payModal.setAttribute("aria-hidden", "true");
-    document.body.style.overflow = "";
   };
 
   var subscribeButtons = document.querySelectorAll(".plan-subscribe-btn");
   for (var sIdx = 0; sIdx < subscribeButtons.length; sIdx++) {
     (function (btn) {
-      btn.addEventListener("click", function () {
+      btn.addEventListener("click", function (e) {
+        if (e) { e.preventDefault(); }
         var plan = btn.getAttribute("data-plan") || "monthly";
         var planName = btn.getAttribute("data-plan-name") || "会员订阅";
         var planPrice = btn.getAttribute("data-plan-price") || "";
@@ -607,7 +606,13 @@
   }
 
   if (payModalClose) {
-    payModalClose.addEventListener("click", closePayModal);
+    payModalClose.addEventListener("click", function (e) {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      closePayModal();
+    });
   }
 
   if (payModal) {
