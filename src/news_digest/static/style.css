@@ -993,33 +993,35 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
   width: 100vw; height: 100vh;
-  background: rgba(0, 0, 0, 0.48);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  z-index: 99999;
+  background: rgba(28, 27, 23, 0.68);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 999999;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
+  overflow: hidden;
   box-sizing: border-box;
+  margin: 0;
 }
 
 .pay-modal-card {
-  background: #fff;
-  border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.05);
-  width: 92%;
-  max-width: 420px;
-  position: relative;
+  background: var(--sheet);
+  border: 2px solid var(--ink);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35), 4px 4px 0 var(--ink);
+  border-radius: 6px;
+  width: 100%;
+  max-width: 390px;
+  margin: auto;
   box-sizing: border-box;
-  animation: bmPop 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: modalPop 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-@keyframes bmPop {
+@keyframes modalPop {
   from {
     opacity: 0;
-    transform: scale(0.94) translateY(6px);
+    transform: scale(0.95) translateY(8px);
   }
   to {
     opacity: 1;
@@ -1031,32 +1033,28 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1.15rem 1.25rem 0.75rem;
-  background: transparent;
+  padding: 0.75rem 1rem;
+  border-bottom: 1.5px solid var(--rule);
+  background: var(--paper);
 }
 
 .pay-modal-title {
   margin: 0;
-  font-size: 1.18rem;
+  font-size: 1.1rem;
+  color: var(--ink);
   font-weight: 700;
-  color: #1f2937;
 }
 
 .pay-modal-close {
   background: transparent;
   border: none;
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   font-weight: 700;
-  color: #9ca3af;
+  color: var(--muted);
   cursor: pointer;
-  padding: 0.2rem;
+  padding: 0.2rem 0.45rem;
   line-height: 1;
-  border-radius: 6px;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  border-radius: 3px;
   transition: all 0.15s ease;
 }
 
@@ -1066,71 +1064,37 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 }
 
 .pay-modal-body {
-  padding: 0 1.25rem 1.25rem;
+  padding: 1rem;
   box-sizing: border-box;
 }
 
-.pay-modal-breakdown {
-  background: #f9fafb;
-  border: 1px solid #f3f4f6;
-  border-radius: 8px;
-  padding: 0.85rem 1rem;
-  margin: 0 0 1rem;
+.pay-modal-plan-info {
   display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-}
-
-.pay-breakdown-row {
-  display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  font-size: 0.88rem;
-}
-
-.pay-row-label {
-  color: #6b7280;
-  font-size: 0.85rem;
-}
-
-.pay-row-val.val-original {
-  color: #9ca3af;
-  text-decoration: line-through;
-  font-size: 0.85rem;
-}
-
-.pay-discount-pill {
-  color: #ef4444;
-  background: #fef2f2;
-  font-size: 0.78rem;
-  font-weight: 700;
-  padding: 0.12rem 0.45rem;
+  padding: 0.55rem 0.85rem;
+  background: var(--paper);
+  border: 1.5px solid var(--rule);
   border-radius: 4px;
-  border: 1px solid #fee2e2;
+  margin-bottom: 0.75rem;
 }
 
-.pay-row-total {
-  border-top: 1px dashed #e5e7eb;
-  padding-top: 0.55rem;
-  margin-top: 0.15rem;
-}
-
-.pay-row-total .pay-row-label {
+.pay-modal-plan-name {
   font-weight: 700;
-  color: #1f2937;
-  font-size: 0.92rem;
+  font-size: 0.98rem;
+  color: var(--ink);
 }
 
-.pay-row-val.val-total {
-  font-size: 1.45rem;
-  color: #dc2626;
+.pay-modal-plan-price {
+  font-weight: 700;
+  font-size: 1.35rem;
+  color: var(--red);
   font-family: Arial, sans-serif;
-  font-weight: 800;
 }
 
 .pay-modal-tip {
-  font-size: 0.8rem;
-  color: #6b7280;
+  font-size: 0.82rem;
+  color: var(--muted);
   margin: 0 0 0.75rem;
   line-height: 1.4;
 }
@@ -1146,10 +1110,10 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   align-items: center;
   gap: 0.85rem;
   width: 100%;
-  padding: 0.75rem 1rem;
-  background: #fff;
-  border: 1.5px solid #e5e7eb;
-  border-radius: 8px;
+  padding: 0.75rem 0.95rem;
+  background: var(--paper);
+  border: 1.5px solid var(--rule);
+  border-radius: 4px;
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
@@ -1157,18 +1121,18 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 }
 
 .pay-channel-btn:hover {
-  border-color: #1f2937;
-  background: #fafafa;
+  border-color: var(--ink);
+  background: #fff;
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: 2px 2px 0 var(--ink);
 }
 
 .pay-icon-lg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.2rem;
-  height: 2.2rem;
+  width: 2.1rem;
+  height: 2.1rem;
   border-radius: 50%;
   font-size: 1.05rem;
   font-weight: 900;
@@ -1188,37 +1152,27 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 
 .pay-channel-text strong {
   font-size: 0.95rem;
-  color: #1f2937;
+  color: var(--ink);
 }
 
 .pay-channel-text small {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--muted);
   margin-top: 0.05rem;
 }
 
 .pay-channel-arrow {
   font-size: 1.1rem;
   font-weight: 700;
-  color: #9ca3af;
+  color: var(--muted);
   transition: transform 0.15s ease;
 }
 
 .pay-channel-btn:hover .pay-channel-arrow {
-  color: #1f2937;
+  color: var(--ink);
   transform: translateX(3px);
 }
 
-.pay-modal-foot-tip {
-  margin-top: 0.9rem;
-  text-align: center;
-  font-size: 0.75rem;
-  color: #9ca3af;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3rem;
-}
 
 
 /* ── 我的账户：订单列表滚动卡片 ─────────────────────── */
@@ -1268,4 +1222,327 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 
 .order-list li:last-child {
   border-bottom: 0;
+}
+
+.order-meta {
+  min-width: 0;
+}
+
+.order-number {
+  display: block;
+  font: 600 0.82rem/1.4 Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.order-plan {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.order-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.order-action {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.order-action button {
+  margin: 0;
+}
+
+.order-cancel-btn {
+  background: transparent !important;
+  color: var(--muted) !important;
+  border: 1px solid var(--rule) !important;
+  font-size: 0.8rem !important;
+  padding: 0.24rem 0.55rem !important;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.3;
+  transition: all 0.15s ease;
+}
+
+.order-cancel-btn:hover {
+  background: var(--red) !important;
+  color: #fff !important;
+  border-color: var(--red) !important;
+}
+
+.order-pay-btn {
+  display: inline-block;
+  background: #b35c00 !important;
+  color: #fff !important;
+  border: 1px solid #994e00 !important;
+  font: 700 0.8rem Arial, sans-serif !important;
+  padding: 0.24rem 0.6rem !important;
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.3;
+  text-decoration: none !important;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.order-pay-btn:hover {
+  background: #944800 !important;
+  border-color: #7a3b00 !important;
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+
+.order-state {
+  font: 700 0.82rem/1.4 Arial, sans-serif;
+  white-space: nowrap;
+}
+
+.order-state.state-paid {
+  color: var(--green);
+}
+
+.order-state.state-pending {
+  color: #b35c00;
+  text-decoration: none;
+}
+
+.order-state.state-expired,
+.order-state.state-failed {
+  color: var(--muted);
+}
+
+.contact-card {
+  background: var(--sheet);
+  border: 1.5px solid var(--rule);
+  border-radius: 6px;
+  padding: 1.6rem;
+  margin-top: 1rem;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+.contact-card h2 {
+  margin-top: 0;
+}
+
+.contact-email-box {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.85rem 1.1rem;
+  margin: 1rem 0;
+  display: inline-block;
+}
+
+.contact-email-link {
+  font: 700 1.05rem Arial, sans-serif;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.contact-email-link:hover {
+  color: var(--red);
+  text-decoration: underline;
+}
+
+.terms-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 1rem 0;
+  padding: 0.65rem 0.85rem;
+  background: var(--paper);
+  border: 1.5px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.terms-row:hover {
+  border-color: var(--ink);
+  background: #fff;
+}
+
+.terms-row input[type="checkbox"] {
+  width: 1.05rem !important;
+  height: 1.05rem !important;
+  margin: 0 !important;
+  cursor: pointer;
+  pointer-events: none;
+  accent-color: var(--ink);
+}
+
+.terms-text {
+  font-size: 0.84rem;
+  color: var(--ink);
+  flex: 1;
+}
+
+.terms-link-text {
+  color: var(--red);
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.terms-badge {
+  font: 700 0.72rem/1.2 Arial, sans-serif;
+  padding: 0.2rem 0.45rem;
+  border-radius: 3px;
+  background: var(--rule);
+  color: var(--muted);
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.terms-badge.is-agreed {
+  background: rgba(46, 125, 50, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(46, 125, 50, 0.35);
+}
+
+.pay-modal-card.privacy-card {
+  max-width: 540px;
+  padding: 0;
+}
+
+.privacy-modal-header {
+  padding: 0.9rem 1.25rem 0.75rem;
+  border-bottom: 1.5px solid var(--rule);
+  background: var(--paper);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.privacy-kicker {
+  font: 700 0.7rem Arial, sans-serif;
+  color: var(--red);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 0.2rem;
+}
+
+.privacy-card-title {
+  font-family: Georgia, serif;
+  font-size: 1.25rem;
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.3;
+}
+
+.privacy-content-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 1rem 1.35rem;
+  background: #fdfbf7;
+  font-size: 0.86rem;
+  line-height: 1.65;
+  color: var(--ink);
+  border-bottom: 1.5px solid var(--rule);
+}
+
+.privacy-content-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.privacy-content-scroll::-webkit-scrollbar-track {
+  background: var(--paper);
+}
+
+.privacy-content-scroll::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 3px;
+}
+
+.privacy-content-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+.privacy-clause {
+  margin-bottom: 1.1rem;
+}
+
+.privacy-clause h4 {
+  font-family: Georgia, serif;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0 0 0.35rem;
+}
+
+.privacy-clause p {
+  margin: 0 0 0.45rem;
+  color: var(--ink);
+}
+
+.privacy-modal-foot {
+  padding: 0.85rem 1.25rem 1rem;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.privacy-read-tip {
+  font: 600 0.78rem/1.3 Arial, sans-serif;
+  color: var(--muted);
+  text-align: center;
+  margin: 0;
+}
+
+.privacy-read-tip b {
+  color: var(--red);
+}
+
+.privacy-foot-actions {
+  display: flex;
+  gap: 0.65rem;
+  justify-content: flex-end;
+}
+
+.privacy-btn-agree {
+  padding: 0.48rem 1.2rem !important;
+  font: 700 0.88rem Arial, sans-serif !important;
+  background: var(--ink) !important;
+  color: #fff !important;
+  border: 1px solid var(--ink) !important;
+  border-radius: 3px !important;
+  cursor: pointer !important;
+  width: auto !important;
+  transition: all 0.15s ease !important;
+}
+
+.privacy-btn-agree:hover:not(:disabled) {
+  background: var(--red) !important;
+  border-color: var(--red) !important;
+}
+
+.privacy-btn-agree:disabled {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+  background: #777 !important;
+  border-color: #777 !important;
+}
+
+.privacy-btn-cancel {
+  padding: 0.48rem 0.95rem !important;
+  font: 600 0.86rem Arial, sans-serif !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: 3px !important;
+  cursor: pointer !important;
+  width: auto !important;
+}
+
+.privacy-btn-cancel:hover {
+  background: var(--rule) !important;
+  color: var(--ink) !important;
 }

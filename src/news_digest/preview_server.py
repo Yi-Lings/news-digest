@@ -1733,6 +1733,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 entries["payment_qr_data_url"] = _validated_qr_data_url(
                     body["payment_qr_data_url"]
                 )
+            if "contact_email" in body:
+                raw_contact = str(body["contact_email"]).strip()
+                if raw_contact:
+                    accounts.normalize_email(raw_contact)
+                entries["contact_email"] = raw_contact
             if not entries:
                 raise ValueError("没有需要保存的设置")
             current_settings = {
@@ -3781,6 +3786,25 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .grant-controls { grid-template-columns: 1fr; }
   .data-table td { grid-template-columns: minmax(4.8rem, .38fr) minmax(0, 1fr); }
 }
+.epay-type-picker { grid-column: span 2; margin: .15rem 0 .45rem; }
+.epay-type-title { display: block; font-size: .82rem; font-weight: 600; color: var(--ink); margin-bottom: .35rem; }
+.epay-channels-group { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.epay-channel-btn {
+  display: inline-flex !important; align-items: center; gap: .4rem; padding: .28rem .65rem !important;
+  border-radius: 3px; font-size: .8rem !important; font-weight: 700 !important; cursor: pointer;
+  border: 1.5px solid #383838 !important; transition: all .18s ease; user-select: none;
+  background: #1c1b17 !important; color: #8c887b !important; box-shadow: 0 1px 3px rgba(0,0,0,.15);
+}
+.epay-channel-btn .channel-icon {
+  display: inline-flex; align-items: center; justify-content: center; width: 1.15rem; height: 1.15rem;
+  border-radius: 50%; font-size: .72rem; font-weight: 900; color: #fff; opacity: .6;
+}
+.epay-channel-btn.active {
+  background: #b35c00 !important; color: #fff !important; border-color: #994e00 !important;
+  box-shadow: 0 2px 8px rgba(179,92,0,.4);
+}
+.epay-channel-btn.active .channel-icon { opacity: 1; }
+.epay-channel-btn:hover { transform: translateY(-1px); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important; transition: none !important; animation: none !important;
@@ -3922,6 +3946,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <h3>站点设置</h3>
       <div class="fields">
         <label><input id="site-paywall" type="checkbox"> 开启付费墙</label>
+        <label class="span2">联系工单邮箱<input id="site-contact-email" type="email" placeholder="如 support@example.com，用于接收读者工单与反馈"></label>
         <label>月刊会员划线基准价(元)<input id="site-monthly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
         <label>月刊会员现价(元)<input id="site-monthly-sale" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"><output id="site-monthly-discount-preview" class="note"></output></label>
         <label>年刊会员划线基准价(元)<input id="site-yearly" type="number" min="0.11" max="100000" step="0.01" inputmode="decimal"></label>
@@ -3934,7 +3959,18 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <p class="note">兼容 EasyPay API 下单（mapi.php）。PKey 留空表示保留已保存值，页面不会回显密钥。</p>
       <div class="fields">
         <label><input id="site-epay-enabled" type="checkbox"> 启用在线支付</label>
-        <label>支付类型<select id="site-epay-type"><option value="alipay">支付宝</option><option value="wxpay">微信支付</option></select></label>
+        <div class="epay-type-picker span2">
+          <span class="epay-type-title">支付通道（点击切换，选上为金底，支持多选或单选）</span>
+          <div class="epay-channels-group">
+            <button type="button" id="site-epay-type-alipay" class="epay-channel-btn active" data-type="alipay">
+              <span class="channel-icon" style="background:#1677ff;">支</span> 支付宝
+            </button>
+            <button type="button" id="site-epay-type-wxpay" class="epay-channel-btn active" data-type="wxpay">
+              <span class="channel-icon" style="background:#07c160;">微</span> 微信支付
+            </button>
+          </div>
+          <input type="hidden" id="site-epay-type" value="alipay,wxpay">
+        </div>
         <label class="span2">API 地址<input id="site-epay-base" type="url" placeholder="https://pay.example.com"></label>
         <label>商户 ID（PID）<input id="site-epay-pid" autocomplete="off"></label>
         <label>商户密钥（PKey）<input id="site-epay-pkey" type="password" autocomplete="new-password" placeholder="留空保留已保存值"></label>
@@ -4634,10 +4670,35 @@ function loadUsers() {
   }).catch(function (error) { say(error.message, false); });
 }
 
+function getSelectedEpayTypes() {
+  var aliBtn = field("site-epay-type-alipay");
+  var wxBtn = field("site-epay-type-wxpay");
+  var alipay = aliBtn ? aliBtn.classList.contains("active") : false;
+  var wxpay = wxBtn ? wxBtn.classList.contains("active") : false;
+  if (alipay && wxpay) { return "alipay,wxpay"; }
+  if (alipay) { return "alipay"; }
+  if (wxpay) { return "wxpay"; }
+  return "";
+}
+
+function setEpayChannelState(val, enabled) {
+  var str = (val || "").toLowerCase();
+  var isAlipay = str.indexOf("alipay") !== -1 || str === "both" || str === "all";
+  var isWxpay = str.indexOf("wxpay") !== -1 || str === "both" || str === "all";
+  if (enabled && !isAlipay && !isWxpay) { isAlipay = true; }
+  var btnAli = field("site-epay-type-alipay");
+  var btnWx = field("site-epay-type-wxpay");
+  if (btnAli) { btnAli.classList.toggle("active", isAlipay); }
+  if (btnWx) { btnWx.classList.toggle("active", isWxpay); }
+  var typeField = field("site-epay-type");
+  if (typeField) { typeField.value = getSelectedEpayTypes(); }
+}
+
 function loadPayments() {
   api("/admin/api/payments/overview").then(function (data) {
     csrf = data.csrf_token || csrf;
     field("site-paywall").checked = data.settings.paywall_enabled === "true";
+    field("site-contact-email").value = data.settings.contact_email || "";
     field("site-monthly").value = centsToYuan(data.settings.monthly_list_price_cents);
     field("site-yearly").value = centsToYuan(data.settings.yearly_list_price_cents);
     field("site-monthly-sale").value = centsToYuan(data.settings.monthly_price_cents);
@@ -4647,7 +4708,7 @@ function loadPayments() {
     field("site-epay-base").value = data.payment.api_base || "";
     field("site-epay-pid").value = data.payment.pid || "";
     field("site-epay-pkey").value = "";
-    field("site-epay-type").value = data.payment.payment_type || "alipay";
+    setEpayChannelState(data.payment.payment_type || "", data.payment.enabled);
     field("site-epay-ttl").value = data.payment.order_ttl_seconds;
     field("site-epay-hold").value = data.payment.amount_hold_seconds;
     field("site-epay-pkey-status").textContent = data.payment.pkey_set ? "PKey 已保存" : "PKey 尚未保存";
@@ -4775,6 +4836,7 @@ field("site-settings-save").addEventListener("click", function () {
   var action = field("site-settings-save"); setBusy(action, true);
   api("/admin/api/site/settings", {
     paywall_enabled: field("site-paywall").checked,
+    contact_email: field("site-contact-email").value.trim(),
     monthly_list_price_cents: monthlyListPriceCents,
     yearly_list_price_cents: yearlyListPriceCents,
     monthly_price_cents: monthlyPriceCents,
@@ -4782,6 +4844,46 @@ field("site-settings-save").addEventListener("click", function () {
   }).then(function () { say("付费设置已保存。", true); loadPayments(); })
     .catch(function (error) { say(error.message, false); })
     .finally(function () { setBusy(action, false); });
+});
+var epayAliBtn = field("site-epay-type-alipay");
+var epayWxBtn = field("site-epay-type-wxpay");
+if (epayAliBtn) {
+  epayAliBtn.addEventListener("click", function () {
+    var isEnabled = field("site-epay-enabled").checked;
+    var willBeActive = !epayAliBtn.classList.contains("active");
+    var isWxActive = epayWxBtn ? epayWxBtn.classList.contains("active") : false;
+    if (isEnabled && !willBeActive && !isWxActive) {
+      say("启用在线支付时，至少需要保留一种已选支付通道。", false);
+      return;
+    }
+    epayAliBtn.classList.toggle("active", willBeActive);
+    field("site-epay-type").value = getSelectedEpayTypes();
+  });
+}
+if (epayWxBtn) {
+  epayWxBtn.addEventListener("click", function () {
+    var isEnabled = field("site-epay-enabled").checked;
+    var willBeActive = !epayWxBtn.classList.contains("active");
+    var isAliActive = epayAliBtn ? epayAliBtn.classList.contains("active") : false;
+    if (isEnabled && !willBeActive && !isAliActive) {
+      say("启用在线支付时，至少需要保留一种已选支付通道。", false);
+      return;
+    }
+    epayWxBtn.classList.toggle("active", willBeActive);
+    field("site-epay-type").value = getSelectedEpayTypes();
+  });
+}
+field("site-epay-enabled").addEventListener("change", function () {
+  var isEnabled = field("site-epay-enabled").checked;
+  if (isEnabled) {
+    var aliActive = epayAliBtn ? epayAliBtn.classList.contains("active") : false;
+    var wxActive = epayWxBtn ? epayWxBtn.classList.contains("active") : false;
+    if (!aliActive && !wxActive) {
+      if (epayAliBtn) { epayAliBtn.classList.add("active"); }
+      if (epayWxBtn) { epayWxBtn.classList.add("active"); }
+      field("site-epay-type").value = getSelectedEpayTypes();
+    }
+  }
 });
 field("site-epay-save").addEventListener("click", function () {
   var action = field("site-epay-save"); setBusy(action, true);

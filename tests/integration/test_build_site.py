@@ -9,7 +9,7 @@ from news_digest.config import BuildConfig
 from news_digest.pipeline import build_site
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "demo"
-RUNTIME_ROUTES = frozenset({"/admin/", "/account", "/subscribe"})
+RUNTIME_ROUTES = frozenset({"/admin/", "/account", "/subscribe", "/contact"})
 
 
 @pytest.fixture(scope="module")

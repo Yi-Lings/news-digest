@@ -60,6 +60,8 @@ _LOGIN_DUMMY_PASSWORD_HASH = (
 def _payment_order_creation_retryable(order: db.Order, now: dt.datetime) -> bool:
     if order.payment_url is not None:
         return False
+    if order.last_error_code == "USER_CANCELLED":
+        return False
     if order.settlement_expires_at is None or order.settlement_expires_at <= now.isoformat():
         return False
     if order.status not in {"pending", "expired", "failed"}:
@@ -238,7 +240,7 @@ def _manifest(site_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, modal: str = "") -> str:
     return (
         "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -299,54 +301,46 @@ def _page(title: str, body: str) -> str:
         "border-color:var(--red)}.plan-cta.is-disabled,.plan-card.is-featured "
         ".plan-cta.is-disabled{background:#777;border-color:#777;cursor:not-allowed}"
         ".pay-modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;"
-        "background:rgba(0,0,0,.48);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);"
-        "z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem;"
-        "box-sizing:border-box}"
-        ".pay-modal-card{background:#fff;border-radius:12px;border:1px solid rgba(0,0,0,.08);"
-        "box-shadow:0 20px 35px -10px rgba(0,0,0,.3),0 0 0 1px rgba(0,0,0,.05);width:92%;"
-        "max-width:420px;position:relative;box-sizing:border-box;"
-        "animation:bmPop .2s cubic-bezier(.16,1,.3,1) forwards}"
-        "@keyframes bmPop{from{opacity:0;transform:scale(.94) translateY(6px)}"
+        "background:rgba(28,27,23,.68);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"
+        "z-index:999999;display:flex;align-items:center;justify-content:center;padding:1rem;"
+        "overflow:hidden;box-sizing:border-box;margin:0}"
+        ".pay-modal-card{background:var(--sheet);border:2px solid var(--ink);"
+        "box-shadow:0 16px 40px rgba(0,0,0,.35),4px 4px 0 var(--ink);border-radius:6px;"
+        "width:100%;max-width:390px;margin:auto;box-sizing:border-box;"
+        "animation:modalPop .18s cubic-bezier(.16,1,.3,1) forwards}"
+        "@keyframes modalPop{from{opacity:0;transform:scale(.95) translateY(8px)}"
         "to{opacity:1;transform:scale(1) translateY(0)}}"
         ".pay-modal-head{display:flex;align-items:center;justify-content:space-between;"
-        "padding:1.15rem 1.25rem .75rem;background:transparent}"
-        ".pay-modal-title{margin:0;font-size:1.18rem;font-weight:700;color:#1f2937}"
-        ".pay-modal-close{background:transparent;border:none;font-size:1.25rem;font-weight:700;"
-        "color:#9ca3af;cursor:pointer;padding:.2rem;line-height:1;border-radius:6px;width:28px;"
-        "height:28px;display:flex;align-items:center;justify-content:center;"
+        "padding:.75rem 1rem;border-bottom:1.5px solid var(--rule);background:var(--paper)}"
+        ".pay-modal-title{margin:0;font-size:1.1rem;color:var(--ink);font-weight:700}"
+        ".pay-modal-close{background:transparent;border:none;font-size:1.2rem;font-weight:700;"
+        "color:var(--muted);cursor:pointer;padding:.2rem .45rem;line-height:1;border-radius:3px;"
         "transition:all .15s ease}"
         ".pay-modal-close:hover{color:#fff;background:var(--red)}"
-        ".pay-modal-body{padding:0 1.25rem 1.25rem;box-sizing:border-box}"
-        ".pay-modal-breakdown{background:#f9fafb;border:1px solid #f3f4f6;border-radius:8px;"
-        "padding:.85rem 1rem;margin:0 0 1rem;display:flex;flex-direction:column;gap:.45rem}"
-        ".pay-breakdown-row{display:flex;align-items:center;justify-content:space-between;"
-        "font-size:.88rem}"
-        ".pay-row-label{color:#6b7280;font-size:.85rem}"
-        ".pay-row-val.val-original{color:#9ca3af;text-decoration:line-through;font-size:.85rem}"
-        ".pay-discount-pill{color:#ef4444;background:#fef2f2;font-size:.78rem;font-weight:700;"
-        "padding:.12rem .45rem;border-radius:4px;border:1px solid #fee2e2}"
-        ".pay-row-total{border-top:1px dashed #e5e7eb;padding-top:.55rem;margin-top:.15rem}"
-        ".pay-row-total .pay-row-label{font-weight:700;color:#1f2937;font-size:.92rem}"
-        ".pay-row-val.val-total{font-size:1.45rem;color:#dc2626;font-family:Arial,sans-serif;"
-        "font-weight:800}"
-        ".pay-modal-tip{font-size:.8rem;color:#6b7280;margin:0 0 .75rem;line-height:1.4}"
+        ".pay-modal-body{padding:1rem;box-sizing:border-box}"
+        ".pay-modal-plan-info{display:flex;align-items:baseline;justify-content:space-between;"
+        "padding:.55rem .85rem;background:var(--paper);border:1.5px solid var(--rule);"
+        "border-radius:4px;margin-bottom:.75rem}"
+        ".pay-modal-plan-name{font-weight:700;font-size:.98rem;color:var(--ink)}"
+        ".pay-modal-plan-price{font-weight:700;font-size:1.35rem;color:var(--red);"
+        "font-family:Arial,sans-serif}"
+        ".pay-modal-tip{font-size:.82rem;color:var(--muted);margin:0 0 .75rem;line-height:1.4}"
         ".pay-modal-options{display:flex;flex-direction:column;gap:.65rem}"
         ".pay-channel-btn{display:flex;align-items:center;gap:.85rem;width:100%;"
-        "padding:.75rem 1rem;background:#fff;border:1.5px solid #e5e7eb;border-radius:8px;"
-        "cursor:pointer;text-align:left;transition:all .15s ease;box-sizing:border-box}"
-        ".pay-channel-btn:hover{border-color:#1f2937;background:#fafafa;transform:translateY(-1px);"
-        "box-shadow:0 4px 12px rgba(0,0,0,.08)}"
-        ".pay-icon-lg{display:inline-flex;align-items:center;justify-content:center;width:2.2rem;"
-        "height:2.2rem;border-radius:50%;font-size:1.05rem;font-weight:900;color:#fff;flex-shrink:0}"
+        "padding:.75rem .95rem;background:var(--paper);border:1.5px solid var(--rule);"
+        "border-radius:4px;cursor:pointer;text-align:left;transition:all .15s ease;"
+        "box-sizing:border-box}"
+        ".pay-channel-btn:hover{border-color:var(--ink);background:#fff;"
+        "transform:translateY(-1px);box-shadow:2px 2px 0 var(--ink)}"
+        ".pay-icon-lg{display:inline-flex;align-items:center;justify-content:center;width:2.1rem;"
+        "height:2.1rem;border-radius:50%;font-size:1.05rem;font-weight:900;color:#fff;flex-shrink:0}"
         ".pay-icon-alipay{background:#1677ff}.pay-icon-wxpay{background:#07c160}"
         ".pay-channel-text{flex:1;min-width:0;display:flex;flex-direction:column}"
-        ".pay-channel-text strong{font-size:.95rem;color:#1f2937}"
-        ".pay-channel-text small{font-size:.75rem;color:#6b7280;margin-top:.05rem}"
-        ".pay-channel-arrow{font-size:1.1rem;font-weight:700;color:#9ca3af;"
+        ".pay-channel-text strong{font-size:.95rem;color:var(--ink)}"
+        ".pay-channel-text small{font-size:.75rem;color:var(--muted);margin-top:.05rem}"
+        ".pay-channel-arrow{font-size:1.1rem;font-weight:700;color:var(--muted);"
         "transition:transform .15s ease}"
-        ".pay-channel-btn:hover .pay-channel-arrow{color:#1f2937;transform:translateX(3px)}"
-        ".pay-modal-foot-tip{margin-top:.9rem;text-align:center;font-size:.75rem;color:#9ca3af;"
-        "display:flex;align-items:center;justify-content:center;gap:.3rem}"
+        ".pay-channel-btn:hover .pay-channel-arrow{color:var(--ink);transform:translateX(3px)}"
         ".plan-benefits{list-style:none;padding:0;margin:1rem 0 0}"
         ".plan-benefits li{position:relative;padding:.35rem 0 .35rem 1.35rem;color:var(--muted)}"
         ".plan-benefits li::before{content:'✓';position:absolute;left:0;color:var(--green);"
@@ -371,11 +365,81 @@ def _page(title: str, body: str) -> str:
         ".order-list li:last-child{border-bottom:0}"
         ".order-meta{min-width:0}.order-number{display:block;font:600 .82rem/1.4 "
         "Arial,sans-serif;overflow-wrap:anywhere}.order-plan{color:var(--muted);font-size:.88rem}"
+        ".order-actions{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}"
         ".order-action{display:inline;margin:0;padding:0;border:0;background:transparent}"
-        ".order-action button{margin:0}.order-state{font:700 .82rem/1.4 Arial,sans-serif;"
+        ".order-action button{margin:0}"
+        ".order-pay-btn{display:inline-block;background:#b35c00!important;color:#fff!important;"
+        "border:1px solid #994e00!important;font:700 .8rem Arial,sans-serif!important;"
+        "padding:.24rem .6rem!important;border-radius:3px;cursor:pointer;line-height:1.3;"
+        "text-decoration:none!important;transition:all .15s ease;white-space:nowrap}"
+        ".order-pay-btn:hover{background:#944800!important;border-color:#7a3b00!important;"
+        "color:#fff!important;transform:translateY(-1px)}"
+        ".order-cancel-btn{background:transparent!important;color:var(--muted)!important;"
+        "border:1px solid var(--rule)!important;font-size:.8rem!important;"
+        "padding:.24rem .55rem!important;border-radius:3px;cursor:pointer;line-height:1.3;"
+        "transition:all .15s ease}.order-cancel-btn:hover{background:var(--red)!important;"
+        "color:#fff!important;border-color:var(--red)!important}"
+        ".order-state{font:700 .82rem/1.4 Arial,sans-serif;"
         "white-space:nowrap}.order-state.state-paid{color:var(--green)}"
         ".order-state.state-pending{color:#b35c00}"
         ".order-state.state-expired,.order-state.state-failed{color:var(--muted)}"
+        ".contact-card{background:var(--sheet);border:1.5px solid var(--rule);border-radius:6px;"
+        "padding:1.6rem;margin-top:1rem;box-shadow:0 1px 4px rgba(0,0,0,.04)}"
+        ".contact-card h2{margin-top:0}.contact-email-box{background:var(--paper);"
+        "border:1px solid var(--rule);border-radius:4px;padding:.85rem 1.1rem;margin:1rem 0;"
+        "display:inline-block}.contact-email-link{font:700 1.05rem Arial,sans-serif;"
+        "color:var(--ink);text-decoration:none}.contact-email-link:hover{color:var(--red);"
+        "text-decoration:underline}"
+        ".terms-row{display:flex;align-items:center;gap:.55rem;margin:1rem 0;"
+        "padding:.65rem .85rem;background:var(--paper);border:1.5px solid var(--rule);"
+        "border-radius:4px;cursor:pointer;user-select:none;transition:all .15s ease}"
+        ".terms-row:hover{border-color:var(--ink);background:#fff}"
+        ".terms-row input[type=\"checkbox\"]{width:1.05rem!important;height:1.05rem!important;"
+        "margin:0!important;cursor:pointer;pointer-events:none;accent-color:var(--ink)}"
+        ".terms-text{font-size:.84rem;color:var(--ink);flex:1}"
+        ".terms-link-text{color:var(--red);font-weight:700;text-decoration:underline}"
+        ".terms-badge{font:700 .72rem/1.2 Arial,sans-serif;padding:.2rem .45rem;"
+        "border-radius:3px;background:var(--rule);color:var(--muted);white-space:nowrap;"
+        "transition:all .15s ease}"
+        ".terms-badge.is-agreed{background:rgba(46,125,50,.15);color:var(--green);"
+        "border:1px solid rgba(46,125,50,.35)}"
+        ".pay-modal-card.privacy-card{max-width:540px;padding:0}"
+        ".privacy-modal-header{padding:.9rem 1.25rem .75rem;border-bottom:1.5px solid var(--rule);"
+        "background:var(--paper);display:flex;align-items:flex-start;justify-content:space-between}"
+        ".privacy-kicker{font:700 .7rem Arial,sans-serif;color:var(--red);text-transform:uppercase;"
+        "letter-spacing:.08em;margin:0 0 .2rem}"
+        ".privacy-card-title{font-family:Georgia,serif;font-size:1.25rem;margin:0;color:var(--ink);"
+        "line-height:1.3}"
+        ".privacy-content-scroll{max-height:300px;overflow-y:auto;-webkit-overflow-scrolling:touch;"
+        "padding:1rem 1.35rem;background:#fdfbf7;font-size:.86rem;line-height:1.65;"
+        "color:var(--ink);border-bottom:1.5px solid var(--rule)}"
+        ".privacy-content-scroll::-webkit-scrollbar{width:6px}"
+        ".privacy-content-scroll::-webkit-scrollbar-track{background:var(--paper)}"
+        ".privacy-content-scroll::-webkit-scrollbar-thumb{background:var(--rule);border-radius:3px}"
+        ".privacy-content-scroll::-webkit-scrollbar-thumb:hover{background:var(--muted)}"
+        ".privacy-clause{margin-bottom:1.1rem}"
+        ".privacy-clause h4{font-family:Georgia,serif;font-size:.92rem;font-weight:700;"
+        "color:var(--ink);margin:0 0 .35rem}"
+        ".privacy-clause p{margin:0 0 .45rem;color:var(--ink)}"
+        ".privacy-modal-foot{padding:.85rem 1.25rem 1rem;background:var(--paper);"
+        "display:flex;flex-direction:column;gap:.65rem}"
+        ".privacy-read-tip{font:600 .78rem/1.3 Arial,sans-serif;color:var(--muted);"
+        "text-align:center;margin:0}.privacy-read-tip b{color:var(--red)}"
+        ".privacy-foot-actions{display:flex;gap:.65rem;justify-content:flex-end}"
+        ".privacy-btn-agree{padding:.48rem 1.2rem!important;"
+        "font:700 .88rem Arial,sans-serif!important;"
+        "background:var(--ink)!important;color:#fff!important;"
+        "border:1px solid var(--ink)!important;border-radius:3px!important;"
+        "cursor:pointer!important;width:auto!important;transition:all .15s ease!important}"
+        ".privacy-btn-agree:hover:not(:disabled){background:var(--red)!important;"
+        "border-color:var(--red)!important}"
+        ".privacy-btn-agree:disabled{opacity:.45!important;cursor:not-allowed!important;"
+        "background:#777!important;border-color:#777!important}"
+        ".privacy-btn-cancel{padding:.48rem .95rem!important;"
+        "font:600 .86rem Arial,sans-serif!important;background:transparent!important;"
+        "color:var(--muted)!important;border:1px solid var(--rule)!important;"
+        "border-radius:3px!important;cursor:pointer!important;width:auto!important}"
+        ".privacy-btn-cancel:hover{background:var(--rule)!important;color:var(--ink)!important}"
         ".site-foot{border-top:1px solid var(--rule);padding:1rem 1.25rem 2rem;"
         "text-align:center;color:var(--muted);font-size:.82rem}"
         "@keyframes page-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;"
@@ -383,7 +447,8 @@ def _page(title: str, body: str) -> str:
         ".wrap{padding:1.7rem 1rem 3rem}form{padding:.85rem}input,select,textarea,button{"
         "width:100%}.plans-grid{grid-template-columns:1fr}.plan-summary{min-height:0}"
         ".pay-methods{flex-direction:column;align-items:stretch}.pay-method-badge{justify-content:center}"
-        ".order-list li{grid-template-columns:1fr}.order-action,.order-action button{width:100%}"
+        ".order-list li{grid-template-columns:1fr}"
+        ".order-actions,.order-action,.order-action button{width:100%}"
         ".captcha-row input{width:100%}.site-nav{display:grid;"
         "grid-template-columns:repeat(2,minmax(0,1fr));"
         "gap:.45rem .8rem}}"
@@ -402,11 +467,13 @@ def _page(title: str, body: str) -> str:
         "<a class=\"brand\" href=\"/\">Cheapcoding News</a>"
         "<nav class=\"site-nav\" aria-label=\"会员导航\"><a href=\"/\">今日</a>"
         "<a href=\"/archive/\">往期归档</a><a href=\"/subscribe\">会员订阅</a>"
-        f"<a href=\"/account\">我的账户</a>{_ADMIN_NAV_MARKER}</nav></header>"
+        "<a href=\"/account\">我的账户</a><a href=\"/contact\">联系我们</a>"
+        f"{_ADMIN_NAV_MARKER}</nav></header>"
         "<main class=\"wrap\"><p class=\"desk-label\">Reader desk</p>"
         f"<h1>{html.escape(title)}</h1>{body}"
         "<p class=\"muted\"><a href=\"/\">返回首页</a></p></main>"
         "<footer class=\"site-foot\">Cheapcoding News · 每日双语新闻</footer>"
+        f"{modal}"
         "<button type=\"button\" class=\"back-to-top\" id=\"back-to-top\" title=\"回到顶部\" "
         "aria-label=\"回到顶部\"><svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" "
         "aria-hidden=\"true\" focusable=\"false\" fill=\"none\" stroke=\"currentColor\" "
@@ -464,21 +531,10 @@ def _plan_card_html(
     elif csrf_token is None:
         action = f"<a class=\"plan-cta\" href=\"{target}\">立即订阅</a>"
     else:
-        orig_attr = (
-            f" data-plan-original=\"¥{accounts.format_cents(base)}\""
-            if discount
-            else ""
-        )
-        disc_attr = (
-            f" data-plan-discount=\"-{discount_label}%\""
-            if discount
-            else ""
-        )
         action = (
             f"<button type=\"button\" class=\"plan-cta plan-subscribe-btn\" "
             f"data-plan=\"{plan}\" data-plan-name=\"{html.escape(label)}\" "
-            f"data-plan-price=\"¥{accounts.format_cents(current)}\""
-            f"{orig_attr}{disc_attr}>立即订阅</button>"
+            f"data-plan-price=\"¥{accounts.format_cents(current)}\">立即订阅</button>"
         )
     return (
         f"<article class=\"plan-card{' is-featured' if featured else ''}\">"
@@ -685,7 +741,18 @@ class SiteHandler(BaseHTTPRequestHandler):
         if origin == "null":
             return self.server.local_origin and self.server.loopback_browser_compat
         try:
-            return _origin_identity(origin) == self.server.expected_origin
+            matched = _origin_identity(origin) == self.server.expected_origin
+            if matched:
+                return True
+            if self.server.local_origin:
+                origin_ident = _origin_identity(origin)
+                if origin_ident is not None:
+                    return (
+                        origin_ident[0] == "http"
+                        and origin_ident[1] in {"127.0.0.1", "localhost"}
+                        and origin_ident[2] == self.server.server_address[1]
+                    )
+            return False
         except ValueError:
             return False
 
@@ -695,7 +762,12 @@ class SiteHandler(BaseHTTPRequestHandler):
             return False
         host = values[0]
         if self.server.local_origin:
-            return host == f"127.0.0.1:{self.server.server_address[1]}"
+            return host in {
+                f"127.0.0.1:{self.server.server_address[1]}",
+                f"localhost:{self.server.server_address[1]}",
+                "127.0.0.1",
+                "localhost",
+            }
         return _host_identity(host, self.server.scheme) == self.server.expected_origin
 
     # -- 视图辅助 ------------------------------------------------------------
@@ -787,6 +859,9 @@ class SiteHandler(BaseHTTPRequestHandler):
                 redeemed = parse_qs(parsed.query).get("redeemed") == ["1"]
                 self._render_subscribe(redeemed=redeemed)
                 return
+            if path in {"/contact", "/contact/"}:
+                self._render_contact()
+                return
             if path == "/payment/return":
                 fields = {
                     key: values[0]
@@ -823,6 +898,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             "/reset": self._handle_reset,
             "/logout": self._handle_logout,
             "/order": self._handle_order,
+            "/order-cancel": self._handle_order_cancel,
             "/redeem": self._handle_redeem,
             "/free-read": self._handle_free_read,
             "/newsletter": self._handle_newsletter,
@@ -1096,9 +1172,67 @@ class SiteHandler(BaseHTTPRequestHandler):
             )
         else:
             captcha_id, captcha_image = self._new_captcha()
+            privacy_modal_html = (
+                "<div class=\"pay-modal-overlay\" id=\"privacy-modal\" style=\"display:none;\" "
+                "aria-hidden=\"true\">"
+                "<div class=\"pay-modal-card privacy-card\" role=\"dialog\" "
+                "aria-modal=\"true\" aria-labelledby=\"privacy-modal-title\">"
+                "<div class=\"privacy-modal-header\">"
+                "<div>"
+                "<p class=\"privacy-kicker\">Terms &amp; Privacy Policy</p>"
+                "<h3 class=\"privacy-card-title\" id=\"privacy-modal-title\">"
+                "用户协议与隐私保护条款</h3>"
+                "</div>"
+                "<button type=\"button\" class=\"pay-modal-close\" id=\"privacy-modal-close\" "
+                "aria-label=\"关闭\">&times;</button>"
+                "</div>"
+                "<div class=\"privacy-content-scroll\" id=\"privacy-modal-body\">"
+                "<div class=\"privacy-clause\">"
+                "<h4>一、服务宗旨与协议范围</h4>"
+                "<p>Cheapcoding News 致力于为读者提供高品质的英语学习与中英双语新闻阅读服务。"
+                "本协议系您与本站关于账号注册、使用及相关付费订阅服务所订立的有效契约。</p>"
+                "</div>"
+                "<div class=\"privacy-clause\">"
+                "<h4>二、账号注册与安全责任</h4>"
+                "<p>用户注册须提供真实、有效且属于本人的电子邮箱地址。"
+                "该邮箱将作为接收验证码、找回密码、简报投递及会员权益绑定的唯一凭据。</p>"
+                "<p>用户应当妥善保管账号密码，因个人保管不善导致的账号安全风险由用户自行负责。</p>"
+                "</div>"
+                "<div class=\"privacy-clause\">"
+                "<h4>三、隐私保护与数据收集最小化</h4>"
+                "<p>我们严格遵循「数据最小化」隐私保护原则。本站仅收集注册与订阅必需的邮箱、不可逆密码哈希、"
+                "支付订单流水号及每日简报启用状态，绝不采集身份证、手机号、地理位置等与新闻阅读无关的个人隐私信息。</p>"
+                "<p>我们郑重承诺：绝不向任何第三方出售、转让或出租您的个人信息。</p>"
+                "</div>"
+                "<div class=\"privacy-clause\">"
+                "<h4>四、Cookie 与纯净阅读</h4>"
+                "<p>本站仅在必要时使用轻量安全会话 Cookie 用于保持登录与门控状态，"
+                "绝不引入第三方跨站广告追踪 SDK，全力保障读者纯净专注的阅读体验。</p>"
+                "</div>"
+                "<div class=\"privacy-clause\">"
+                "<h4>五、会员订阅与工单支持</h4>"
+                "<p>付费会员享有全站主文章及往期历史归档无限制阅读权益，以及每日早间双语邮件期刊。"
+                "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号，我们将在收到工单后第一时间为您跟进处理。</p>"
+                "</div>"
+                "<div class=\"privacy-clause\">"
+                "<h4>六、协议生效</h4>"
+                "<p>当您向下完整阅读本条款并点击「我已阅读并同意条款」后，"
+                "即视为您已充分阅读、完全理解并自愿受本条款所有内容的约束。</p>"
+                "</div>"
+                "</div>"
+                "<div class=\"privacy-modal-foot\">"
+                "<p class=\"privacy-read-tip\" id=\"privacy-scroll-tip\">"
+                "📜 请向下滚动通读条款全文（已读 <b id=\"privacy-read-percent\">0%</b>）</p>"
+                "<div class=\"privacy-foot-actions\">"
+                "<button type=\"button\" id=\"privacy-agree-btn\" "
+                "class=\"privacy-btn-agree\" disabled>🔒 请先通读条款全文</button>"
+                "<button type=\"button\" id=\"privacy-close-btn\" "
+                "class=\"privacy-btn-cancel\">暂不同意</button>"
+                "</div></div></div></div>"
+            )
             body = (
                 f"{message_html}<h2>注册新账号</h2>"
-                f"<form method=\"post\" action=\"/register\">{csrf}"
+                f"<form method=\"post\" action=\"/register\" id=\"register-form\">{csrf}"
                 f"<label class=\"field\"><span>邮箱</span><input type=\"email\" "
                 f"name=\"email\" value=\"{html.escape(email)}\" "
                 "autocomplete=\"email\" required></label>"
@@ -1117,11 +1251,19 @@ class SiteHandler(BaseHTTPRequestHandler):
                 "placeholder=\"输入图中字符\" required></div>"
                 "<input name=\"website\" tabindex=\"-1\" autocomplete=\"off\" "
                 "aria-hidden=\"true\" style=\"position:absolute;left:-9999px\">"
-                "<button type=\"submit\">获取邮箱验证码</button></form>"
+                "<div class=\"terms-row\" id=\"terms-row-trigger\" role=\"button\" tabindex=\"0\">"
+                "<input type=\"checkbox\" name=\"agree_terms\" id=\"agree-terms\" "
+                "value=\"1\" required tabindex=\"-1\">"
+                "<span class=\"terms-text\">我已阅读并同意 <span class=\"terms-link-text\">"
+                "《用户协议与隐私条款》</span></span>"
+                "<span class=\"terms-badge\" id=\"terms-badge\">点击阅读</span>"
+                "</div>"
+                "<button type=\"submit\" id=\"register-submit-btn\">获取邮箱验证码</button></form>"
                 "<p class=\"muted\">完成图形验证后，系统会向邮箱发送 6 位验证码。</p>"
             )
-        body += "<p><a href=\"/login\">已有账号，返回登录</a></p>"
-        self._html(200, _page("注册", body), self._flush_cookie([]))
+            body += "<p><a href=\"/login\">已有账号，返回登录</a></p>"
+            self._html(200, _page("注册", body, modal=privacy_modal_html), self._flush_cookie([]))
+            return
 
     def _render_forgot(self, message: str = "", email: str = "") -> None:
         token, _cookie = self._csrf_pair()
@@ -1230,38 +1372,55 @@ class SiteHandler(BaseHTTPRequestHandler):
             "approved": "已开通",
             "rejected": "已过期 / 已取消",
         }
+        channel_labels = {
+            "alipay": "支付宝支付",
+            "wxpay": "微信支付",
+        }
         order_items = []
         for order in orders:
-            action = (
-                f"<span class=\"order-state state-{order.status}\">"
-                f"{status_labels.get(order.status, '状态未知')}</span>"
+            cancel_form = (
+                "<form class=\"order-action\" method=\"post\" action=\"/order-cancel\">"
+                f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
+                f"<input type=\"hidden\" name=\"order_id\" value=\"{order.id}\">"
+                "<button type=\"submit\" class=\"order-cancel-btn\">取消订单</button></form>"
             )
             if order.status == "pending" and order.payment_url:
-                action = (
-                    f"<a class=\"order-state state-pending\" href=\""
+                pay_link = (
+                    f"<a class=\"order-pay-btn\" href=\""
                     f"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
                 )
-            elif _payment_order_creation_retryable(order, now):
+                action = f"<div class=\"order-actions\">{pay_link}{cancel_form}</div>"
+            elif order.status in {"pending", "failed"} and _payment_order_creation_retryable(
+                order, now
+            ):
                 pay_type_input = (
                     f"<input type=\"hidden\" name=\"payment_type\" "
                     f"value=\"{html.escape(order.payment_type)}\">"
                     if order.payment_type
                     else ""
                 )
-                action = (
+                pay_form = (
                     "<form class=\"order-action\" method=\"post\" action=\"/order\">"
                     f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
                     f"<input type=\"hidden\" name=\"plan\" value=\"{order.plan}\">"
                     f"{pay_type_input}"
-                    "<button type=\"submit\">继续支付</button></form>"
+                    "<button type=\"submit\" class=\"order-pay-btn\">继续支付</button></form>"
+                )
+                action = f"<div class=\"order-actions\">{pay_form}{cancel_form}</div>"
+            else:
+                action = (
+                    f"<span class=\"order-state state-{order.status}\">"
+                    f"{status_labels.get(order.status, '状态未知')}</span>"
                 )
             order_number = order.merchant_order_no or f"#{order.id}"
             amount_str = f" · ¥{(order.amount_cents / 100):.2f}" if order.amount_cents else ""
+            channel = channel_labels.get(order.payment_type or "")
+            channel_str = f" · {channel}" if channel else ""
             plan_str = plan_labels.get(order.plan, order.plan)
             order_items.append(
                 "<li><span class=\"order-meta\"><span class=\"order-number\">"
                 f"订单编号 {html.escape(order_number)}</span>"
-                f"<span class=\"order-plan\">{plan_str}{amount_str}</span>"
+                f"<span class=\"order-plan\">{plan_str}{amount_str}{channel_str}</span>"
                 f"</span>{action}</li>"
             )
         order_rows = "".join(order_items) or "<li class=\"muted\">暂无订单</li>"
@@ -1346,7 +1505,8 @@ class SiteHandler(BaseHTTPRequestHandler):
         if session is None:
             membership_help = (
                 "<p><a href=\"/register\">注册</a>或<a href=\"/login\">登录</a>后，"
-                "选择会员方案并前往支付。在线支付成功后自动开通，无需人工审核。</p>"
+                "选择会员方案并前往支付。支付成功后立即自动开通会员，如遇支付问题，"
+                "请联系我们提交工单。<a href=\"/contact\" class=\"action-link\">联系我们</a></p>"
             )
             redeem_html = (
                 "<h2>卡密兑换</h2>"
@@ -1367,7 +1527,8 @@ class SiteHandler(BaseHTTPRequestHandler):
             else:
                 membership_help = (
                     "<p>点击会员方案将直接前往安全支付收银台；支付成功后立即自动开通会员，"
-                    "无需人工审核。</p>"
+                    "如遇支付问题，请联系我们提交工单。"
+                    "<a href=\"/contact\" class=\"action-link\">联系我们</a></p>"
                 )
             redeem_html = (
                 "<h2>卡密兑换</h2>"
@@ -1397,50 +1558,46 @@ class SiteHandler(BaseHTTPRequestHandler):
                 )
         pay_modal_html = ""
         if plan_csrf is not None:
+            buttons_html = []
+            if payment_config is not None and payment_config.allows_alipay:
+                buttons_html.append(
+                    "<button type=\"submit\" name=\"payment_type\" value=\"alipay\" "
+                    "class=\"pay-channel-btn pay-channel-alipay\">"
+                    "<span class=\"pay-icon-lg pay-icon-alipay\">支</span>"
+                    "<span class=\"pay-channel-text\"><strong>支付宝支付</strong>"
+                    "<small>支持支付宝 App 扫码</small></span>"
+                    "<span class=\"pay-channel-arrow\">→</span></button>"
+                )
+            if payment_config is not None and payment_config.allows_wxpay:
+                buttons_html.append(
+                    "<button type=\"submit\" name=\"payment_type\" value=\"wxpay\" "
+                    "class=\"pay-channel-btn pay-channel-wxpay\">"
+                    "<span class=\"pay-icon-lg pay-icon-wxpay\">微</span>"
+                    "<span class=\"pay-channel-text\"><strong>微信支付</strong>"
+                    "<small>支持微信 App 扫码</small></span>"
+                    "<span class=\"pay-channel-arrow\">→</span></button>"
+                )
+            options_content = "".join(buttons_html)
             pay_modal_html = (
                 "<div id=\"pay-modal\" class=\"pay-modal-overlay\" style=\"display:none;\" "
                 "aria-hidden=\"true\">"
                 "<div class=\"pay-modal-card\" role=\"dialog\" aria-modal=\"true\" "
                 "aria-labelledby=\"pay-modal-title\">"
                 "<div class=\"pay-modal-head\">"
-                "<h3 id=\"pay-modal-title\" class=\"pay-modal-title\">会员订阅</h3>"
+                "<h3 id=\"pay-modal-title\" class=\"pay-modal-title\">选择支付方式</h3>"
                 "<button type=\"button\" class=\"pay-modal-close\" id=\"pay-modal-close\" "
                 "aria-label=\"关闭\">✕</button></div>"
                 "<div class=\"pay-modal-body\">"
-                "<div class=\"pay-modal-breakdown\">"
-                "<div class=\"pay-breakdown-row\" id=\"pay-row-original\" style=\"display:none;\">"
-                "<span class=\"pay-row-label\">套餐原价</span>"
-                "<span class=\"pay-row-val val-original\" id=\"pay-modal-original\"></span></div>"
-                "<div class=\"pay-breakdown-row\" id=\"pay-row-discount\" style=\"display:none;\">"
-                "<span class=\"pay-row-label\">优惠活动</span>"
-                "<span class=\"pay-discount-pill\" id=\"pay-modal-discount\">限时特惠</span></div>"
-                "<div class=\"pay-breakdown-row pay-row-total\">"
-                "<span class=\"pay-row-label\">实付金额</span>"
-                "<strong class=\"pay-row-val val-total\" "
-                "id=\"pay-modal-plan-price\"></strong></div>"
-                "</div>"
-                "<p class=\"pay-modal-tip\">请选择支付方式，点击后将直接跳转至安全扫码收银台：</p>"
+                "<div class=\"pay-modal-plan-info\">"
+                "<span class=\"pay-modal-plan-name\" id=\"pay-modal-plan-name\">会员订阅</span>"
+                "<span class=\"pay-modal-plan-price\" id=\"pay-modal-plan-price\"></span></div>"
+                "<p class=\"pay-modal-tip\">请选择支付渠道，即将跳转至安全扫码支付：</p>"
                 "<form method=\"post\" action=\"/order\" id=\"pay-modal-form\">"
                 f"<input type=\"hidden\" name=\"csrf\" value=\"{plan_csrf}\">"
                 "<input type=\"hidden\" name=\"plan\" "
                 "id=\"pay-modal-plan-input\" value=\"monthly\">"
-                "<div class=\"pay-modal-options\">"
-                "<button type=\"submit\" name=\"payment_type\" value=\"alipay\" "
-                "class=\"pay-channel-btn pay-channel-alipay\">"
-                "<span class=\"pay-icon-lg pay-icon-alipay\">支</span>"
-                "<span class=\"pay-channel-text\"><strong>支付宝支付</strong>"
-                "<small>支持支付宝 App 扫码</small></span>"
-                "<span class=\"pay-channel-arrow\">→</span></button>"
-                "<button type=\"submit\" name=\"payment_type\" value=\"wxpay\" "
-                "class=\"pay-channel-btn pay-channel-wxpay\">"
-                "<span class=\"pay-icon-lg pay-icon-wxpay\">微</span>"
-                "<span class=\"pay-channel-text\"><strong>微信支付</strong>"
-                "<small>支持微信 App 扫码</small></span>"
-                "<span class=\"pay-channel-arrow\">→</span></button>"
-                "</div></form>"
-                "<div class=\"pay-modal-foot-tip\">"
-                "🛡️ 安全支付保障 · 支付成功后会员时长将自动实时充值到账"
-                "</div></div></div></div>"
+                f"<div class=\"pay-modal-options\">{options_content}</div>"
+                "</form></div></div></div>"
             )
         body = (
             f"{message_html}<h2>付费会员</h2>"
@@ -1451,16 +1608,35 @@ class SiteHandler(BaseHTTPRequestHandler):
             "<h2>每日简报</h2>"
             "<p class=\"muted\">每日邮件期刊仅向有效付费会员开放，会员到期后自动停止投递。</p>"
             f"{newsletter_html}"
-            f"{pay_modal_html}"
         )
         self._html(
             200,
-            _page("订阅", body),
+            _page("订阅", body, modal=pay_modal_html),
             self._flush_cookie([]),
             form_action_origin=(
                 payments.payment_origin(payment_config) if payment_config is not None else None
             ),
         )
+
+    def _render_contact(self) -> None:
+        settings = self._load_settings()
+        contact_email = (
+            settings.get("contact_email", "").strip() or "support@cheapcoding.top"
+        )
+        body = (
+            "<div class=\"contact-card\">"
+            "<p>如果使用中遇见任何问题，可随时向以下邮箱提供工单：</p>"
+            "<p class=\"contact-email-box\">"
+            f"<a href=\"mailto:{html.escape(contact_email)}\" class=\"contact-email-link\">"
+            f"✉ {html.escape(contact_email)}</a>"
+            "</p>"
+            "<p class=\"muted\" style=\"font-size:.85rem;margin-top:1.2rem;\">"
+            "我们会在收到工单邮件后尽快为您跟进处理。"
+            "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号。"
+            "</p>"
+            "</div>"
+        )
+        self._html(200, _page("联系我们", body), self._flush_cookie([]))
 
     def _handle_newsletter(self, form: dict[str, str]) -> None:
         if not self._csrf_valid(form.get("csrf", "")):
@@ -1509,6 +1685,12 @@ class SiteHandler(BaseHTTPRequestHandler):
             return
         if not self._csrf_valid(form.get("csrf", "")):
             self._render_register("会话过期,请重试。")
+            return
+        if form.get("agree_terms", "").strip() not in {"1", "true", "on"}:
+            self._render_register(
+                "请阅读并勾选同意《用户协议与隐私条款》后再注册。",
+                form.get("email", ""),
+            )
             return
         if form.get("website", "").strip():
             self._render_register(
@@ -1800,10 +1982,15 @@ class SiteHandler(BaseHTTPRequestHandler):
             )
             return
         raw_payment_type = form.get("payment_type", "").strip().lower()
-        if raw_payment_type in {"alipay", "wxpay"}:
+        if (
+            raw_payment_type in {"alipay", "wxpay"}
+            and raw_payment_type in config.enabled_types
+        ):
             order_config = replace(config, payment_type=raw_payment_type)
-        else:
+        elif not raw_payment_type and config.payment_type in {"alipay", "wxpay"}:
             order_config = config
+        else:
+            order_config = replace(config, payment_type=config.primary_type)
         settings = self._load_settings()
         amount = accounts.price_cents(settings, plan)
         if amount <= 10:
@@ -1998,6 +2185,30 @@ class SiteHandler(BaseHTTPRequestHandler):
             creation.payment_url,
             form_action_origin=payments.payment_origin(order_config),
         )
+
+    def _handle_order_cancel(self, form: dict[str, str]) -> None:
+        if not self._csrf_valid(form.get("csrf", "")):
+            self._redirect("/account")
+            return
+        session = self._require_session()
+        if session is None:
+            return
+        try:
+            order_id = int(form.get("order_id", "0"))
+        except ValueError:
+            order_id = 0
+        if order_id <= 0:
+            self._redirect("/account")
+            return
+        now = dt.datetime.now(dt.UTC).isoformat()
+        conn = db.connect(self.server.db_path)
+        try:
+            db.cancel_user_payment_order(
+                conn, order_id=order_id, user_id=session.user_id, now=now
+            )
+        finally:
+            conn.close()
+        self._redirect("/account")
 
     def _settlement_config_for_order(self, order: db.Order) -> EpayConfig:
         config = self.server.settlement_payment_config()

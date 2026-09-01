@@ -5806,6 +5806,25 @@ def expire_payment_orders(conn: sqlite3.Connection, *, now: str) -> int:
     return cursor.rowcount
 
 
+def cancel_user_payment_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    user_id: int,
+    now: str,
+) -> bool:
+    now = _accounts_timestamp(now)
+    with conn:
+        cursor = conn.execute(
+            "UPDATE orders SET status = 'expired', last_error_code = 'USER_CANCELLED', "
+            "settlement_expires_at = ?, updated_at = ? "
+            "WHERE id = ? AND user_id = ? AND status = 'pending'",
+            (now, now, int(order_id), int(user_id)),
+        )
+    return cursor.rowcount > 0
+
+
+
 def unsettled_payment_config_ids(conn: sqlite3.Connection, *, now: str) -> set[str]:
     now = _accounts_timestamp(now)
     rows = conn.execute(

@@ -1724,6 +1724,24 @@ def test_site_admin_account_controls_require_auth_csrf_and_are_idempotent(
             auth,
         )
         assert status == 409
+    status, data = _post(
+        port,
+        "/admin/api/site/settings",
+        {"contact_email": "support@cheapcoding.top"},
+        auth,
+    )
+    assert status == 200 and data["ok"] is True
+    status, overview, _headers = _request(
+        port, "GET", "/admin/api/payments/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200 and overview["settings"]["contact_email"] == "support@cheapcoding.top"
+    status, _data = _post(
+        port,
+        "/admin/api/site/settings",
+        {"contact_email": "invalid-email"},
+        auth,
+    )
+    assert status == 409
     generated = iter(["ABCD-EFGH", "ABCD-EFGH", "JKLM-NPQR"])
     monkeypatch.setattr(
         "news_digest.preview_server.accounts.generate_redemption_code",

@@ -44,7 +44,12 @@ class EpayConfig:
             raise PaymentError("EPAY_PID is required")
         if not self.merchant_key:
             raise PaymentError("EPAY_PKEY is required")
-        if self.payment_type not in {"alipay", "wxpay"}:
+        configured_types = [
+            t.strip()
+            for t in self.payment_type.split(",")
+            if t.strip()
+        ]
+        if not configured_types or not set(configured_types).issubset({"alipay", "wxpay"}):
             raise PaymentError("EPAY_PAYMENT_TYPE is invalid")
         if not 60 <= self.order_ttl_seconds <= 3600:
             raise PaymentError("EPAY_ORDER_TTL_SECONDS must be between 60 and 3600")
@@ -52,6 +57,27 @@ class EpayConfig:
             raise PaymentError(
                 "EPAY_AMOUNT_HOLD_SECONDS must be between the order TTL and 86400"
             )
+
+    @property
+    def enabled_types(self) -> tuple[str, ...]:
+        types = [
+            t.strip().lower()
+            for t in self.payment_type.split(",")
+            if t.strip().lower() in {"alipay", "wxpay"}
+        ]
+        return tuple(types) if types else ("alipay",)
+
+    @property
+    def allows_alipay(self) -> bool:
+        return "alipay" in self.enabled_types
+
+    @property
+    def allows_wxpay(self) -> bool:
+        return "wxpay" in self.enabled_types
+
+    @property
+    def primary_type(self) -> str:
+        return self.enabled_types[0]
 
 
 @dataclass(frozen=True)
@@ -215,7 +241,7 @@ def settlement_config_from_mapping(env: Mapping[str, str]) -> EpayConfig | None:
         base_url=raw_base,
         merchant_id=raw_pid,
         merchant_key=decode_smtp_password(raw_key),
-        payment_type=env.get("EPAY_PAYMENT_TYPE", "alipay").strip(),
+        payment_type=env.get("EPAY_PAYMENT_TYPE", "alipay").strip() or "alipay",
         site_url=env.get("NEWS_SITE_URL", "").strip().rstrip("/"),
         order_ttl_seconds=ttl,
         amount_hold_seconds=hold,
@@ -290,9 +316,14 @@ def _payment_fields(
 ) -> dict[str, str]:
     if not re.fullmatch(r"news_[A-Za-z0-9_-]{1,74}", merchant_order_no):
         raise PaymentError("merchant order number must use the news_ namespace")
+    actual_type = (
+        config.payment_type
+        if config.payment_type in {"alipay", "wxpay"}
+        else config.primary_type
+    )
     fields = {
         "pid": config.merchant_id,
-        "type": config.payment_type,
+        "type": actual_type,
         "out_trade_no": merchant_order_no,
         "notify_url": config.site_url + NEWS_NOTIFY_PATH,
         "return_url": config.site_url + "/payment/return",
@@ -479,7 +510,7 @@ def parse_notification(
         raise PaymentError("payment signature is invalid")
     if fields.get("pid") != config.merchant_id:
         raise PaymentError("payment merchant does not match")
-    if fields.get("type") != config.payment_type:
+    if fields.get("type") not in config.enabled_types:
         raise PaymentError("payment type does not match")
     if fields.get("trade_status") != "TRADE_SUCCESS":
         raise PaymentError("payment is not complete")

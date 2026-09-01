@@ -24,6 +24,7 @@ DEFAULT_SETTINGS = {
     "yearly_discount_percent": "0",
     "payment_info": "",
     "payment_qr_data_url": "",
+    "contact_email": "",
 }
 
 _PBKDF2_ITERATIONS = 120_000

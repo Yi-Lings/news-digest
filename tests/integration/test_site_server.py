@@ -97,7 +97,7 @@ class SiteHarness:
                 base_url="https://pay.example.test",
                 merchant_id="1001",
                 merchant_key="merchant-secret",
-                payment_type="alipay",
+                payment_type="alipay,wxpay",
                 site_url="http://127.0.0.1",
                 order_ttl_seconds=300,
                 amount_hold_seconds=3600,
@@ -198,7 +198,7 @@ class SiteHarness:
         return token, {"nd_site_csrf": nonce_cookie.split("=", 1)[1]}
 
     def registration_fields(
-        self, page: str, email: str, password: str = "password123"
+        self, page: str, email: str, password: str = "password123", agree_terms: str = "1"
     ) -> dict[str, str]:
         captcha_id = page.split('name="captcha_id" value="', 1)[1].split('"', 1)[0]
         with self.server.captcha_lock:
@@ -211,6 +211,7 @@ class SiteHarness:
             "password_confirm": password,
             "captcha_id": captcha_id,
             "captcha_answer": captcha_answer,
+            "agree_terms": agree_terms,
         }
 
     def member_session(
@@ -392,7 +393,7 @@ class TestStaticAndPaywall:
         assert "-72.5%" in content and "¥9.9" in content
         assert "-10%" in content and "¥90" in content
         assert "收款二维码" not in content and "data:image/png" not in content
-        assert "支付成功后自动开通" in content
+        assert "支付成功后立即自动开通会员" in content
         assert "form-action 'self' https://pay.example.test" in headers[
             "Content-Security-Policy"
         ]
@@ -1201,7 +1202,9 @@ class TestOrders:
             "pid": site.payment_config.merchant_id,
             "trade_no": "gateway-10001",
             "out_trade_no": order.merchant_order_no,
-            "type": site.payment_config.payment_type,
+            "type": order.payment_type or getattr(
+                site.payment_config, "primary_type", "alipay"
+            ),
             "name": "Cheapcoding News monthly plan",
             "money": f"{order.amount_cents / 100:.2f}",
             "trade_status": "TRADE_SUCCESS",
@@ -2040,3 +2043,43 @@ class TestRedemptionDomain:
         conn.close()
         assert order is not None
         assert order.payment_type == "wxpay"
+
+    def test_contact_page_and_subscription_help_text(self, site):
+        status, _headers, page = site.get("/contact")
+        assert status == 200
+        assert "联系我们" in page
+        assert "如果使用中遇见任何问题，可随时向以下邮箱提供工单：" in page
+        assert "mailto:" in page
+        assert 'href="/contact"' in page
+
+        conn = db.connect(site.db_path)
+        db.set_settings(
+            conn,
+            {"contact_email": "custom-help@example.com"},
+            now=NOW.isoformat(),
+        )
+        conn.close()
+
+        status, _headers, page = site.get("/contact")
+        assert status == 200
+        assert "custom-help@example.com" in page
+        assert 'href="mailto:custom-help@example.com"' in page
+        assert "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号" in page
+
+        status, _headers, page = site.get("/subscribe")
+        assert status == 200
+        assert "如遇支付问题，请联系我们提交工单" in page
+        assert 'href="/contact" class="action-link"' in page
+
+    def test_registration_requires_privacy_terms_agreement(self, site):
+        status, headers, page = site.get("/register")
+        assert status == 200
+        assert 'id="privacy-modal"' in page
+        assert 'id="agree-terms"' in page
+        assert "《用户协议与隐私条款》" in page
+
+        token, cookies = site.csrf_pair(page, headers)
+        fields = site.registration_fields(page, "no-agree@example.com", agree_terms="")
+        status, _headers, resp_page = site.post("/register", fields, cookies=cookies)
+        assert status == 200
+        assert "请阅读并勾选同意《用户协议与隐私条款》后再注册" in resp_page

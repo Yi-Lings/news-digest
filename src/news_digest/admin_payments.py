@@ -146,6 +146,17 @@ def save_settings(
                 _integer(body["amount_hold_seconds"], "金额冻结期")
             ),
         }
+        raw_types = [
+            t.strip().lower()
+            for t in values["EPAY_PAYMENT_TYPE"].split(",")
+            if t.strip()
+        ]
+        if body["enabled"]:
+            if not raw_types or not set(raw_types).issubset({"alipay", "wxpay"}):
+                raise AdminPaymentError("启用在线支付时，请至少选择支付宝或微信支付中的一种")
+        else:
+            if raw_types and not set(raw_types).issubset({"alipay", "wxpay"}):
+                raise AdminPaymentError("支付类型无效，请选择支付宝或微信支付")
         candidate = {**saved, **values, "NEWS_SITE_URL": site_url}
         if body["enabled"]:
             try:

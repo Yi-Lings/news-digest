@@ -570,36 +570,22 @@
     }
   }
 
-  /* ── 会员订阅：智谱风格固定弹窗选择支付方式 ── */
+  /* ── 会员订阅：选择支付方式弹窗（居中固定并锁定窗口滚动） ── */
   var payModal = document.getElementById("pay-modal");
   var payModalClose = document.getElementById("pay-modal-close");
   var payModalPlanInput = document.getElementById("pay-modal-plan-input");
-  var payModalTitle = document.getElementById("pay-modal-title");
+  var payModalPlanName = document.getElementById("pay-modal-plan-name");
   var payModalPlanPrice = document.getElementById("pay-modal-plan-price");
-  var payModalOriginal = document.getElementById("pay-modal-original");
-  var payModalDiscount = document.getElementById("pay-modal-discount");
-  var payRowOriginal = document.getElementById("pay-row-original");
-  var payRowDiscount = document.getElementById("pay-row-discount");
 
-  var openPayModal = function (plan, planName, planPrice, originalPrice, discountLabel) {
+  var openPayModal = function (plan, planName, planPrice) {
     if (!payModal) { return; }
     if (payModalPlanInput) { payModalPlanInput.value = plan; }
-    if (payModalTitle) { payModalTitle.textContent = planName || "会员订阅"; }
+    if (payModalPlanName) { payModalPlanName.textContent = planName || "会员订阅"; }
     if (payModalPlanPrice) { payModalPlanPrice.textContent = planPrice || ""; }
 
-    if (originalPrice && payModalOriginal && payRowOriginal) {
-      payModalOriginal.textContent = originalPrice;
-      payRowOriginal.style.display = "flex";
-    } else if (payRowOriginal) {
-      payRowOriginal.style.display = "none";
-    }
-
-    if (discountLabel && discountLabel !== "无" && payModalDiscount && payRowDiscount) {
-      payModalDiscount.textContent = discountLabel;
-      payRowDiscount.style.display = "flex";
-    } else if (payRowDiscount) {
-      payRowDiscount.style.display = "none";
-    }
+    /* 居中固定：锁定窗口与背景滚动 */
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
 
     payModal.style.display = "flex";
     payModal.setAttribute("aria-hidden", "false");
@@ -607,6 +593,11 @@
 
   var closePayModal = function () {
     if (!payModal) { return; }
+
+    /* 恢复窗口滚动 */
+    document.body.style.overflow = "";
+    document.documentElement.style.overflow = "";
+
     payModal.style.display = "none";
     payModal.setAttribute("aria-hidden", "true");
   };
@@ -619,9 +610,7 @@
         var plan = btn.getAttribute("data-plan") || "monthly";
         var planName = btn.getAttribute("data-plan-name") || "会员订阅";
         var planPrice = btn.getAttribute("data-plan-price") || "";
-        var origPrice = btn.getAttribute("data-plan-original") || "";
-        var discVal = btn.getAttribute("data-plan-discount") || "";
-        openPayModal(plan, planName, planPrice, origPrice, discVal);
+        openPayModal(plan, planName, planPrice);
       });
     })(subscribeButtons[sIdx]);
   }
@@ -644,9 +633,136 @@
     });
   }
 
+  /* ── 注册页面：用户协议与隐私条款弹窗（强制阅读到底并勾选同意） ── */
+  var privacyModal = document.getElementById("privacy-modal");
+  var privacyModalClose = document.getElementById("privacy-modal-close");
+  var privacyCloseBtn = document.getElementById("privacy-close-btn");
+  var privacyAgreeBtn = document.getElementById("privacy-agree-btn");
+  var privacyModalBody = document.getElementById("privacy-modal-body");
+  var privacyScrollTip = document.getElementById("privacy-scroll-tip");
+  var privacyReadPercent = document.getElementById("privacy-read-percent");
+  var agreeTermsCheckbox = document.getElementById("agree-terms");
+  var termsRowTrigger = document.getElementById("terms-row-trigger");
+  var termsBadge = document.getElementById("terms-badge");
+  var registerForm = document.getElementById("register-form");
+
+  var hasReadToBottom = false;
+
+  var updatePrivacyScrollProgress = function () {
+    if (!privacyModalBody) { return; }
+    var maxScroll = privacyModalBody.scrollHeight - privacyModalBody.clientHeight;
+    if (maxScroll <= 15) {
+      hasReadToBottom = true;
+      if (privacyReadPercent) { privacyReadPercent.textContent = "100%"; }
+    } else {
+      var current = privacyModalBody.scrollTop;
+      var percent = Math.min(100, Math.round((current / maxScroll) * 100));
+      if (privacyReadPercent) { privacyReadPercent.textContent = percent + "%"; }
+      if (current >= maxScroll - 20) {
+        hasReadToBottom = true;
+      }
+    }
+
+    if (hasReadToBottom) {
+      if (privacyAgreeBtn) {
+        privacyAgreeBtn.disabled = false;
+        privacyAgreeBtn.textContent = "✓ 我已阅读并同意条款";
+      }
+      if (privacyScrollTip) {
+        privacyScrollTip.innerHTML = "✓ <span style='color:var(--green);font-weight:700;'>已通读全文，请点击下方按钮确认</span>";
+      }
+    }
+  };
+
+  var openPrivacyModal = function () {
+    if (!privacyModal) { return; }
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    privacyModal.style.display = "flex";
+    privacyModal.setAttribute("aria-hidden", "false");
+    updatePrivacyScrollProgress();
+  };
+
+  var closePrivacyModal = function () {
+    if (!privacyModal) { return; }
+    document.body.style.overflow = "";
+    document.documentElement.style.overflow = "";
+    privacyModal.style.display = "none";
+    privacyModal.setAttribute("aria-hidden", "true");
+  };
+
+  if (termsRowTrigger) {
+    termsRowTrigger.addEventListener("click", function (e) {
+      if (e) { e.preventDefault(); }
+      openPrivacyModal();
+    });
+    termsRowTrigger.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        if (e) { e.preventDefault(); }
+        openPrivacyModal();
+      }
+    });
+  }
+
+  if (privacyModalBody) {
+    privacyModalBody.addEventListener("scroll", function () {
+      updatePrivacyScrollProgress();
+    });
+  }
+
+  if (privacyAgreeBtn) {
+    privacyAgreeBtn.addEventListener("click", function (e) {
+      if (e) { e.preventDefault(); }
+      if (agreeTermsCheckbox) {
+        agreeTermsCheckbox.checked = true;
+      }
+      if (termsBadge) {
+        termsBadge.textContent = "✓ 已同意";
+        termsBadge.classList.add("is-agreed");
+      }
+      closePrivacyModal();
+    });
+  }
+
+  if (privacyModalClose) {
+    privacyModalClose.addEventListener("click", function (e) {
+      if (e) { e.preventDefault(); }
+      closePrivacyModal();
+    });
+  }
+
+  if (privacyCloseBtn) {
+    privacyCloseBtn.addEventListener("click", function (e) {
+      if (e) { e.preventDefault(); }
+      closePrivacyModal();
+    });
+  }
+
+  if (privacyModal) {
+    privacyModal.addEventListener("click", function (e) {
+      if (e.target === privacyModal) {
+        closePrivacyModal();
+      }
+    });
+  }
+
+  if (registerForm) {
+    registerForm.addEventListener("submit", function (e) {
+      if (agreeTermsCheckbox && !agreeTermsCheckbox.checked) {
+        if (e) { e.preventDefault(); }
+        openPrivacyModal();
+      }
+    });
+  }
+
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && payModal && payModal.style.display === "flex") {
-      closePayModal();
+    if (e.key === "Escape") {
+      if (payModal && payModal.style.display === "flex") {
+        closePayModal();
+      }
+      if (privacyModal && privacyModal.style.display === "flex") {
+        closePrivacyModal();
+      }
     }
   });
 })();
