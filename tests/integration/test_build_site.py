@@ -159,24 +159,25 @@ def test_archive_lists_all_dates(site):
     html = (output_root / "current" / "archive" / "index.html").read_text(encoding="utf-8")
     assert "2026-07-26" in html
     assert "2026-07-25" in html
-    assert 'class="edition-picker archive-picker"' in html
-    assert 'data-edition-picker' in html
-    assert 'value="/issues/2026-07-26/"' in html
-    assert 'value="/issues/2026-07-25/"' in html
+    assert "archive-calendar" in html
+    assert "archive-calendar-wrap" in html
+    assert 'href="/issues/2026-07-26/"' in html
+    assert 'href="/issues/2026-07-25/"' in html
+    assert 'id="back-to-top"' in html
     assert 'href="/admin/"' not in html
 
 
-def test_home_date_browser_only_uses_the_edition_picker(site):
+def test_home_page_links_to_archive_banner_and_has_back_to_top(site):
     output_root, _ = site
     current = output_root / "current"
     html = (current / "index.html").read_text(encoding="utf-8")
     script = (current / "assets" / "app.js").read_text(encoding="utf-8")
-    assert html.count('data-edition-picker') == 1
-    assert 'value="/issues/2026-07-26/" selected' in html
-    assert 'value="/issues/2026-07-25/"' in html
+    assert "archive-banner" in html
+    assert 'href="/archive/" class="archive-banner-btn"' in html
+    assert 'id="back-to-top"' in html
     assert 'class="issue-link' not in html
     assert "全部归档 →" not in html
-    assert 'querySelectorAll("[data-edition-picker]")' in script
+    assert 'getElementById("back-to-top")' in script
 
 
 def test_internal_links_resolve_and_resources_are_local(site):

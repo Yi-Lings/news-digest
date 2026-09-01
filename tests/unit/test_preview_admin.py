@@ -3874,3 +3874,17 @@ def test_safe_error_ignores_client_disconnect_while_writing_response():
     handler.end_headers = lambda: None
 
     handler._safe_error(RuntimeError("redacted"), status=502)
+
+
+def test_admin_dom_has_return_to_main_site_and_orders_search():
+    assert (
+        '<a href="/" class="mast-home-btn" title="返回 Cheapcoding News 主页">返回主站</a>'
+        in ADMIN_HTML
+    )
+    assert '<input id="orders-search" type="search"' in ADMIN_HTML
+    assert '<select id="orders-status-filter">' in ADMIN_HTML
+    assert '<p id="orders-count" class="meta">' in ADMIN_HTML
+    assert '<div class="table-scroll" id="site-orders"' in ADMIN_HTML
+    assert "function renderOrders()" in ADMIN_HTML
+    assert 'field("orders-search").addEventListener("input", renderOrders);' in ADMIN_HTML
+    assert 'field("orders-status-filter").addEventListener("change", renderOrders);' in ADMIN_HTML

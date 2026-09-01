@@ -7,31 +7,55 @@
 
 {% block content %}
 <section class="archive" aria-label="往期归档">
-  <h2 class="section-title">全部日期</h2>
-  <form class="edition-picker archive-picker" data-edition-picker aria-label="选择往期刊期">
-    <label class="edition-picker-field">
-      <span class="filter-label">选择日期</span>
-      <select name="edition" aria-label="选择往期刊期日期" required>
-        <option value="" selected disabled>选择日期</option>
-        {% for entry in entries %}
-        <option value="/issues/{{ entry.date }}/">{{ entry.date }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button type="submit">查看刊期</button>
-  </form>
+  <div class="archive-calendar-wrap">
+    <h2 class="section-title">按日期浏览</h2>
+    <div class="calendar-container archive-calendar">
+      {% for month_data in calendar_months %}
+      <div class="calendar-month">
+        <div class="cal-month-head">
+          <span class="cal-month-kicker">MONTHLY ARCHIVE</span>
+          <h3 class="calendar-month-title">{{ month_data.label }}</h3>
+        </div>
+        <div class="calendar-grid">
+          <span class="cal-head">一</span>
+          <span class="cal-head">二</span>
+          <span class="cal-head">三</span>
+          <span class="cal-head">四</span>
+          <span class="cal-head">五</span>
+          <span class="cal-head">六</span>
+          <span class="cal-head">日</span>
+          {% for week in month_data.weeks %}
+            {% for cell in week %}
+              {% if cell.day and cell.has_edition %}
+                <a href="{{ cell.url }}" class="cal-day has-edition{% if cell.is_current %} is-current{% endif %}" title="{{ cell.date }}">
+                  <span class="cal-day-num">{{ cell.day }}</span>
+                  <span class="cal-edition-dot" aria-hidden="true"></span>
+                </a>
+              {% elif cell.day %}
+                <span class="cal-day no-edition">{{ cell.day }}</span>
+              {% else %}
+                <span class="cal-day is-empty"></span>
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  <h2 class="section-title" style="margin-top: 2rem;">全部刊期列表</h2>
   <ul class="archive-list">
     {% for entry in entries %}
     <li class="archive-entry">
       <a class="archive-date" href="/issues/{{ entry.date }}/">{{ entry.date }}</a>
-      <span class="archive-lead">
+      <a class="archive-lead" href="/issues/{{ entry.date }}/">
         {% if entry.lead_title_zh %}
         <span class="lang-en">{{ entry.lead_title_en }}</span>
         <span class="lang-zh">{{ entry.lead_title_zh }}</span>
         {% else %}
         <span>{{ entry.lead_title_en }}</span>
         {% endif %}
-      </span>
+      </a>
       <span class="archive-count">主文章 {{ entry.article_count }} 篇 · 简讯 {{ entry.brief_count }} 条</span>
     </li>
     {% endfor %}

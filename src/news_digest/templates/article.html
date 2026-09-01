@@ -9,9 +9,14 @@
 {% endblock %}
 
 {% block content %}
-<article class="story">
-  <p class="crumb"><a href="/issues/{{ edition.date }}/">← 返回 {{ edition.date | date_zh }} 首页</a></p>
+<div class="story-toolbar">
+  <a href="/issues/{{ edition.date }}/" class="story-back-link">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+    <span>返回 {{ edition.date | date_zh }} 首页</span>
+  </a>
+</div>
 
+<article class="story">
   <header class="story-head">
     <p class="card-meta">
       <span class="source-tag">{{ article.source }}</span>
@@ -131,5 +136,12 @@
     <p>中文标题、译文与学习内容由 AI 生成（{{ article.translated_by }}），仅供学习参考；英文原文以来源页面为准。</p>
     {% endif %}
   </footer>
+
+  <div class="story-bottom-action">
+    <a href="/issues/{{ edition.date }}/" class="story-back-link is-bottom">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+      <span>返回 {{ edition.date | date_zh }} 首页</span>
+    </a>
+  </div>
 </article>
 {% endblock %}

@@ -495,6 +495,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return str(peer_address)
         return str(forwarded_address)
 
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        super().end_headers()
+
     def _security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -3563,9 +3567,26 @@ p { overflow-wrap: anywhere; }
 code, pre { font-family: var(--font-data); overflow-wrap: anywhere; white-space: pre-wrap; }
 .note, .meta { color: var(--muted); font-size: .8rem; }
 .mast {
-  display: flex; align-items: center; gap: .8rem; min-width: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: .8rem; min-width: 0;
   border-bottom: 3px double var(--ink); padding: .5rem 0 .9rem;
 }
+.mast-brand { display: flex; align-items: center; gap: .8rem; min-width: 0; }
+.mast-actions { flex: none; }
+.mast-home-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: .35rem .75rem; font: 700 .82rem/1.2 var(--font-data);
+  color: var(--ink); background: var(--sheet); border: 1px solid var(--line);
+  text-decoration: none; transition: background .18s ease, border-color .18s ease, color .18s ease;
+}
+.mast-home-btn:hover {
+  background: var(--ink); color: var(--paper); border-color: var(--ink);
+}
+.panel-head-controls { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin-bottom: .6rem; }
+.panel-head-controls h3 { margin: 0; }
+.orders-filter-bar {
+  display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(7.5rem, .8fr); gap: .5rem; margin-bottom: .8rem;
+}
+.table-scroll { max-height: 480px; overflow: auto; border: 1px solid var(--line); background: #fff; }
 .admin-brandmark { flex: none; width: 2.65rem; height: 2.65rem; }
 .mast-copy { min-width: 0; }
 .mast-kicker { margin: 0 0 .08rem; color: var(--cinnabar); font: 700 .68rem/1.3 var(--font-data); }
@@ -3770,18 +3791,23 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
 <body>
 <main class="wrap">
   <header class="mast">
-    <svg class="admin-brandmark" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
-      <g fill="#1c1b17">
-        <rect x="6" y="14" width="42" height="7" rx="1.5"/><rect x="6" y="34" width="34" height="7" rx="1.5"/>
-        <rect x="6" y="54" width="42" height="7" rx="1.5"/><rect x="6" y="74" width="26" height="7" rx="1.5"/>
-        <rect x="70" y="14" width="9" height="34" rx="1.5"/><rect x="70" y="66" width="9" height="20" rx="1.5"/>
-        <rect x="86" y="14" width="7" height="72" rx="1.5"/>
-      </g>
-      <rect x="52" y="54" width="27" height="7" rx="1.5" fill="#ae2f24"/>
-    </svg>
-    <div class="mast-copy">
-      <p class="mast-kicker">EDITORIAL DESK</p>
-      <h1 class="mast-title">Cheapcoding News 编辑台</h1>
+    <div class="mast-brand">
+      <svg class="admin-brandmark" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+        <g fill="#1c1b17">
+          <rect x="6" y="14" width="42" height="7" rx="1.5"/><rect x="6" y="34" width="34" height="7" rx="1.5"/>
+          <rect x="6" y="54" width="42" height="7" rx="1.5"/><rect x="6" y="74" width="26" height="7" rx="1.5"/>
+          <rect x="70" y="14" width="9" height="34" rx="1.5"/><rect x="70" y="66" width="9" height="20" rx="1.5"/>
+          <rect x="86" y="14" width="7" height="72" rx="1.5"/>
+        </g>
+        <rect x="52" y="54" width="27" height="7" rx="1.5" fill="#ae2f24"/>
+      </svg>
+      <div class="mast-copy">
+        <p class="mast-kicker">EDITORIAL DESK</p>
+        <h1 class="mast-title">Cheapcoding News 编辑台</h1>
+      </div>
+    </div>
+    <div class="mast-actions">
+      <a href="/" class="mast-home-btn" title="返回 Cheapcoding News 主页">返回主站</a>
     </div>
   </header>
   <nav class="nav" role="tablist" aria-label="管理职责">
@@ -3920,7 +3946,23 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <div class="actions"><button id="site-epay-save" class="primary">保存支付配置</button><button id="site-epay-clear" class="danger">清除 PKey 并停用</button></div>
     </section>
     <div class="stack" id="site-management-sections">
-      <section class="panel"><h3>支付订单</h3><div id="site-orders" aria-live="polite"></div></section>
+      <section class="panel">
+        <div class="panel-head-controls">
+          <h3>支付订单</h3>
+          <p id="orders-count" class="meta">共 0 条订单</p>
+        </div>
+        <div class="orders-filter-bar">
+          <input id="orders-search" type="search" placeholder="搜索商户订单号 / 用户 ID / 交易号" autocomplete="off">
+          <select id="orders-status-filter">
+            <option value="">全部状态</option>
+            <option value="paid">已支付</option>
+            <option value="pending">等待支付</option>
+            <option value="expired">已过期 / 已取消</option>
+            <option value="failed">支付异常</option>
+          </select>
+        </div>
+        <div class="table-scroll" id="site-orders" aria-live="polite"></div>
+      </section>
       <section class="panel"><h3>生成卡密</h3>
         <div class="fields"><label>计划<select id="site-code-plan"><option value="monthly">月刊会员</option><option value="yearly">年刊会员</option></select></label><label>数量<input id="site-code-count" type="number" min="1" max="50" value="1"></label><label class="span2">备注<input id="site-code-note"></label></div>
         <div class="actions"><button id="site-code-create" class="primary">生成卡密</button></div><div id="site-code-result" class="result" hidden></div>
@@ -4611,46 +4653,8 @@ function loadPayments() {
     field("site-epay-pkey-status").textContent = data.payment.pkey_set ? "PKey 已保存" : "PKey 尚未保存";
     field("site-epay-notify").textContent = data.payment.notify_url || "站点域名尚未配置";
     field("site-epay-return").textContent = data.payment.return_url || "站点域名尚未配置";
-    var orderRows = data.orders.map(function (item) {
-      var labels = {
-        pending: "等待支付", paid: "已支付", expired: "已过期", failed: "支付异常",
-        approved: "历史人工开通", rejected: "历史已拒绝"
-      };
-      var offset = Number(item.amount_offset_cents || 0);
-      var offsetLabel = offset === 0 ? "¥0.00" : (offset > 0 ? "+" : "-") + "¥" + (Math.abs(offset) / 100).toFixed(2);
-      var actions = document.createElement("div"); actions.className = "actions";
-      var reconcilable = ["pending", "expired", "failed"].indexOf(item.status) !== -1 &&
-        item.settlement_expires_at && Date.parse(item.settlement_expires_at) > Date.now();
-      if (reconcilable) {
-        var reconcileAction = button("重新查询支付状态", function () {
-          setBusy(reconcileAction, true);
-          api("/admin/api/site/payment-reconcile", {order_id: item.id})
-            .then(function (result) {
-              say(result.status === "paid" ? "订单已确认支付并开通会员。" : "支付状态已更新。", true);
-              return loadPayments();
-            })
-            .catch(function (error) { say(error.message, false); })
-            .finally(function () { setBusy(reconcileAction, false); });
-        });
-        actions.appendChild(reconcileAction);
-      }
-      return [
-        item.merchant_order_no || "历史 #" + item.id,
-        item.user_id,
-        item.plan === "monthly" ? "月刊会员" : "年刊会员",
-        "¥" + (item.base_amount_cents / 100).toFixed(2),
-        "¥" + (item.amount_cents / 100).toFixed(2),
-        offsetLabel,
-        labels[item.status] || "状态未知",
-        item.provider_trade_no || "-",
-        item.expires_at || "-",
-        item.last_error_code || "-",
-        actions
-      ];
-    });
-    field("site-orders").replaceChildren(
-      table(["商户订单号", "用户", "计划", "基准金额", "实付金额", "尾差", "状态", "网关交易号", "支付截止", "错误代码", "操作"], orderRows)
-    );
+    allOrders = data.orders || [];
+    renderOrders();
 
     var codeRows = data.codes.map(function (item) {
       var actions = document.createElement("div"); actions.className = "actions";
@@ -4669,6 +4673,69 @@ function loadPayments() {
     );
   }).catch(function (error) { say(error.message, false); });
 }
+
+var allOrders = [];
+
+function renderOrders() {
+  var search = (field("orders-search").value || "").trim().toLowerCase();
+  var statusFilter = field("orders-status-filter").value || "";
+  var filtered = allOrders.filter(function (item) {
+    if (statusFilter && item.status !== statusFilter) {
+      return false;
+    }
+    if (search) {
+      var no = (item.merchant_order_no || "").toLowerCase();
+      var idStr = String(item.id);
+      var uidStr = String(item.user_id);
+      var tradeNo = (item.provider_trade_no || "").toLowerCase();
+      if (no.indexOf(search) === -1 && idStr.indexOf(search) === -1 && uidStr.indexOf(search) === -1 && tradeNo.indexOf(search) === -1) {
+        return false;
+      }
+    }
+    return true;
+  });
+  field("orders-count").textContent = "共 " + allOrders.length + " 条订单" + (filtered.length !== allOrders.length ? "（显示 " + filtered.length + " 条）" : "");
+  var orderRows = filtered.map(function (item) {
+    var labels = {
+      pending: "等待支付", paid: "已支付", expired: "已过期 / 已取消", failed: "支付异常",
+      approved: "历史人工开通", rejected: "历史已拒绝"
+    };
+    var offset = Number(item.amount_offset_cents || 0);
+    var offsetLabel = offset === 0 ? "¥0.00" : (offset > 0 ? "+" : "-") + "¥" + (Math.abs(offset) / 100).toFixed(2);
+    var actions = document.createElement("div"); actions.className = "actions";
+    var reconcilable = ["pending", "expired", "failed"].indexOf(item.status) !== -1 &&
+      item.settlement_expires_at && Date.parse(item.settlement_expires_at) > Date.now();
+    if (reconcilable) {
+      var reconcileAction = button("重新查询支付状态", function () {
+        setBusy(reconcileAction, true);
+        api("/admin/api/site/payment-reconcile", {order_id: item.id})
+          .then(function (result) {
+            say(result.status === "paid" ? "订单已确认支付并开通会员。" : "支付状态已更新。", true);
+            return loadPayments();
+          })
+          .catch(function (error) { say(error.message, false); })
+          .finally(function () { setBusy(reconcileAction, false); });
+      });
+      actions.appendChild(reconcileAction);
+    }
+    return [
+      item.merchant_order_no || "历史 #" + item.id,
+      item.user_id,
+      item.plan === "monthly" ? "月刊会员" : "年刊会员",
+      "¥" + (item.base_amount_cents / 100).toFixed(2),
+      "¥" + (item.amount_cents / 100).toFixed(2),
+      offsetLabel,
+      labels[item.status] || "状态未知",
+      item.provider_trade_no || "-",
+      item.expires_at || "-",
+      item.last_error_code || "-",
+      actions
+    ];
+  });
+  field("site-orders").replaceChildren(
+    table(["商户订单号", "用户", "计划", "基准金额", "实付金额", "尾差", "状态", "网关交易号", "支付截止", "错误代码", "操作"], orderRows)
+  );
+}
 field("users-refresh").addEventListener("click", loadUsers);
 field("users-search").addEventListener("input", function () {
   usersPage = 1;
@@ -4684,6 +4751,8 @@ field("users-next").addEventListener("click", function () {
   loadUsers();
 });
 field("site-refresh").addEventListener("click", loadPayments);
+field("orders-search").addEventListener("input", renderOrders);
+field("orders-status-filter").addEventListener("change", renderOrders);
 ["monthly", "yearly"].forEach(function (plan) {
   field("site-" + plan).addEventListener("input", updateDiscountPreviews);
   field("site-" + plan + "-sale").addEventListener("input", updateDiscountPreviews);

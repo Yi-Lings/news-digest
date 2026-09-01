@@ -138,19 +138,10 @@
 </section>
 {% endif %}
 
-<form class="edition-picker" data-edition-picker aria-label="按日期浏览">
-  <label class="edition-picker-field">
-    <span class="filter-label">按日期浏览</span>
-    <select name="edition" aria-label="选择刊期日期">
-  {% for date in all_dates %}
-  {% if date == edition.date %}
-      <option value="/issues/{{ date }}/" selected>{{ date }}</option>
-  {% else %}
-      <option value="/issues/{{ date }}/">{{ date }}</option>
-  {% endif %}
-  {% endfor %}
-    </select>
-  </label>
-  <button type="submit">查看刊期</button>
-</form>
+<section class="archive-banner" aria-label="往期归档入口">
+  <div class="archive-banner-copy">
+    <p class="archive-banner-tip">想要查阅过往全部期刊？前往往期归档按日期浏览双语新闻。</p>
+  </div>
+  <a href="/archive/" class="archive-banner-btn">浏览往期归档 →</a>
+</section>
 {% endblock %}

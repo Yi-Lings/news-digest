@@ -417,12 +417,130 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
 }
 .archive-picker { margin: 0 0 1.5rem; }
 
-/* ── 文章页 ─────────────────────────────────────────── */
-.story { max-width: var(--measure); margin: 0 auto; }
+/* ── 首页底部往期入口 ─────────────────────────────────── */
+.archive-banner {
+  margin-top: 2.5rem; padding: 1.5rem 1.25rem;
+  border-top: 3px double var(--ink); border-bottom: 1px solid var(--rule);
+  background: var(--sheet);
+  display: flex; align-items: center; justify-content: space-between; gap: 1.2rem; flex-wrap: wrap;
+}
+.archive-banner-copy { min-width: 0; }
+.archive-banner-tip {
+  margin: 0; font-family: var(--font-body-zh); font-size: 0.9375rem; color: var(--ink);
+}
+.archive-banner-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0.55rem 1.2rem; background: var(--ink); color: #fff !important;
+  text-decoration: none !important; font-family: var(--font-ui); font-size: 0.875rem;
+  font-weight: 700; border-radius: 2px; transition: background 0.18s ease;
+  white-space: nowrap;
+}
+.archive-banner-btn:hover {
+  background: var(--cinnabar);
+}
 
-.crumb { font-family: var(--font-ui); font-size: 0.8125rem; margin: 0 0 1.4rem; }
-.crumb a { text-decoration: none; color: var(--gloss); transition: color 0.18s ease; }
-.crumb a:hover { color: var(--cinnabar); }
+/* ── 报刊风格日历网格 ─────────────────────────────────── */
+.archive-calendar-wrap {
+  display: flex; flex-direction: column; align-items: center; margin-bottom: 2.5rem;
+}
+.archive-calendar-wrap .section-title {
+  text-align: center; width: 100%;
+}
+.calendar-container {
+  display: flex; flex-wrap: wrap; gap: 1.8rem; max-width: var(--measure);
+}
+.calendar-container.archive-calendar {
+  justify-content: center; max-width: 100%; margin: 0 auto;
+}
+.calendar-month {
+  background: var(--sheet);
+  border: 2px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+  padding: 1.1rem 1.15rem 1.25rem;
+  min-width: 18.5rem; max-width: 22rem; flex: 1 1 18.5rem;
+  border-radius: 2px;
+}
+.cal-month-head {
+  text-align: center; border-bottom: 2px solid var(--ink); padding-bottom: 0.55rem; margin-bottom: 0.75rem;
+}
+.cal-month-kicker {
+  display: block; font-family: var(--font-ui); font-size: 0.6875rem; font-weight: 700;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--gloss); margin-bottom: 0.2rem;
+}
+.calendar-month-title {
+  margin: 0; font-family: var(--font-display); font-size: 1.2rem;
+  font-weight: 700; color: var(--ink);
+}
+.calendar-grid {
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px;
+  text-align: center; font-size: 0.875rem; font-family: var(--font-data);
+}
+.cal-head {
+  padding: 0.3rem 0; font-weight: 700; color: var(--ink); font-size: 0.75rem;
+  font-family: var(--font-zh-serif); border-bottom: 1px solid var(--ink); margin-bottom: 4px;
+}
+.cal-day {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  aspect-ratio: 1; min-height: 2.1rem; border-radius: 2px;
+  text-decoration: none; font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.cal-day.has-edition {
+  background: var(--paper); color: var(--ink); font-weight: 700;
+  border: 1.5px solid var(--ink);
+  box-shadow: 1px 1px 0 rgba(28, 27, 23, 0.25);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+.cal-day.has-edition:hover {
+  background: var(--ink); color: #fff; border-color: var(--ink);
+  transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+.cal-day.has-edition.is-current {
+  background: var(--ink); color: var(--paper); border-color: var(--ink);
+  outline: 2px solid var(--cinnabar); outline-offset: 1px;
+}
+.cal-day-num { line-height: 1; font-size: 0.875rem; }
+.cal-edition-dot {
+  width: 4px; height: 4px; border-radius: 50%; background: var(--cinnabar);
+  margin-top: 2px;
+}
+.cal-day.has-edition:hover .cal-edition-dot {
+  background: var(--paper);
+}
+.cal-day.no-edition {
+  color: #b5b1a7; font-size: 0.8125rem;
+}
+.cal-day.is-empty {
+  visibility: hidden;
+}
+
+/* ── 文章页 ─────────────────────────────────────────── */
+.story-toolbar {
+  max-width: 72rem; margin: 0 auto 1.2rem; padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--rule); display: flex; align-items: center; justify-content: flex-start;
+}
+.story-back-link {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.4rem 0.95rem; background: var(--ink); color: var(--paper) !important;
+  font-family: var(--font-ui); font-size: 0.9375rem; font-weight: 700;
+  text-decoration: none !important; border-radius: 2px;
+  border: 1px solid var(--ink);
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.15s ease;
+}
+.story-back-link:hover {
+  background: var(--cinnabar); border-color: var(--cinnabar); color: #fff !important;
+  transform: translateX(-2px);
+}
+.story-back-link svg { flex: none; stroke: currentColor; }
+.story-bottom-action {
+  margin-top: 2rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
+  display: flex; justify-content: center;
+}
+.story-back-link.is-bottom {
+  padding: 0.55rem 1.3rem; font-size: 1rem;
+}
+
+.story { max-width: var(--measure); margin: 0 auto; }
 
 .story-title {
   margin: 0.2rem 0 0.5rem; font-family: var(--font-display);
@@ -569,9 +687,10 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   transition: background 0.18s ease;
 }
 .archive-entry:hover { background: var(--panel); }
-.archive-date { font-family: var(--font-data); font-size: 0.9375rem; text-decoration: none; color: var(--cinnabar); }
+.archive-date { font-family: var(--font-data); font-size: 0.9375rem; text-decoration: none; color: var(--cinnabar); font-weight: 700; }
 .archive-date:hover { text-decoration: underline; }
-.archive-lead { font-family: var(--font-display); font-weight: 700; }
+.archive-lead { font-family: var(--font-display); font-weight: 700; color: var(--ink); text-decoration: none; transition: color 0.18s ease; }
+.archive-lead:hover, .archive-entry:hover .archive-lead { color: var(--cinnabar); }
 .archive-count {
   grid-column: 2; font-family: var(--font-ui); font-size: 0.75rem; color: var(--gloss);
 }
@@ -588,6 +707,26 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 [hidden] { display: none !important; }
 
 .lang-en, .lang-zh { transition: opacity 0.18s ease; }
+
+/* ── 回到顶部浮动按钮 ─────────────────────────────────── */
+.back-to-top {
+  position: fixed; right: 2rem; bottom: 2.2rem;
+  width: 2.8rem; height: 2.8rem; border-radius: 50%;
+  background: var(--ink); color: #fff !important;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  display: flex !important; align-items: center; justify-content: center;
+  cursor: pointer; z-index: 9999;
+  opacity: 0.85;
+  text-decoration: none !important;
+  transition: opacity 0.2s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.back-to-top:hover {
+  opacity: 1; background: var(--cinnabar); border-color: var(--cinnabar); color: #fff !important;
+  transform: translateY(-3px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+}
+.back-to-top svg { display: block; stroke: currentColor; }
 
 /* ── 入场与滚动渐显（仅在允许动效时） ───────────────── */
 @media (prefers-reduced-motion: no-preference) {
@@ -644,4 +783,14 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   .subscribe-fields { display: grid; gap: 0.5rem; }
   .edition-picker { display: grid; max-width: none; }
   .edition-picker button { width: 100%; }
+  .back-to-top {
+    right: 1.1rem; bottom: 1.2rem;
+    width: 2.4rem; height: 2.4rem;
+  }
+  .archive-banner {
+    flex-direction: column; align-items: flex-start; gap: 0.8rem;
+  }
+  .archive-banner-btn {
+    width: 100%;
+  }
 }

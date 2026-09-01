@@ -133,3 +133,48 @@ def test_home_links_the_unified_membership_page_without_anonymous_form():
     assert "会员订阅与每日简报" in enabled
     assert 'href="/subscribe"' in enabled
     assert 'href="/privacy/"' in enabled
+
+
+def test_build_calendar_months_structure_and_markers():
+    from news_digest.rendering.pages import build_calendar_months, render_archive
+
+    all_dates = ["2026-07-26", "2026-07-25", "2026-06-15"]
+    months = build_calendar_months(all_dates, current_date="2026-07-26")
+    assert len(months) == 2
+    july = months[0]
+    assert july["year"] == 2026 and july["month"] == 7
+    assert july["label"] == "2026 年 7 月"
+    days = [d for w in july["weeks"] for d in w if d["date"]]
+    assert len(days) >= 28
+
+    day_26 = next(d for d in days if d["date"] == "2026-07-26")
+    assert day_26["has_edition"] is True
+    assert day_26["is_current"] is True
+    assert day_26["url"] == "/issues/2026-07-26/"
+
+    day_25 = next(d for d in days if d["date"] == "2026-07-25")
+    assert day_25["has_edition"] is True
+    assert day_25["is_current"] is False
+
+    day_20 = next(d for d in days if d["date"] == "2026-07-20")
+    assert day_20["has_edition"] is False
+    assert day_20["is_current"] is False
+    assert day_20["url"] is None
+
+    env = create_environment()
+    entries = [
+        {
+            "date": d,
+            "lead_title_en": f"Lead {d}",
+            "lead_title_zh": f"头条 {d}",
+            "article_count": 2,
+            "brief_count": 5,
+        }
+        for d in all_dates
+    ]
+    archive_html = render_archive(env, entries)
+    assert "archive-calendar" in archive_html
+    assert "calendar-grid" in archive_html
+    assert 'href="/issues/2026-07-26/"' in archive_html
+    assert 'href="/issues/2026-07-25/"' in archive_html
+    assert 'href="/issues/2026-06-15/"' in archive_html

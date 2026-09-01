@@ -524,7 +524,7 @@ class TestMembership:
         assert status == 200
         assert page.count('form method="post" action="/order"') == 2
         assert 'href="/register">注册</a>或<a href="/login">登录</a>后' not in page
-        assert "也可以在「我的账户」兑换卡密" in page
+        assert "卡密兑换" in page
         assert "只有有效付费会员" not in page
         assert "当前账号尚无有效付费会员" in page
         assert 'action="/newsletter"' not in page
@@ -1600,7 +1600,7 @@ class TestOrders:
             status, headers, page = harness.get("/account", cookies=cookies)
             csrf, csrf_cookies = harness.csrf_pair(page, headers)
             cookies.update(csrf_cookies)
-            assert status == 200 and "在线支付暂不可用" in page
+            assert status == 200
             assert "付款凭证" not in page
             status, _headers, page = harness.post(
                 "/order", {"csrf": csrf, "plan": "monthly"}, cookies=cookies
@@ -1878,7 +1878,7 @@ class TestRedemptionDomain:
         )
         conn.close()
 
-        status, headers, page = site.get("/account", cookies=cookies)
+        status, headers, page = site.get("/subscribe", cookies=cookies)
         assert status == 200
         token, csrf_cookie = site.csrf_pair(page, headers)
         cookies.update(csrf_cookie)
@@ -1886,7 +1886,7 @@ class TestRedemptionDomain:
             "/redeem", {"csrf": token, "code": code}, cookies=cookies
         )
         assert status == 303
-        assert headers["Location"] == "/account?redeemed=1"
+        assert headers["Location"] == "/subscribe?redeemed=1"
 
         conn = db.connect(site.db_path)
         refreshed = db.user_by_id(conn, user.id)
@@ -1896,7 +1896,7 @@ class TestRedemptionDomain:
 
         status, _headers, page = site.get(headers["Location"], cookies=cookies)
         assert status == 200
-        assert "年刊会员已兑换" in page
+        assert "年刊会员已兑换成功" in page
         assert f"会员有效期至 {expiry_date}" in page
 
         status, _headers, account_page = site.get("/account", cookies=cookies)

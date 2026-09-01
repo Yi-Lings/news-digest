@@ -240,4 +240,42 @@
       synth.cancel();
     });
   }
+
+  /* ── 返回顶部浮动按钮 ── */
+  var backToTop = document.getElementById("back-to-top");
+  if (backToTop) {
+    var checkScroll = function () {
+      var scrollY = window.scrollY
+        || window.pageYOffset
+        || (document.documentElement && document.documentElement.scrollTop)
+        || (document.body && document.body.scrollTop)
+        || 0;
+      if (scrollY > 80) {
+        backToTop.classList.add("is-visible");
+      } else {
+        backToTop.classList.remove("is-visible");
+      }
+    };
+    window.addEventListener("scroll", checkScroll, { passive: true });
+    window.addEventListener("resize", checkScroll, { passive: true });
+    window.addEventListener("load", checkScroll);
+    document.addEventListener("DOMContentLoaded", checkScroll);
+    checkScroll();
+    backToTop.addEventListener("click", function (event) {
+      if (event) {
+        event.preventDefault();
+      }
+      try {
+        window.scrollTo({ top: 0, behavior: motionOK ? "smooth" : "auto" });
+      } catch (error) {
+        window.scrollTo(0, 0);
+      }
+      if (document.documentElement) {
+        document.documentElement.scrollTop = 0;
+      }
+      if (document.body) {
+        document.body.scrollTop = 0;
+      }
+    });
+  }
 })();

@@ -1,12 +1,42 @@
-# Codex 交接文档：news-digest v1.4.0
+# Antigravity 交接文档：news-digest v1.4.0
 
 更新时间：2026-09-01（Asia/Hong_Kong）
 
+## 0. 本次暂停点
+
+用户于 2026-09-01 明确要求暂停当前全部工作并交接给 Antigravity。收到暂停指令后，
+未连接生产服务器、未部署、未触发抓取/翻译/SMTP/支付、未修改数据库，也未执行新的
+浏览器操作。接手方不得把本交接前的生产授权视为仍在执行中的命令；继续生产操作前应先
+向用户报告只读核验结果和拟执行范围。
+
+当前可复核的仓库事实：
+
+```text
+branch: main
+HEAD: 1583c122ad35408f3b87f978058429416e72e60f
+tag: v1.4.0t7 (annotated, immutable)
+origin/main: 1583c122ad35408f3b87f978058429416e72e60f
+GitHub Release: v1.4.0t7, prerelease, published
+GitHub release workflow: success
+working tree before this HANDOFF edit: clean
+source version: 1.4.0
+stable v1.4.0 Release: not published
+```
+
+`v1.4.0t7` Release 已包含 `digests.env`、`news-digest-deploy.tgz` 和对应 SHA-256
+文件。生产状态在本次暂停前没有重新查询；本文后续沿用的最后确认事实仍是生产运行
+`v1.4.0t6`，不能据此断言当前线上一定还是 t6，也不能断言已经部署 t7。
+
+本地页面最后一个待辨析项已经从源码确认：主页和归档页的日期选择器采用显式表单提交，
+用户选择日期后还必须点击“查看刊期”；`app.js` 只在 `submit` 时调用
+`window.location.assign()`。单独切换下拉框而没有跳转属于当前设计，不是 JavaScript 故障。
+如果产品要求“选择即跳转”，需要先取得明确需求后再改。
+
 ## 1. 当前结论
 
-- 当前分支：`main`；生产仍运行不可移动的测试候选 `v1.4.0t6`。下一候选固定为 `v1.4.0t7`，本地门禁已通过但尚未发布或部署。
+- 当前分支：`main`；`v1.4.0t7` 已发布为不可移动的测试候选，CI/GHCR/Release 均成功。生产是否已经部署 t7 尚未重新核实；最后确认版本为 `v1.4.0t6`。
 - 当前源码版本：`1.4.0`；稳定 `v1.4.0` Release 尚未授权、尚未发布。
-- `v1.4.0t1` 至 `v1.4.0t6` 的 GitHub prerelease、CI/GHCR 和生产部署已经完成，旧 tag 与镜像不可移动。
+- `v1.4.0t1` 至 `v1.4.0t7` 的 GitHub prerelease、CI/GHCR 已完成；已发布 tag 与镜像不可移动。生产部署只确认到 t6。
 - t5 已完成受控生产业务闭环；t6 只收口成功人工投递与自动化刊期汇总之间的状态归并，部署时未调用真实 provider、SMTP 或支付，也未补发历史刊期。
 - 不得读取或输出 provider/API key、SMTP 密码、用户密码、验证码、卡密明文、邮件正文或完整上游响应。
 - 未跟踪文件 `大创文档.md` 属于用户内容，不得删除或覆盖。
@@ -153,8 +183,11 @@ t7 本地候选新增：独立用户管理的服务端分页；旧匿名订阅�
 
 ## 6. 待完成门禁
 
-1. 用户已授权 `v1.4.0t7` 直接进入生产闭环；必须先以全新 annotated tag 发布 prerelease，并使用同一 Release 的 immutable worker/web digest 部署。部署前冻结 timer/path/daily/resume、完成 SQLite online backup 与聚合基线；部署后验证 schema v10、数据计数、三服务和公网 HTTPS，再验收用户管理、付费管理、角色、会员与简报资格。
-2. 稳定 `v1.4.0` 仍未授权；不得移动 t6/t7 tag，也不得把候选 prerelease 改成稳定 latest。
+1. 先只读核验生产：worker/web/site/admin 的 OCI version、revision 和 digest，schema version、`integrity_check`、关键业务聚合、systemd timer/path 及公网/回环健康。查询必须脱敏，不输出账号、邮箱、卡密、密钥、邮件正文或完整上游响应。
+2. 若生产仍是 t6，只有在用户重新确认继续后，才使用现有 `v1.4.0t7` Release 的 immutable worker/web digest 部署；禁止重打或移动 t7。部署前冻结 timer/path/daily/resume、执行 SQLite online backup 和 SHA-256 核验，部署后验证 schema v10、数据计数、三服务和公网 HTTPS。
+3. 生产 UI 验收：独立“用户管理”的搜索/分页、授予与撤销管理员、会员延期/清除/剩余天数、每日简报资格；独立“付费管理”的元价小数、折扣、EasyPay 配置和卡密；读者端注册/登录/重置、订阅页、账户订单及归档日期提交。
+4. 自动支付只做用户明确授权的单订单闭环；不得创建多笔真实订单，不得补发历史邮件。真实 SMTP、provider、抓取也必须逐项确认范围，部署本身不得触发这些业务操作。
+5. 稳定 `v1.4.0` 仍未授权；不得把候选 prerelease 改成稳定 latest。只有候选生产验收完成且用户明确放行，才能另行发布稳定版本。
 
 ## 7. 最终本地门禁命令
 
@@ -179,8 +212,8 @@ $errors
 
 ## 8. 发布纪律
 
-- 生产环境当前为 `v1.4.0t6`；下一不可变候选为 `v1.4.0t7`，稳定版仍未发布。
-- 已推送 tag 永不移动；t6 后的当前变化只能使用新提交和 t7，稳定版才使用 `v1.4.0`。
+- 生产最后确认版本为 `v1.4.0t6`，当前实际版本待只读核验；`v1.4.0t7` prerelease 已发布，稳定版仍未发布。
+- 已推送 tag 永不移动；t7 如发现缺陷，必须使用新提交和新的测试候选 tag，不能覆盖 t7。
 - 候选 GitHub Release 必须标记 prerelease 且不成为 `releases/latest`；一键安装器继续只面向稳定 Latest Release。
 - 任一测试、构建、CI、digest、preflight 或线上健康门禁失败都必须停止发布。
 - 不补发历史邮件，不在部署过程中运行抓取、翻译、构建或投递；除非生产验收确有必要，不重复真实 provider、SMTP 或扣款请求。

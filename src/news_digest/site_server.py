@@ -306,14 +306,21 @@ def _page(title: str, body: str) -> str:
         "Arial,sans-serif;margin-bottom:.15rem}.captcha-row{display:flex;align-items:center;"
         "gap:.75rem;flex-wrap:wrap}.captcha-image{width:184px;height:62px;border:1px solid "
         "var(--rule);background:#fff}.captcha-row input{width:10rem}"
-        ".order-list{list-style:none;padding:0;margin:.8rem 0 1.5rem;border-top:1px solid "
-        "var(--rule)}.order-list li{display:grid;grid-template-columns:minmax(0,1fr) auto;"
-        "gap:.45rem 1rem;align-items:center;padding:.8rem 0;border-bottom:1px solid var(--rule)}"
+        ".action-link{display:inline-block;padding:.12rem .5rem;background:var(--ink);"
+        "color:#fff!important;text-decoration:none!important;font:700 .82rem Arial,sans-serif;"
+        "border-radius:2px;margin-left:.35rem}.action-link:hover{background:var(--red)}"
+        ".order-list-wrap{max-height:360px;overflow-y:auto;border:1px solid var(--rule);"
+        "background:var(--sheet);padding:0 .85rem;margin:.8rem 0 1.5rem}"
+        ".order-list{list-style:none;padding:0;margin:0}"
+        ".order-list li{display:grid;grid-template-columns:minmax(0,1fr) auto;"
+        "gap:.45rem 1rem;align-items:center;padding:.75rem 0;border-bottom:1px solid var(--rule)}"
+        ".order-list li:last-child{border-bottom:0}"
         ".order-meta{min-width:0}.order-number{display:block;font:600 .82rem/1.4 "
-        "Arial,sans-serif;overflow-wrap:anywhere}.order-plan{color:var(--muted);font-size:.9rem}"
+        "Arial,sans-serif;overflow-wrap:anywhere}.order-plan{color:var(--muted);font-size:.88rem}"
         ".order-action{display:inline;margin:0;padding:0;border:0;background:transparent}"
         ".order-action button{margin:0}.order-state{font:700 .82rem/1.4 Arial,sans-serif;"
-        "white-space:nowrap}"
+        "white-space:nowrap}.order-state.state-paid{color:var(--green)}"
+        ".order-state.state-pending{color:#b35c00}.order-state.state-expired,.order-state.state-failed{color:var(--muted)}"
         ".site-foot{border-top:1px solid var(--rule);padding:1rem 1.25rem 2rem;"
         "text-align:center;color:var(--muted);font-size:.82rem}"
         "@keyframes page-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;"
@@ -323,7 +330,17 @@ def _page(title: str, body: str) -> str:
         ".order-list li{grid-template-columns:1fr}.order-action,.order-action button{width:100%}"
         ".captcha-row input{width:100%}.site-nav{display:grid;"
         "grid-template-columns:repeat(2,minmax(0,1fr));"
-        "gap:.45rem .8rem}}@media(prefers-reduced-motion:reduce){.wrap{animation:none}}"
+        "gap:.45rem .8rem}}"
+        ".back-to-top{position:fixed;right:2rem;bottom:2.2rem;width:2.75rem;height:2.75rem;"
+        "border-radius:50%;background:var(--ink);color:#fff;border:1px solid var(--ink);"
+        "box-shadow:0 4px 12px rgba(0,0,0,.18);display:flex;align-items:center;"
+        "justify-content:center;cursor:pointer;z-index:99;opacity:0;visibility:hidden;"
+        "transform:translateY(12px);transition:opacity .22s ease,transform .22s ease,"
+        "visibility .22s ease,background .15s ease}.back-to-top.is-visible{opacity:.9;"
+        "visibility:visible;transform:translateY(0)}.back-to-top:hover{opacity:1;"
+        "background:var(--red);border-color:var(--red);transform:translateY(-2px)}"
+        "@media(max-width:480px){.back-to-top{right:1.1rem;bottom:1.2rem;width:2.4rem;height:2.4rem}}"
+        "@media(prefers-reduced-motion:reduce){.wrap{animation:none}}"
         "</style></head><body>"
         "<header class=\"site-head\"><div class=\"site-kicker\">Member edition</div>"
         "<a class=\"brand\" href=\"/\">Cheapcoding News</a>"
@@ -334,6 +351,11 @@ def _page(title: str, body: str) -> str:
         f"<h1>{html.escape(title)}</h1>{body}"
         "<p class=\"muted\"><a href=\"/\">返回首页</a></p></main>"
         "<footer class=\"site-foot\">Cheapcoding News · 每日双语新闻</footer>"
+        "<button type=\"button\" class=\"back-to-top\" id=\"back-to-top\" title=\"回到顶部\" "
+        "aria-label=\"回到顶部\"><svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" "
+        "aria-hidden=\"true\" focusable=\"false\" fill=\"none\" stroke=\"currentColor\" "
+        "stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+        "<polyline points=\"18 15 12 9 6 15\"></polyline></svg></button>"
         "<script src=\"/assets/app.js\" defer></script></body></html>"
     )
 
@@ -696,7 +718,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 self._render_account(redeemed=redeemed)
                 return
             if path == "/subscribe":
-                self._render_subscribe()
+                redeemed = parse_qs(parsed.query).get("redeemed") == ["1"]
+                self._render_subscribe(redeemed=redeemed)
                 return
             if path == "/payment/return":
                 fields = {
@@ -1077,7 +1100,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             now = dt.datetime.now(dt.UTC)
             db.expire_payment_orders(conn, now=now.isoformat())
             user = db.user_by_id(conn, session.user_id)
-            orders = db.list_user_orders(conn, user_id=session.user_id, limit=10)
+            orders = db.list_user_orders(conn, user_id=session.user_id, limit=20)
         finally:
             conn.close()
         candidate = next(
@@ -1107,19 +1130,25 @@ class SiteHandler(BaseHTTPRequestHandler):
             conn = db.connect(self.server.db_path)
             try:
                 user = db.user_by_id(conn, session.user_id)
-                orders = db.list_user_orders(conn, user_id=session.user_id, limit=10)
+                orders = db.list_user_orders(conn, user_id=session.user_id, limit=20)
             finally:
                 conn.close()
-        settings = self._load_settings()
         paid = accounts.is_paid(user.paid_until, dt.datetime.now(dt.UTC))
         plan_labels = {"monthly": "月刊会员", "yearly": "年刊会员"}
         token, _cookie = self._csrf_pair()
-        status_line = (
-            f"会员有效期至 {user.paid_until[:10]}"
-            f" · {plan_labels.get(user.plan or '', '会员')}"
-            if paid
-            else "当前为免费账号:每天可阅读最新一期中的 1 篇主文章。"
-        )
+        if paid:
+            until_date = user.paid_until[:10]
+            plan_name = plan_labels.get(user.plan or "", "会员")
+            status_line = (
+                f"会员状态：<strong>有效付费会员</strong>"
+                f"（会员有效期至 {until_date} · {plan_name}）"
+                "<a class=\"action-link\" href=\"/subscribe\">续费</a>"
+            )
+        else:
+            status_line = (
+                "会员状态：<strong>当前为免费账号</strong>（每天可阅读最新一期中的 1 篇主文章）"
+                "<a class=\"action-link\" href=\"/subscribe\">立即订阅</a>"
+            )
         redemption_html = (
             "<div class=\"msg\"><strong>"
             f"{plan_labels.get(user.plan or '', '会员')}已兑换。</strong><br>"
@@ -1138,12 +1167,12 @@ class SiteHandler(BaseHTTPRequestHandler):
         order_items = []
         for order in orders:
             action = (
-                f"<span class=\"order-state\">"
+                f"<span class=\"order-state state-{order.status}\">"
                 f"{status_labels.get(order.status, '状态未知')}</span>"
             )
             if order.status == "pending" and order.payment_url:
                 action = (
-                    f"<a class=\"order-state\" href=\""
+                    f"<a class=\"order-state state-pending\" href=\""
                     f"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
                 )
             elif _payment_order_creation_retryable(order, now):
@@ -1154,51 +1183,26 @@ class SiteHandler(BaseHTTPRequestHandler):
                     "<button type=\"submit\">继续支付</button></form>"
                 )
             order_number = order.merchant_order_no or f"#{order.id}"
+            amount_str = f" · ¥{(order.amount_cents / 100):.2f}" if order.amount_cents else ""
+            plan_str = plan_labels.get(order.plan, order.plan)
             order_items.append(
                 "<li><span class=\"order-meta\"><span class=\"order-number\">"
                 f"订单编号 {html.escape(order_number)}</span>"
-                f"<span class=\"order-plan\">{plan_labels.get(order.plan, order.plan)}</span>"
+                f"<span class=\"order-plan\">{plan_str}{amount_str}</span>"
                 f"</span>{action}</li>"
             )
         order_rows = "".join(order_items) or "<li class=\"muted\">暂无订单</li>"
-        monthly = accounts.format_cents(accounts.price_cents(settings, "monthly"))
-        yearly = accounts.format_cents(accounts.price_cents(settings, "yearly"))
-        pricing = _plan_price_html(settings, "monthly", "月刊会员") + _plan_price_html(
-            settings, "yearly", "年刊会员"
-        )
-        payment_config = self.server.current_payment_config()
-        if payment_config is None:
-            payment_html = (
-                "<div class=\"msg\">在线支付暂不可用，请稍后再试。</div>"
-            )
-        else:
-            payment_html = (
-                "<h2>在线开通</h2>"
-                f"<form method=\"post\" action=\"/order\">"
-                f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
-                "<select name=\"plan\">"
-                f"<option value=\"monthly\">月刊会员 ¥{monthly}/月</option>"
-                f"<option value=\"yearly\">年刊会员 ¥{yearly}/年</option>"
-                "</select> "
-                "<button type=\"submit\">前往支付</button></form>"
-                "<p class=\"muted\">支付成功后自动开通，无需人工审核。</p>"
-            )
         body = (
-            f"{redemption_html}<p>{html.escape(status_line)}</p>"
-            f"<p class=\"muted\">{html.escape(session.email)}</p>"
-            f"<h2>订阅方案</h2>{pricing}"
-            f"{payment_html}"
-            "<h2>卡密兑换</h2>"
-            f"<form method=\"post\" action=\"/redeem\">"
-            f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
-            "<input name=\"code\" placeholder=\"XXXX-XXXX\"> "
-            "<button type=\"submit\">兑换</button></form>"
-            f"<h2>我的订单</h2><ul class=\"order-list\">{order_rows}</ul>"
+            f"{redemption_html}<p>{status_line}</p>"
+            f"<p class=\"muted\">登录邮箱：{html.escape(session.email)}</p>"
+            f"<h2>我的订单</h2><div class=\"order-list-wrap\">"
+            f"<ul class=\"order-list\">{order_rows}</ul></div>"
             "<p><a href=\"/forgot\">使用邮箱验证码修改密码</a></p>"
             "<p><form method=\"post\" action=\"/logout\">"
             f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
             "<button type=\"submit\">退出登录</button></form></p>"
         )
+        payment_config = self.server.current_payment_config()
         self._html(
             200,
             _page("我的账户", body),
@@ -1208,10 +1212,10 @@ class SiteHandler(BaseHTTPRequestHandler):
             ),
         )
 
-    def _render_subscribe(self, message: str = "") -> None:
+    def _render_subscribe(self, message: str = "", *, redeemed: bool = False) -> None:
         settings = self._load_settings()
         session = self._session_user()
-        plan_target = "/account" if session is not None else "/register"
+        plan_target = "/subscribe" if session is not None else "/register"
         payment_config = self.server.current_payment_config()
         payment_available = session is None or payment_config is not None
         plan_csrf = (
@@ -1253,38 +1257,61 @@ class SiteHandler(BaseHTTPRequestHandler):
         paid = user is not None and user.status == "active" and accounts.is_paid(
             user.paid_until, dt.datetime.now(dt.UTC)
         )
-        message_html = f"<div class=\"msg\">{html.escape(message)}</div>" if message else ""
+        plan_labels = {"monthly": "月刊会员", "yearly": "年刊会员"}
+        if redeemed and paid and user and user.paid_until:
+            plan_name = plan_labels.get(user.plan or "", "会员")
+            message_html = (
+                "<div class=\"msg\"><strong>"
+                f"{plan_name}已兑换成功！</strong><br>"
+                f"会员有效期至 {html.escape(user.paid_until[:10])}，感谢支持！</div>"
+            )
+        elif message:
+            message_html = f"<div class=\"msg\">{html.escape(message)}</div>"
+        else:
+            message_html = ""
+
         if session is None:
             membership_help = (
                 "<p><a href=\"/register\">注册</a>或<a href=\"/login\">登录</a>后，"
                 "选择会员方案并前往支付。在线支付成功后自动开通，无需人工审核。</p>"
+            )
+            redeem_html = (
+                "<h2>卡密兑换</h2>"
+                "<p class=\"muted\">拥有会员卡密？请先<a href=\"/login\">登录</a>，"
+                "或<a href=\"/register\">注册账号</a>后在此输入卡密兑换会员。</p>"
             )
             newsletter_html = (
                 "<p>每日简报是付费会员权益。请先<a href=\"/login\">登录</a>，"
                 "或<a href=\"/register\">注册账号</a>后开通会员。</p>"
             )
         else:
+            token = plan_csrf or self._csrf_pair()[0]
             if payment_config is None:
                 membership_help = (
                     '<div class="msg">在线支付暂不可用，请稍后再试。'
-                    "你仍可在「我的账户」兑换已有卡密。</div>"
+                    "你仍可在下方兑换已有卡密。</div>"
                 )
             else:
                 membership_help = (
-                    "<p>点击会员方案会直接前往支付；也可以在「我的账户」兑换卡密。"
-                    "卡密流程：进入「我的账户」→ 在「卡密兑换」输入卡密 → 点击「兑换」，"
-                    "会员时长会立即到账。</p>"
+                    "<p>点击会员方案将直接前往安全支付收银台；支付成功后立即自动开通会员，"
+                    "无需人工审核。</p>"
                 )
+            redeem_html = (
+                "<h2>卡密兑换</h2>"
+                f"<form method=\"post\" action=\"/redeem\">"
+                f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
+                "<input name=\"code\" placeholder=\"输入卡密 (如 XXXX-XXXX)\" required> "
+                "<button type=\"submit\">兑换卡密</button></form>"
+                "<p class=\"muted\">输入有效卡密并点击兑换，会员时长将实时充值到当前登录账号。</p>"
+            )
             if not paid:
                 newsletter_html = (
-                    "<p>当前账号尚无有效付费会员。在线支付成功后会自动开通，"
-                    "或在「我的账户」兑换卡密后，即可订阅每日简报。</p>"
-                    "<p><a href=\"/account\">前往我的账户</a></p>"
+                    "<p>当前账号尚无有效付费会员。在线支付成功或兑换卡密开通后，"
+                    "即可在此开启每日邮件简报。</p>"
                 )
             elif newsletter is not None and newsletter.status == "disabled":
                 newsletter_html = "<p>该邮箱的简报订阅已由管理员停用，请联系管理员处理。</p>"
             else:
-                token = plan_csrf or self._csrf_pair()[0]
                 active = newsletter is not None and newsletter.status == "active"
                 action = "disable" if active else "enable"
                 label = "停止每日简报" if active else "订阅每日简报"
@@ -1298,8 +1325,9 @@ class SiteHandler(BaseHTTPRequestHandler):
         body = (
             f"{message_html}<h2>付费会员</h2>"
             f"{pricing}"
-            "<p>付费后可阅读全部主文章与完整归档;免费读者每天可读最新一期中的 1 篇。</p>"
+            "<p>付费后可阅读全部主文章与完整归档；免费读者每天可读最新一期中的 1 篇。</p>"
             f"{membership_help}"
+            f"{redeem_html}"
             "<h2>每日简报</h2>"
             "<p class=\"muted\">每日邮件期刊仅向有效付费会员开放，会员到期后自动停止投递。</p>"
             f"{newsletter_html}"
@@ -1953,7 +1981,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             self._html(429, _page("稍候", "<p>操作过于频繁,请稍后再试。</p>"))
             return
         if not self._csrf_valid(form.get("csrf", "")):
-            self._redirect("/account")
+            self._redirect("/subscribe")
             return
         session = self._require_session()
         if session is None:
@@ -1975,13 +2003,14 @@ class SiteHandler(BaseHTTPRequestHandler):
                     _page(
                         "兑换失败",
                         "<div class=\"msg\">卡密无效或已被使用。</div>"
-                        "<p><a href=\"/account\">返回我的账户</a></p>",
+                        "<p><a href=\"/subscribe\">返回会员订阅</a> · "
+                        "<a href=\"/account\">前往我的账户</a></p>",
                     ),
                 )
                 return
         finally:
             conn.close()
-        self._redirect("/account?redeemed=1", status=HTTPStatus.SEE_OTHER)
+        self._redirect("/subscribe?redeemed=1", status=HTTPStatus.SEE_OTHER)
 
 
 class SiteServer(ThreadingHTTPServer):
