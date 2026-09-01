@@ -278,4 +278,70 @@
       }
     });
   }
+
+  /* ── 往期归档：月份日历单月切换器 ── */
+  var calBox = document.getElementById("archive-calendar-box");
+  if (calBox) {
+    var months = calBox.querySelectorAll(".calendar-month");
+    var prevBtn = document.getElementById("cal-prev-btn");
+    var nextBtn = document.getElementById("cal-next-btn");
+    var monthSelect = document.getElementById("cal-month-select");
+    var currentMonthIndex = 0;
+    var totalMonths = months.length;
+
+    var showMonth = function (index) {
+      if (index < 0) {
+        index = 0;
+      }
+      if (index >= totalMonths) {
+        index = totalMonths - 1;
+      }
+      currentMonthIndex = index;
+
+      for (var i = 0; i < totalMonths; i++) {
+        if (i === currentMonthIndex) {
+          months[i].classList.add("is-active");
+        } else {
+          months[i].classList.remove("is-active");
+        }
+      }
+
+      if (monthSelect) {
+        monthSelect.value = String(currentMonthIndex);
+      }
+      if (prevBtn) {
+        prevBtn.disabled = currentMonthIndex >= totalMonths - 1;
+      }
+      if (nextBtn) {
+        nextBtn.disabled = currentMonthIndex <= 0;
+      }
+    };
+
+    if (prevBtn) {
+      prevBtn.addEventListener("click", function () {
+        if (currentMonthIndex < totalMonths - 1) {
+          showMonth(currentMonthIndex + 1);
+        }
+      });
+    }
+    if (nextBtn) {
+      nextBtn.addEventListener("click", function () {
+        if (currentMonthIndex > 0) {
+          showMonth(currentMonthIndex - 1);
+        }
+      });
+    }
+    if (monthSelect) {
+      monthSelect.addEventListener("change", function (e) {
+        var idx = parseInt(e.target.value, 10);
+        if (!isNaN(idx)) {
+          showMonth(idx);
+        }
+      });
+    }
+
+    if (totalMonths > 0) {
+      showMonth(0);
+    }
+  }
 })();

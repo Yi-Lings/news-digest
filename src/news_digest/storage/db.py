@@ -6047,6 +6047,18 @@ def list_user_orders(
     return [_order(row) for row in rows]
 
 
+def _merge_user_plan(
+    current_plan: str | None,
+    current_paid_until: str | None,
+    new_plan: str,
+    now: str,
+) -> str:
+    """如果当前是未过期的年刊会员，购买或兑换月刊续费时保留年刊会员身份。"""
+    if current_plan == "yearly" and current_paid_until and current_paid_until > now:
+        return "yearly"
+    return new_plan
+
+
 def confirm_payment_order(
     conn: sqlite3.Connection,
     *,
@@ -6123,7 +6135,7 @@ def confirm_payment_order(
             (provider_trade_no, now, now, row["id"]),
         )
         current = conn.execute(
-            "SELECT paid_until FROM users WHERE id = ?", (row["user_id"],)
+            "SELECT plan, paid_until FROM users WHERE id = ?", (row["user_id"],)
         ).fetchone()
         if current is None:
             raise RuntimeError("payment user does not exist")
@@ -6136,9 +6148,12 @@ def confirm_payment_order(
         if type(days) is not int or days <= 0:
             raise RuntimeError("payment plan duration is invalid")
         paid_until = _future_timestamp(base, days * 86400)
+        target_plan = _merge_user_plan(
+            current["plan"], current["paid_until"], row["plan"], now
+        )
         conn.execute(
             "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-            (row["plan"], paid_until, now, row["user_id"]),
+            (target_plan, paid_until, now, row["user_id"]),
         )
         conn.commit()
     except Exception:
@@ -6184,15 +6199,21 @@ def decide_order(
         if approve:
             days = (plan_days or {}).get(row["plan"], 30)
             current = conn.execute(
-                "SELECT paid_until FROM users WHERE id = ?", (row["user_id"],)
+                "SELECT plan, paid_until FROM users WHERE id = ?", (row["user_id"],)
             ).fetchone()
             base = now
             if current is not None and current["paid_until"] and current["paid_until"] > now:
                 base = current["paid_until"]
             until = _future_timestamp(base, days * 86400)
+            target_plan = _merge_user_plan(
+                current["plan"] if current else None,
+                current["paid_until"] if current else None,
+                row["plan"],
+                now,
+            )
             conn.execute(
                 "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-                (row["plan"], until, now, row["user_id"]),
+                (target_plan, until, now, row["user_id"]),
             )
         conn.commit()
     except Exception:
@@ -6308,7 +6329,7 @@ def redeem_code(
         if row is None:
             raise RuntimeError("redemption code is invalid or already used")
         current = conn.execute(
-            "SELECT paid_until FROM users WHERE id = ?", (user_id,)
+            "SELECT plan, paid_until FROM users WHERE id = ?", (user_id,)
         ).fetchone()
         if current is None:
             raise RuntimeError("user does not exist")
@@ -6322,15 +6343,18 @@ def redeem_code(
         if current["paid_until"] and current["paid_until"] > now:
             base = current["paid_until"]
         until = _future_timestamp(base, days * 86400)
+        target_plan = _merge_user_plan(
+            current["plan"], current["paid_until"], row["plan"], now
+        )
         conn.execute(
             "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-            (row["plan"], until, now, user_id),
+            (target_plan, until, now, user_id),
         )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return row["plan"]
+    return target_plan
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> str | None:

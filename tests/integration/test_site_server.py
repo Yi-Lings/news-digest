@@ -1904,6 +1904,57 @@ class TestRedemptionDomain:
         assert "年刊会员" in account_page
         assert f"会员有效期至 {expiry_date}" in account_page
 
+    def test_yearly_member_renewing_monthly_keeps_yearly_plan(self, site):
+        conn = db.connect(site.db_path)
+        user = db.upsert_pending_user(
+            conn,
+            email="yearly-keeper@example.com",
+            email_key="y" * 64,
+            password_hash="x",
+            now=NOW.isoformat(),
+        )
+        db.activate_user(conn, email_key="y" * 64, now=NOW.isoformat())
+        yearly_code = generate_redemption_code()
+        db.create_redemption_codes(
+            conn,
+            entries=[(redemption_digest(yearly_code), redemption_prefix(yearly_code))],
+            plan="yearly",
+            note=None,
+            created_by="admin",
+            now=NOW.isoformat(),
+        )
+        db.redeem_code(
+            conn,
+            code_digest=redemption_digest(yearly_code),
+            user_id=user.id,
+            now=NOW.isoformat(),
+            plan_days={"monthly": 31, "yearly": 366},
+        )
+        refreshed = db.user_by_id(conn, user.id)
+        assert refreshed.plan == "yearly"
+
+        # Now renew with monthly code
+        monthly_code = generate_redemption_code()
+        db.create_redemption_codes(
+            conn,
+            entries=[(redemption_digest(monthly_code), redemption_prefix(monthly_code))],
+            plan="monthly",
+            note=None,
+            created_by="admin",
+            now=NOW.isoformat(),
+        )
+        returned_plan = db.redeem_code(
+            conn,
+            code_digest=redemption_digest(monthly_code),
+            user_id=user.id,
+            now=NOW.isoformat(),
+            plan_days={"monthly": 31, "yearly": 366},
+        )
+        assert returned_plan == "yearly"
+        refreshed_after_monthly = db.user_by_id(conn, user.id)
+        assert refreshed_after_monthly.plan == "yearly"
+        conn.close()
+
     def test_redeem_code_extends_and_single_use(self, tmp_path, site):
         conn = db.connect(site.db_path)
         user = db.upsert_pending_user(

@@ -446,19 +446,72 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
 .archive-calendar-wrap .section-title {
   text-align: center; width: 100%;
 }
+.archive-calendar-box {
+  width: 100%; max-width: 22rem; margin: 0 auto;
+}
+.cal-switch-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; margin-bottom: 0.85rem;
+}
+.cal-switch-btn {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  background: var(--sheet); color: var(--ink);
+  border: 1.5px solid var(--ink); border-radius: 2px;
+  padding: 0.35rem 0.65rem; font-family: var(--font-ui);
+  font-size: 0.8125rem; font-weight: 700; cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+  transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease, box-shadow 0.12s ease;
+}
+.cal-switch-btn:hover:not(:disabled) {
+  background: var(--ink); color: #fff; transform: translateY(-1px);
+  box-shadow: 2px 3px 0 var(--ink);
+}
+.cal-switch-btn:disabled {
+  opacity: 0.32; cursor: not-allowed; box-shadow: none;
+  border-color: var(--rule); color: var(--gloss); background: var(--panel);
+}
+.cal-switch-btn svg { display: block; stroke: currentColor; }
+.cal-month-select-wrap {
+  flex: 1; text-align: center;
+}
+.cal-month-select {
+  font-family: var(--font-display); font-size: 0.9375rem; font-weight: 700;
+  color: var(--ink); background: var(--sheet);
+  border: 1.5px solid var(--ink); border-radius: 2px;
+  padding: 0.32rem 0.6rem; text-align: center; cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink); outline: none;
+}
+.cal-month-select:focus {
+  border-color: var(--cinnabar);
+}
 .calendar-container {
   display: flex; flex-wrap: wrap; gap: 1.8rem; max-width: var(--measure);
 }
 .calendar-container.archive-calendar {
-  justify-content: center; max-width: 100%; margin: 0 auto;
+  display: block; width: 100%; margin: 0 auto;
 }
 .calendar-month {
   background: var(--sheet);
   border: 2px solid var(--ink);
   box-shadow: 4px 4px 0 var(--ink);
   padding: 1.1rem 1.15rem 1.25rem;
-  min-width: 18.5rem; max-width: 22rem; flex: 1 1 18.5rem;
+  width: 100%; max-width: 22rem; margin: 0 auto;
   border-radius: 2px;
+}
+.archive-calendar .calendar-month {
+  display: none;
+}
+.archive-calendar .calendar-month.is-active,
+.archive-calendar .calendar-month:first-child {
+  display: block;
+  animation: cal-fade-in 0.18s ease;
+}
+.archive-calendar .calendar-month.is-active ~ .calendar-month:first-child:not(.is-active) {
+  display: none;
+}
+@keyframes cal-fade-in {
+  from { opacity: 0.6; transform: scale(0.99); }
+  to { opacity: 1; transform: scale(1); }
 }
 .cal-month-head {
   text-align: center; border-bottom: 2px solid var(--ink); padding-bottom: 0.55rem; margin-bottom: 0.75rem;

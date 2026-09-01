@@ -1138,10 +1138,10 @@ class SiteHandler(BaseHTTPRequestHandler):
         token, _cookie = self._csrf_pair()
         if paid:
             until_date = user.paid_until[:10]
-            plan_name = plan_labels.get(user.plan or "", "会员")
+            plan_name = plan_labels.get(user.plan or "", "付费会员")
             status_line = (
-                f"会员状态：<strong>有效付费会员</strong>"
-                f"（会员有效期至 {until_date} · {plan_name}）"
+                f"会员状态：<strong>{plan_name}</strong>"
+                f"（会员有效期至 {until_date}）"
                 "<a class=\"action-link\" href=\"/subscribe\">续费</a>"
             )
         else:
