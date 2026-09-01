@@ -162,6 +162,10 @@ def test_config_identity_is_secret_safe_and_changes_with_settlement_credentials(
     assert config_identity(first) == config_identity(same)
     assert config_identity(first) != config_identity(changed)
     assert first.merchant_key not in config_identity(first)
+    from dataclasses import replace
+    wxpay_config = replace(first, payment_type="wxpay")
+    assert config_identity(first) == config_identity(wxpay_config)
+
 
 
 @pytest.mark.parametrize(

@@ -570,18 +570,37 @@
     }
   }
 
-  /* ── 会员订阅：选择支付方式弹窗 ── */
+  /* ── 会员订阅：智谱风格固定弹窗选择支付方式 ── */
   var payModal = document.getElementById("pay-modal");
   var payModalClose = document.getElementById("pay-modal-close");
   var payModalPlanInput = document.getElementById("pay-modal-plan-input");
-  var payModalPlanName = document.getElementById("pay-modal-plan-name");
+  var payModalTitle = document.getElementById("pay-modal-title");
   var payModalPlanPrice = document.getElementById("pay-modal-plan-price");
+  var payModalOriginal = document.getElementById("pay-modal-original");
+  var payModalDiscount = document.getElementById("pay-modal-discount");
+  var payRowOriginal = document.getElementById("pay-row-original");
+  var payRowDiscount = document.getElementById("pay-row-discount");
 
-  var openPayModal = function (plan, planName, planPrice) {
+  var openPayModal = function (plan, planName, planPrice, originalPrice, discountLabel) {
     if (!payModal) { return; }
     if (payModalPlanInput) { payModalPlanInput.value = plan; }
-    if (payModalPlanName) { payModalPlanName.textContent = planName || "会员订阅"; }
+    if (payModalTitle) { payModalTitle.textContent = planName || "会员订阅"; }
     if (payModalPlanPrice) { payModalPlanPrice.textContent = planPrice || ""; }
+
+    if (originalPrice && payModalOriginal && payRowOriginal) {
+      payModalOriginal.textContent = originalPrice;
+      payRowOriginal.style.display = "flex";
+    } else if (payRowOriginal) {
+      payRowOriginal.style.display = "none";
+    }
+
+    if (discountLabel && discountLabel !== "无" && payModalDiscount && payRowDiscount) {
+      payModalDiscount.textContent = discountLabel;
+      payRowDiscount.style.display = "flex";
+    } else if (payRowDiscount) {
+      payRowDiscount.style.display = "none";
+    }
+
     payModal.style.display = "flex";
     payModal.setAttribute("aria-hidden", "false");
   };
@@ -600,7 +619,9 @@
         var plan = btn.getAttribute("data-plan") || "monthly";
         var planName = btn.getAttribute("data-plan-name") || "会员订阅";
         var planPrice = btn.getAttribute("data-plan-price") || "";
-        openPayModal(plan, planName, planPrice);
+        var origPrice = btn.getAttribute("data-plan-original") || "";
+        var discVal = btn.getAttribute("data-plan-discount") || "";
+        openPayModal(plan, planName, planPrice, origPrice, discVal);
       });
     })(subscribeButtons[sIdx]);
   }

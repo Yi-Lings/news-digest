@@ -992,38 +992,34 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 .pay-modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(28, 27, 23, 0.68);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
-  z-index: 9999;
+  width: 100vw; height: 100vh;
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 99999;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
   box-sizing: border-box;
 }
 
 .pay-modal-card {
-  background: var(--sheet);
-  border: 2px solid var(--ink);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25), 4px 4px 0 var(--ink);
-  border-radius: 6px;
-  width: 100%;
-  max-width: 390px;
-  margin: auto;
-  max-height: calc(100vh - 2rem);
-  max-height: calc(100dvh - 2rem);
-  overflow-y: auto;
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 20px 35px -10px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  width: 92%;
+  max-width: 420px;
+  position: relative;
   box-sizing: border-box;
-  animation: modalPop 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: bmPop 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-@keyframes modalPop {
+@keyframes bmPop {
   from {
     opacity: 0;
-    transform: scale(0.95) translateY(8px);
+    transform: scale(0.94) translateY(6px);
   }
   to {
     opacity: 1;
@@ -1035,31 +1031,32 @@ html[data-mode="zh"] .gloss-mark { display: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem;
-  border-bottom: 1.5px solid var(--rule);
-  background: var(--paper);
-  position: sticky;
-  top: 0;
-  z-index: 2;
+  padding: 1.15rem 1.25rem 0.75rem;
+  background: transparent;
 }
 
 .pay-modal-title {
   margin: 0;
-  font-size: 1.1rem;
-  color: var(--ink);
+  font-size: 1.18rem;
   font-weight: 700;
+  color: #1f2937;
 }
 
 .pay-modal-close {
   background: transparent;
   border: none;
-  font-size: 1.2rem;
+  font-size: 1.25rem;
   font-weight: 700;
-  color: var(--muted);
+  color: #9ca3af;
   cursor: pointer;
-  padding: 0.2rem 0.45rem;
+  padding: 0.2rem;
   line-height: 1;
-  border-radius: 3px;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: all 0.15s ease;
 }
 
@@ -1069,37 +1066,71 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 }
 
 .pay-modal-body {
-  padding: 1rem;
+  padding: 0 1.25rem 1.25rem;
   box-sizing: border-box;
 }
 
-.pay-modal-plan-info {
+.pay-modal-breakdown {
+  background: #f9fafb;
+  border: 1px solid #f3f4f6;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  margin: 0 0 1rem;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.pay-breakdown-row {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  padding: 0.45rem 0.75rem;
-  background: var(--paper);
-  border: 1.5px solid var(--rule);
+  font-size: 0.88rem;
+}
+
+.pay-row-label {
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+
+.pay-row-val.val-original {
+  color: #9ca3af;
+  text-decoration: line-through;
+  font-size: 0.85rem;
+}
+
+.pay-discount-pill {
+  color: #ef4444;
+  background: #fef2f2;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.12rem 0.45rem;
   border-radius: 4px;
-  margin-bottom: 0.65rem;
+  border: 1px solid #fee2e2;
 }
 
-.pay-modal-plan-name {
-  font-weight: 700;
-  font-size: 0.95rem;
-  color: var(--ink);
+.pay-row-total {
+  border-top: 1px dashed #e5e7eb;
+  padding-top: 0.55rem;
+  margin-top: 0.15rem;
 }
 
-.pay-modal-plan-price {
+.pay-row-total .pay-row-label {
   font-weight: 700;
-  font-size: 1.3rem;
-  color: var(--cinnabar);
+  color: #1f2937;
+  font-size: 0.92rem;
+}
+
+.pay-row-val.val-total {
+  font-size: 1.45rem;
+  color: #dc2626;
   font-family: Arial, sans-serif;
+  font-weight: 800;
 }
 
 .pay-modal-tip {
   font-size: 0.8rem;
-  color: var(--muted);
+  color: #6b7280;
   margin: 0 0 0.75rem;
   line-height: 1.4;
 }
@@ -1107,18 +1138,18 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 .pay-modal-options {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.65rem;
 }
 
 .pay-channel-btn {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.85rem;
   width: 100%;
-  padding: 0.65rem 0.85rem;
-  background: var(--paper);
-  border: 1.5px solid var(--rule);
-  border-radius: 4px;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
   cursor: pointer;
   text-align: left;
   transition: all 0.15s ease;
@@ -1126,20 +1157,20 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 }
 
 .pay-channel-btn:hover {
-  border-color: var(--ink);
-  background: #fff;
+  border-color: #1f2937;
+  background: #fafafa;
   transform: translateY(-1px);
-  box-shadow: 2px 2px 0 var(--ink);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
 .pay-icon-lg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 2rem;
+  width: 2.2rem;
+  height: 2.2rem;
   border-radius: 50%;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 900;
   color: #fff;
   flex-shrink: 0;
@@ -1156,39 +1187,39 @@ html[data-mode="zh"] .gloss-mark { display: none; }
 }
 
 .pay-channel-text strong {
-  font-size: 0.92rem;
-  color: var(--ink);
+  font-size: 0.95rem;
+  color: #1f2937;
 }
 
 .pay-channel-text small {
-  font-size: 0.72rem;
-  color: var(--muted);
+  font-size: 0.75rem;
+  color: #6b7280;
   margin-top: 0.05rem;
 }
 
 .pay-channel-arrow {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
   font-weight: 700;
-  color: var(--muted);
+  color: #9ca3af;
   transition: transform 0.15s ease;
 }
 
 .pay-channel-btn:hover .pay-channel-arrow {
-  color: var(--ink);
-  transform: translateX(2px);
+  color: #1f2937;
+  transform: translateX(3px);
 }
 
-@media (max-height: 550px) {
-  .pay-modal-card {
-    max-height: calc(100vh - 1rem);
-  }
-  .pay-modal-body {
-    padding: 0.65rem;
-  }
-  .pay-channel-btn {
-    padding: 0.5rem 0.75rem;
-  }
+.pay-modal-foot-tip {
+  margin-top: 0.9rem;
+  text-align: center;
+  font-size: 0.75rem;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
 }
+
 
 /* ── 我的账户：订单列表滚动卡片 ─────────────────────── */
 .order-list-wrap {

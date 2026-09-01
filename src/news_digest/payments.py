@@ -245,11 +245,11 @@ def config_identity(config: EpayConfig) -> str:
         (
             config.base_url,
             config.merchant_id,
-            config.payment_type,
             config.merchant_key,
         )
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 
 def payment_origin(config: EpayConfig) -> str:
