@@ -639,6 +639,67 @@ html[data-mode="zh"] .lead-title .lang-zh, html[data-mode="zh"] .card-title .lan
 .cal-day.has-edition:hover .cal-edition-dot {
   background: var(--paper);
 }
+
+/* 4. 日历切页与下钻平滑过渡动效 */
+@keyframes calSlidePrev {
+  from {
+    opacity: 0.2;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes calSlideNext {
+  from {
+    opacity: 0.2;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes calZoomIn {
+  from {
+    opacity: 0.2;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes calZoomOut {
+  from {
+    opacity: 0.2;
+    transform: scale(1.06);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.cal-anim-prev {
+  animation: calSlidePrev 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.cal-anim-next {
+  animation: calSlideNext 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.cal-anim-drill-down {
+  animation: calZoomIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.cal-anim-drill-up {
+  animation: calZoomOut 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
 .cal-day.no-edition {
   color: #b5b1a7; font-size: 0.8125rem;
 }

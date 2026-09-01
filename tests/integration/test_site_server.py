@@ -522,7 +522,8 @@ class TestMembership:
         user, cookies = site.member_session("member@example.com")
         status, headers, page = site.get("/subscribe", cookies=cookies)
         assert status == 200
-        assert page.count('form method="post" action="/order"') == 2
+        assert page.count('plan-subscribe-btn') == 2
+        assert 'id="pay-modal"' in page
         assert 'href="/register">注册</a>或<a href="/login">登录</a>后' not in page
         assert "卡密兑换" in page
         assert "只有有效付费会员" not in page
@@ -1821,9 +1822,10 @@ class TestOrders:
         _user, cookies = site.member_session("plans@example.com")
         status, headers, page = site.get("/subscribe", cookies=cookies)
         assert status == 200
-        assert page.count('action="/order"') == 2
-        assert 'name="plan" value="monthly"' in page
-        assert 'name="plan" value="yearly"' in page
+        assert 'id="pay-modal"' in page
+        assert 'data-plan="monthly"' in page
+        assert 'data-plan="yearly"' in page
+        assert 'action="/order"' in page
         csrf, csrf_cookies = site.csrf_pair(page, headers)
         cookies.update(csrf_cookies)
         status, redirect_headers, _page = site.post(
@@ -2014,3 +2016,27 @@ class TestRedemptionDomain:
         ).fetchone()
         assert orphan["status"] == "unused"
         conn.close()
+
+    def test_order_creation_supports_wechat_and_alipay_payment_type_selection(self, site):
+        user, cookies = site.member_session("wxpay-order@example.com")
+        status, headers, page = site.get("/subscribe", cookies=cookies)
+        assert 'id="pay-modal"' in page
+        assert 'id="pay-modal-close"' in page
+        assert 'name="payment_type" value="wxpay"' in page
+        assert 'name="payment_type" value="alipay"' in page
+        csrf, csrf_cookies = site.csrf_pair(page, headers)
+        cookies.update(csrf_cookies)
+        status, resp_headers, _ = site.post(
+            "/order",
+            {"csrf": csrf, "plan": "monthly", "payment_type": "wxpay"},
+            cookies=cookies,
+        )
+        assert status == 302
+        assert len(site.payment_create_calls) == 1
+        cfg, kwargs = site.payment_create_calls[0]
+        assert cfg.payment_type == "wxpay"
+        conn = db.connect(site.db_path)
+        order = db.order_by_merchant_order_no(conn, kwargs["merchant_order_no"])
+        conn.close()
+        assert order is not None
+        assert order.payment_type == "wxpay"

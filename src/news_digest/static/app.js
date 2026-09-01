@@ -336,6 +336,13 @@
       return n < 10 ? "0" + n : String(n);
     };
 
+    var triggerAnim = function (el, animClass) {
+      if (!el) { return; }
+      el.classList.remove("cal-anim-prev", "cal-anim-next", "cal-anim-drill-down", "cal-anim-drill-up");
+      void el.offsetWidth;
+      el.classList.add(animClass);
+    };
+
     var renderDaysView = function () {
       if (kickerEl) { kickerEl.textContent = "MONTHLY ARCHIVE"; }
       if (titleTextEl) { titleTextEl.textContent = curYear + " 年 " + curMonth + " 月"; }
@@ -390,7 +397,7 @@
           (function (targetM) {
             mBtn.addEventListener("click", function () {
               curMonth = targetM;
-              switchView("day");
+              switchView("day", "drill-down");
             });
           })(m);
           monthsGridEl.appendChild(mBtn);
@@ -416,7 +423,7 @@
           (function (targetY) {
             yBtn.addEventListener("click", function () {
               curYear = targetY;
-              switchView("month");
+              switchView("month", "drill-down");
             });
           })(y);
           yearsGridEl.appendChild(yBtn);
@@ -424,19 +431,29 @@
       }
     };
 
-    var switchView = function (view) {
+    var switchView = function (view, animType) {
       currentView = view;
       if (viewDaysEl) { viewDaysEl.classList.toggle("is-active", view === "day"); }
       if (viewMonthsEl) { viewMonthsEl.classList.toggle("is-active", view === "month"); }
       if (viewYearsEl) { viewYearsEl.classList.toggle("is-active", view === "year"); }
 
+      var targetEl = null;
       if (view === "day") {
         renderDaysView();
+        targetEl = daysGridEl;
       } else if (view === "month") {
         renderMonthsView();
+        targetEl = monthsGridEl;
       } else if (view === "year") {
         yearRangeStart = Math.floor(curYear / 10) * 10 - 1;
         renderYearsView();
+        targetEl = yearsGridEl;
+      }
+
+      if (animType === "drill-down") {
+        triggerAnim(targetEl, "cal-anim-drill-down");
+      } else if (animType === "drill-up") {
+        triggerAnim(targetEl, "cal-anim-drill-up");
       }
     };
 
@@ -444,9 +461,9 @@
     if (titleBtnEl) {
       titleBtnEl.addEventListener("click", function () {
         if (currentView === "day") {
-          switchView("month");
+          switchView("month", "drill-up");
         } else if (currentView === "month") {
-          switchView("year");
+          switchView("year", "drill-up");
         }
       });
     }
@@ -454,6 +471,7 @@
     // 绑定左右箭头切换
     if (navPrevEl) {
       navPrevEl.addEventListener("click", function () {
+        var grid = null;
         if (currentView === "day") {
           curMonth--;
           if (curMonth < 1) {
@@ -461,18 +479,23 @@
             curYear--;
           }
           renderDaysView();
+          grid = daysGridEl;
         } else if (currentView === "month") {
           curYear--;
           renderMonthsView();
+          grid = monthsGridEl;
         } else if (currentView === "year") {
           yearRangeStart -= 10;
           renderYearsView();
+          grid = yearsGridEl;
         }
+        triggerAnim(grid, "cal-anim-prev");
       });
     }
 
     if (navNextEl) {
       navNextEl.addEventListener("click", function () {
+        var grid = null;
         if (currentView === "day") {
           curMonth++;
           if (curMonth > 12) {
@@ -480,13 +503,17 @@
             curYear++;
           }
           renderDaysView();
+          grid = daysGridEl;
         } else if (currentView === "month") {
           curYear++;
           renderMonthsView();
+          grid = monthsGridEl;
         } else if (currentView === "year") {
           yearRangeStart += 10;
           renderYearsView();
+          grid = yearsGridEl;
         }
+        triggerAnim(grid, "cal-anim-next");
       });
     }
 
@@ -542,4 +569,58 @@
       });
     }
   }
+
+  /* ── 会员订阅：选择支付方式弹窗 ── */
+  var payModal = document.getElementById("pay-modal");
+  var payModalClose = document.getElementById("pay-modal-close");
+  var payModalPlanInput = document.getElementById("pay-modal-plan-input");
+  var payModalPlanName = document.getElementById("pay-modal-plan-name");
+  var payModalPlanPrice = document.getElementById("pay-modal-plan-price");
+
+  var openPayModal = function (plan, planName, planPrice) {
+    if (!payModal) { return; }
+    if (payModalPlanInput) { payModalPlanInput.value = plan; }
+    if (payModalPlanName) { payModalPlanName.textContent = planName || "会员订阅"; }
+    if (payModalPlanPrice) { payModalPlanPrice.textContent = planPrice || ""; }
+    payModal.style.display = "flex";
+    payModal.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+  };
+
+  var closePayModal = function () {
+    if (!payModal) { return; }
+    payModal.style.display = "none";
+    payModal.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+  };
+
+  var subscribeButtons = document.querySelectorAll(".plan-subscribe-btn");
+  for (var sIdx = 0; sIdx < subscribeButtons.length; sIdx++) {
+    (function (btn) {
+      btn.addEventListener("click", function () {
+        var plan = btn.getAttribute("data-plan") || "monthly";
+        var planName = btn.getAttribute("data-plan-name") || "会员订阅";
+        var planPrice = btn.getAttribute("data-plan-price") || "";
+        openPayModal(plan, planName, planPrice);
+      });
+    })(subscribeButtons[sIdx]);
+  }
+
+  if (payModalClose) {
+    payModalClose.addEventListener("click", closePayModal);
+  }
+
+  if (payModal) {
+    payModal.addEventListener("click", function (e) {
+      if (e.target === payModal) {
+        closePayModal();
+      }
+    });
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && payModal && payModal.style.display === "flex") {
+      closePayModal();
+    }
+  });
 })();

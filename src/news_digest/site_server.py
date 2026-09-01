@@ -21,7 +21,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -298,6 +298,44 @@ def _page(title: str, body: str) -> str:
         "border:1px solid var(--ink)}.plan-card.is-featured .plan-cta{background:var(--red);"
         "border-color:var(--red)}.plan-cta.is-disabled,.plan-card.is-featured "
         ".plan-cta.is-disabled{background:#777;border-color:#777;cursor:not-allowed}"
+        ".pay-modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;"
+        "background:rgba(28,27,23,.65);backdrop-filter:blur(2px);z-index:1000;"
+        "display:flex;align-items:center;justify-content:center;padding:1rem}"
+        ".pay-modal-card{background:var(--sheet);border:2px solid var(--ink);"
+        "box-shadow:6px 6px 0 var(--ink);border-radius:4px;width:100%;max-width:400px;"
+        "animation:modalPop .18s cubic-bezier(.16,1,.3,1) forwards}"
+        "@keyframes modalPop{from{opacity:0;transform:scale(.95) translateY(10px)}"
+        "to{opacity:1;transform:scale(1) translateY(0)}}"
+        ".pay-modal-head{display:flex;align-items:center;justify-content:space-between;"
+        "padding:.85rem 1.15rem;border-bottom:1.5px solid var(--rule);background:var(--paper)}"
+        ".pay-modal-title{margin:0;font-size:1.15rem;color:var(--ink)}"
+        ".pay-modal-close{background:transparent;border:none;font-size:1.15rem;font-weight:700;"
+        "color:var(--muted);cursor:pointer;padding:.2rem .5rem;line-height:1}"
+        ".pay-modal-close:hover{color:var(--red)}"
+        ".pay-modal-body{padding:1.15rem}"
+        ".pay-modal-plan-info{display:flex;align-items:baseline;justify-content:space-between;"
+        "padding:.5rem .75rem;background:var(--paper);border:1px solid var(--rule);"
+        "border-radius:2px;margin-bottom:.75rem}"
+        ".pay-modal-plan-name{font-weight:700;font-size:1rem;color:var(--ink)}"
+        ".pay-modal-plan-price{font-weight:700;font-size:1.35rem;color:var(--cinnabar);"
+        "font-family:Arial,sans-serif}"
+        ".pay-modal-tip{font-size:.8125rem;color:var(--muted);margin:0 0 .85rem;line-height:1.4}"
+        ".pay-modal-options{display:flex;flex-direction:column;gap:.65rem}"
+        ".pay-channel-btn{display:flex;align-items:center;gap:.75rem;width:100%;"
+        "padding:.75rem 1rem;background:var(--paper);border:1.5px solid var(--rule);"
+        "border-radius:3px;cursor:pointer;text-align:left;transition:all .15s ease;"
+        "box-sizing:border-box}"
+        ".pay-channel-btn:hover{border-color:var(--ink);background:#fff;"
+        "transform:translateY(-1px);box-shadow:2px 2px 0 var(--ink)}"
+        ".pay-icon-lg{display:inline-flex;align-items:center;justify-content:center;"
+        "width:2.2rem;height:2.2rem;border-radius:50%;font-size:1.1rem;font-weight:900;"
+        "color:#fff;flex-shrink:0}"
+        ".pay-icon-alipay{background:#1677ff}.pay-icon-wxpay{background:#07c160}"
+        ".pay-channel-text{flex:1;min-width:0;display:flex;flex-direction:column}"
+        ".pay-channel-text strong{font-size:.95rem;color:var(--ink)}"
+        ".pay-channel-text small{font-size:.75rem;color:var(--muted);margin-top:.1rem}"
+        ".pay-channel-arrow{font-size:1.1rem;font-weight:700;color:var(--muted)}"
+        ".pay-channel-btn:hover .pay-channel-arrow{color:var(--ink);transform:translateX(2px)}"
         ".plan-benefits{list-style:none;padding:0;margin:1rem 0 0}"
         ".plan-benefits li{position:relative;padding:.35rem 0 .35rem 1.35rem;color:var(--muted)}"
         ".plan-benefits li::before{content:'✓';position:absolute;left:0;color:var(--green);"
@@ -327,6 +365,7 @@ def _page(title: str, body: str) -> str:
         "transform:none}}@media(max-width:480px){.site-head{padding:.85rem 1rem}"
         ".wrap{padding:1.7rem 1rem 3rem}form{padding:.85rem}input,select,textarea,button{"
         "width:100%}.plans-grid{grid-template-columns:1fr}.plan-summary{min-height:0}"
+        ".pay-methods{flex-direction:column;align-items:stretch}.pay-method-badge{justify-content:center}"
         ".order-list li{grid-template-columns:1fr}.order-action,.order-action button{width:100%}"
         ".captcha-row input{width:100%}.site-nav{display:grid;"
         "grid-template-columns:repeat(2,minmax(0,1fr));"
@@ -409,10 +448,9 @@ def _plan_card_html(
         action = f"<a class=\"plan-cta\" href=\"{target}\">立即订阅</a>"
     else:
         action = (
-            f"<form method=\"post\" action=\"/order\">"
-            f"<input type=\"hidden\" name=\"csrf\" value=\"{csrf_token}\">"
-            f"<input type=\"hidden\" name=\"plan\" value=\"{plan}\">"
-            "<button class=\"plan-cta\" type=\"submit\">立即订阅</button></form>"
+            f"<button type=\"button\" class=\"plan-cta plan-subscribe-btn\" "
+            f"data-plan=\"{plan}\" data-plan-name=\"{html.escape(label)}\" "
+            f"data-plan-price=\"¥{accounts.format_cents(current)}\">立即订阅</button>"
         )
     return (
         f"<article class=\"plan-card{' is-featured' if featured else ''}\">"
@@ -1176,10 +1214,17 @@ class SiteHandler(BaseHTTPRequestHandler):
                     f"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
                 )
             elif _payment_order_creation_retryable(order, now):
+                pay_type_input = (
+                    f"<input type=\"hidden\" name=\"payment_type\" "
+                    f"value=\"{html.escape(order.payment_type)}\">"
+                    if order.payment_type
+                    else ""
+                )
                 action = (
                     "<form class=\"order-action\" method=\"post\" action=\"/order\">"
                     f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
                     f"<input type=\"hidden\" name=\"plan\" value=\"{order.plan}\">"
+                    f"{pay_type_input}"
                     "<button type=\"submit\">继续支付</button></form>"
                 )
             order_number = order.merchant_order_no or f"#{order.id}"
@@ -1322,6 +1367,41 @@ class SiteHandler(BaseHTTPRequestHandler):
                     f"<input type=\"hidden\" name=\"action\" value=\"{action}\">"
                     f"<button type=\"submit\">{label}</button></form>"
                 )
+        pay_modal_html = ""
+        if plan_csrf is not None:
+            pay_modal_html = (
+                "<div id=\"pay-modal\" class=\"pay-modal-overlay\" style=\"display:none;\" "
+                "aria-hidden=\"true\">"
+                "<div class=\"pay-modal-card\" role=\"dialog\" aria-modal=\"true\" "
+                "aria-labelledby=\"pay-modal-title\">"
+                "<div class=\"pay-modal-head\">"
+                "<h3 id=\"pay-modal-title\" class=\"pay-modal-title\">选择支付方式</h3>"
+                "<button type=\"button\" class=\"pay-modal-close\" id=\"pay-modal-close\" "
+                "aria-label=\"关闭\">✕</button></div>"
+                "<div class=\"pay-modal-body\">"
+                "<div class=\"pay-modal-plan-info\">"
+                "<span class=\"pay-modal-plan-name\" id=\"pay-modal-plan-name\">会员订阅</span>"
+                "<span class=\"pay-modal-plan-price\" id=\"pay-modal-plan-price\"></span></div>"
+                "<p class=\"pay-modal-tip\">请选择支付渠道，即将跳转至安全扫码支付：</p>"
+                "<form method=\"post\" action=\"/order\" id=\"pay-modal-form\">"
+                f"<input type=\"hidden\" name=\"csrf\" value=\"{plan_csrf}\">"
+                "<input type=\"hidden\" name=\"plan\" "
+                "id=\"pay-modal-plan-input\" value=\"monthly\">"
+                "<div class=\"pay-modal-options\">"
+                "<button type=\"submit\" name=\"payment_type\" value=\"alipay\" "
+                "class=\"pay-channel-btn pay-channel-alipay\">"
+                "<span class=\"pay-icon-lg pay-icon-alipay\">支</span>"
+                "<span class=\"pay-channel-text\"><strong>支付宝支付</strong>"
+                "<small>支持支付宝 App 扫码</small></span>"
+                "<span class=\"pay-channel-arrow\">→</span></button>"
+                "<button type=\"submit\" name=\"payment_type\" value=\"wxpay\" "
+                "class=\"pay-channel-btn pay-channel-wxpay\">"
+                "<span class=\"pay-icon-lg pay-icon-wxpay\">微</span>"
+                "<span class=\"pay-channel-text\"><strong>微信支付</strong>"
+                "<small>支持微信 App 扫码</small></span>"
+                "<span class=\"pay-channel-arrow\">→</span></button>"
+                "</div></form></div></div></div>"
+            )
         body = (
             f"{message_html}<h2>付费会员</h2>"
             f"{pricing}"
@@ -1331,6 +1411,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             "<h2>每日简报</h2>"
             "<p class=\"muted\">每日邮件期刊仅向有效付费会员开放，会员到期后自动停止投递。</p>"
             f"{newsletter_html}"
+            f"{pay_modal_html}"
         )
         self._html(
             200,
@@ -1678,6 +1759,11 @@ class SiteHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        raw_payment_type = form.get("payment_type", "").strip().lower()
+        if raw_payment_type in {"alipay", "wxpay"}:
+            order_config = replace(config, payment_type=raw_payment_type)
+        else:
+            order_config = config
         settings = self._load_settings()
         amount = accounts.price_cents(settings, plan)
         if amount <= 10:
@@ -1699,11 +1785,11 @@ class SiteHandler(BaseHTTPRequestHandler):
                     plan=plan,
                     base_amount_cents=amount,
                     merchant_order_no=payments.merchant_order_number(),
-                    payment_type=config.payment_type,
-                    payment_config_id=payments.config_identity(config),
+                    payment_type=order_config.payment_type,
+                    payment_config_id=payments.config_identity(order_config),
                     now=dt.datetime.now(dt.UTC).isoformat(),
-                    ttl_seconds=config.order_ttl_seconds,
-                    amount_hold_seconds=config.amount_hold_seconds,
+                    ttl_seconds=order_config.order_ttl_seconds,
+                    amount_hold_seconds=order_config.amount_hold_seconds,
                 )
             except RuntimeError:
                 self._html(
@@ -1722,6 +1808,8 @@ class SiteHandler(BaseHTTPRequestHandler):
         )
         allow_amount_reallocation = created
         if not created:
+            if order.payment_type in {"alipay", "wxpay"}:
+                order_config = replace(config, payment_type=order.payment_type)
             if order.plan != plan:
                 self._html(
                     409,
@@ -1736,7 +1824,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             if order.status == "pending" and order.payment_url:
                 self._redirect(
                     order.payment_url,
-                    form_action_origin=payments.payment_origin(config),
+                    form_action_origin=payments.payment_origin(order_config),
                 )
                 return
             if not _payment_order_creation_retryable(order, dt.datetime.now(dt.UTC)):
@@ -1756,7 +1844,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                     conn,
                     order_id=order.id,
                     now=dt.datetime.now(dt.UTC).isoformat(),
-                    checkout_ttl_seconds=config.order_ttl_seconds,
+                    checkout_ttl_seconds=order_config.order_ttl_seconds,
                 )
             finally:
                 conn.close()
@@ -1778,7 +1866,7 @@ class SiteHandler(BaseHTTPRequestHandler):
         while creation is None:
             try:
                 creation = self.server.payment_create_callback(
-                    config,
+                    order_config,
                     merchant_order_no=order.merchant_order_no,
                     amount_cents=order.amount_cents,
                     subject=subject,
@@ -1868,13 +1956,15 @@ class SiteHandler(BaseHTTPRequestHandler):
             conn.close()
         self._redirect(
             creation.payment_url,
-            form_action_origin=payments.payment_origin(config),
+            form_action_origin=payments.payment_origin(order_config),
         )
 
     def _settlement_config_for_order(self, order: db.Order) -> EpayConfig:
         config = self.server.settlement_payment_config()
         if config is None:
             raise payments.PaymentError("payment settlement configuration is unavailable")
+        if order.payment_type in {"alipay", "wxpay"}:
+            config = replace(config, payment_type=order.payment_type)
         if order.payment_config_id is not None and (
             payments.config_identity(config) != order.payment_config_id
         ):
