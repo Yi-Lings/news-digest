@@ -154,6 +154,7 @@ def test_translation_config_defaults_openai_stream_and_normalizes_base():
     assert config.api_type == "openai_chat"
     assert config.stream is True
     assert config.base_url == "https://api.example.com/openai/v1"
+    assert config.timeout_seconds == 600.0
 
 
 @pytest.mark.parametrize(

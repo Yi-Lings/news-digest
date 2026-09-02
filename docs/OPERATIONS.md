@@ -42,7 +42,7 @@
 | `TRANSLATION_API_TYPE` | `openai_chat` | `openai_chat` 或 `anthropic_messages`；不按模型名猜协议 |
 | `TRANSLATION_STREAM` | true | 是否使用对应 adapter 的流式 parser |
 | `TRANSLATION_REASONING_EFFORT` | 空 | GPT 模型可选 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`；空值按模型默认，不同模型支持子集可能不同 |
-| `TRANSLATION_TIMEOUT_SECONDS` | 180 | 单请求硬总超时；连接 10 秒、流读取静默 30 秒，正式翻译的可恢复重试总预算 95 秒 |
+| `TRANSLATION_TIMEOUT_SECONDS` | 600 | 单请求硬总超时；连接 10 秒、流读取静默 30 秒；适配 Luna max 等高推理档位，正式翻译的可恢复重试总预算仍为 95 秒 |
 | `TRANSLATION_MAX_TOKENS` | 8192 | 译文长度余量；Claude 系后端必填此参数 |
 | `EMAIL_DELIVERY_ENABLED` | false | 每日自动投递总开关；关闭时不解析残留 SMTP 字段 |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` | 空 | 开启投递前必填；用户名/密码必须同时为空或同时设置 |
@@ -80,7 +80,7 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 **8000 与 8080 端口被本机常驻程序占用。** 预览固定用 8618（`preview --port` 与 `NEWS_SITE_URL` 默认值一致），不要改回。
 
-**翻译网关超时。** 每个阶段与整个请求都有硬 deadline；连接/读取超时、上游 `400/401/403`、429 和受限 5xx 按单篇有限重试与 provider 熔断处理。TLS、协议、响应格式和 schema 错误停止自动退避并保留人工重试动作；流已开始后不整次重试，避免重复计费。
+**翻译网关超时。** 正式单篇请求默认硬总时限为 600 秒（可用 `TRANSLATION_TIMEOUT_SECONDS` 覆盖），连接超时 10 秒、流读取静默超时 30 秒；Luna max 等高推理档位可在硬截止内完成，任务 lease 为 900 秒，避免请求尚未结束就被恢复器回收。每日与恢复 worker 的 systemd 兜底时限为 90 分钟，覆盖默认 6 篇顺序翻译及构建/投递余量。连接/读取超时、上游 `400/401/403`、429 和受限 5xx 按单篇有限重试与 provider 熔断处理。TLS、协议、响应格式和 schema 错误停止自动退避并保留人工重试动作；流已开始后不整次重试，避免重复计费。
 
 **API/SMTP 出网目标。** translation client 明确忽略系统 `HTTP_PROXY` / `HTTPS_PROXY`；API 与 SMTP 都先要求 DNS 的全部结果为公网地址，再把本次 TCP 连接固定到已验证地址，同时继续用原域名执行 HTTP Host、TLS SNI 与证书主机名校验。环境代理不会绕过 provider 校验，DNS 重绑定也不能把实际连接切到私网地址。
 

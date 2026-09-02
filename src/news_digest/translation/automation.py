@@ -383,9 +383,9 @@ class TranslationAutomationRunner:
         now,
         owner: str,
         max_tasks: int = 1,
-        # Keep the task lease longer than the configured 180s provider deadline;
+        # Keep the task lease longer than the default 600s provider deadline;
         # recovery must never reclaim a request that can still be running.
-        lease_seconds: int = 300,
+        lease_seconds: int = 900,
     ) -> AutomationRunResult:
         if type(max_tasks) is not int or max_tasks < 1:
             raise ValueError("max_tasks must be a positive integer")

@@ -14,6 +14,12 @@
   请求。对 GPT 模型可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，
   非 GPT 或 Anthropic 请求不会发送该字段。
 
+- Luna max 超时修复：正式单篇翻译硬总时限默认由 180 秒提高到 600 秒，任务 lease 提高到
+  900 秒；每日/恢复 worker 的 systemd 兜底时限提高到 90 分钟。升级时 bootstrap 会清理
+  旧版 `news-digest-resume.service` 的 `start-limit-hit` 历史标记，但仍保留有限启动频率，
+  防止 provider 故障造成无限重启；Admin 重新探测前会回收已过期的 `half_open` 探测
+  lease，避免永久显示 `provider probe is already queued`。
+
 ## [1.4.0] - 待稳定发布
 
 - 增加独立注册页、两遍密码确认、随机图形验证码、邮箱验证码激活、邮箱密码登录和独立站点会话；注册验证码不建立登录会话，验证码仅用于注册激活和密码重置。

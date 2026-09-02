@@ -126,6 +126,7 @@ class TranslationConfig:
 
 _TRANSLATION_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._~-]+")
 _TRANSLATION_ENDPOINT_SEGMENTS = {"messages", "responses"}
+_DEFAULT_TRANSLATION_TIMEOUT_SECONDS = 600.0
 
 
 def normalize_translation_base_url(value: str) -> str:
@@ -221,8 +222,11 @@ def translation_config_from_env(environ: Mapping[str, str] | None = None) -> Tra
         base_url=normalize_translation_base_url(env.get("TRANSLATION_API_BASE_URL", "")),
         api_key=env.get("TRANSLATION_API_KEY", ""),
         model=env.get("TRANSLATION_MODEL", ""),
-        # 长文 + 大 max_tokens 的生成可达数分钟
-        timeout_seconds=float(env.get("TRANSLATION_TIMEOUT_SECONDS", "180")),
+        # 长文 + reasoning_effort=max 的生成可能接近 8 分钟；默认 10 分钟
+        # 保留有限余量，同时仍由显式硬总时限阻止请求无限挂起。
+        timeout_seconds=float(
+            env.get("TRANSLATION_TIMEOUT_SECONDS", str(int(_DEFAULT_TRANSLATION_TIMEOUT_SECONDS)))
+        ),
         # 两类协议均要求长文译文有充足输出余量
         max_tokens=int(env.get("TRANSLATION_MAX_TOKENS", "8192")),
         cache_dir=Path(env.get("NEWS_DATA_DIR", "var/data")) / "translations",

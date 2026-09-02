@@ -451,6 +451,8 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert "SuccessExitStatus=10" in daily_service
     assert "SuccessExitStatus=10" in resume_service
     assert "RestartPreventExitStatus=10" in resume_service
+    assert "TimeoutStartSec=90min" in daily_service
+    assert "TimeoutStartSec=90min" in resume_service
     assert "/usr/bin/flock -E 75 -n /run/news-digest-worker.lock" in resume_service
     assert "PathChanged=/srv/news-digest/config/automation.wake" in wake_path
     assert "Unit=news-digest-resume.service" in wake_path
@@ -460,6 +462,7 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert (
         "systemctl enable --now news-digest.timer news-digest-wakeup.path" in bootstrap
     )
+    assert "systemctl reset-failed news-digest-resume.service" in bootstrap
     assert "news-digest-resume.service" in server_push
     assert "news-digest-wakeup.path" in server_push
 

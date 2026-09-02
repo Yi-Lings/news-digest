@@ -17,8 +17,8 @@ Type=oneshot
 SuccessExitStatus=10
 # 复用 compose 中 worker 的完整定义（digest、只读、内存上限、env_file 都只在 compose 维护一处）
 ExecStart=/usr/bin/flock /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker
-# 兜底时限：抓取+翻译+构建正常在几分钟内完成；超时按失败处理并回收容器，
-# 防止卡死的任务悬挂到下一次 timer 触发
-TimeoutStartSec=45min
+# 兜底时限：单篇翻译硬总时限为 10 分钟，默认 6 篇顺序处理最多约 60 分钟；
+# 预留抓取、增量构建和投递时间，超时按失败处理并回收容器，防止任务无限悬挂
+TimeoutStartSec=90min
 
 # 无 [Install] 段：本单元只应被 timer 拉起，不随系统启动自动运行

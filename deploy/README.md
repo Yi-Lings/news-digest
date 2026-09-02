@@ -158,6 +158,8 @@ TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
 TRANSLATION_REASONING_EFFORT=
+# Luna max 等高推理档位可能需要数分钟；硬总时限 10 分钟
+TRANSLATION_TIMEOUT_SECONDS=600
 
 EPAY_ENABLED=false
 EPAY_API_BASE=
@@ -197,7 +199,9 @@ bootstrap/Admin 会把 `NEWS_SITE_URL`、SMTP、EasyPay 等 Site 必需字段原
 
 `TRANSLATION_API_TYPE` 只能是 `openai_chat` 或 `anthropic_messages`；GPT 模型的
 `TRANSLATION_REASONING_EFFORT` 可留空（自动）或设置为 `none`、`minimal`、`low`、`medium`、
-`high`、`xhigh`、`max`，具体可用值由上游模型决定；`SMTP_SECURITY`
+`high`、`xhigh`、`max`，具体可用值由上游模型决定。正式翻译的
+`TRANSLATION_TIMEOUT_SECONDS` 默认 600 秒，以覆盖 Luna max 等高推理档位；任务 lease
+为 900 秒，不能设置得短于硬总时限。`SMTP_SECURITY`
 只能是 `implicit_tls`（通常 465）或 `starttls`（通常 587/2525）。先保持两个 enable
 开关为 `false`，通过 Admin 的真实 provider 测试、SMTP 连接测试和测试邮件后再开启。
 账号注册、会员简报和 EasyPay 回调都要求公网 HTTPS 站点就绪。正式版的 timer 固定为 `Asia/Shanghai` 每日

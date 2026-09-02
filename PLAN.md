@@ -217,7 +217,8 @@ TRANSLATION_API_KEY=
 TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
-TRANSLATION_TIMEOUT_SECONDS=180
+# Luna max 等高推理档位可能需要数分钟；硬总时限 10 分钟
+TRANSLATION_TIMEOUT_SECONDS=600
 
 # Email delivery; disabled until SMTP, recipients, and content are verified in Admin
 EMAIL_DELIVERY_ENABLED=false

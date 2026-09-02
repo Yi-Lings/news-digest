@@ -125,6 +125,58 @@ def test_probe_request_during_half_open_returns_active_probe_task(tmp_path):
     assert db.get_provider_circuit(conn, "provider-default").state == "half_open"
 
 
+def test_probe_request_reclaims_expired_half_open_lease_without_worker(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    for failure in range(5):
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="provider_failure", now=_at(failure)
+        )
+
+    queued = db.queue_provider_probe(
+        conn,
+        "provider-default",
+        task.task_id,
+        now=_at(64),
+        actor="admin-a",
+    )
+    assert db.claim_provider_probe(
+        conn,
+        "provider-default",
+        task_id=queued.task_id,
+        owner="dead-worker",
+        now=_at(65),
+        lease_seconds=10,
+        manual=True,
+    )
+
+    # The resume worker is absent; the Admin command itself must reclaim the
+    # expired half-open lease before queuing a replacement probe.
+    replacement = db.queue_provider_probe(
+        conn,
+        "provider-default",
+        task.task_id,
+        now=_at(76),
+        actor="admin-b",
+    )
+    circuit = db.get_provider_circuit(conn, "provider-default")
+    assert circuit is not None
+    assert circuit.state == "open"
+    assert circuit.probe_task_id is None
+    assert replacement.manual_probe_requested_at == _at(76)
+    assert replacement.manual_action_id
+
+    actions = conn.execute(
+        "SELECT actor, status, result_code FROM translation_admin_actions"
+        " WHERE task_id = ? AND action = 'probe' ORDER BY requested_at",
+        (task.task_id,),
+    ).fetchall()
+    assert [tuple(row) for row in actions] == [
+        ("admin-a", "completed", "REQUEST_TIMEOUT"),
+        ("admin-b", "requested", None),
+    ]
+
+
 @pytest.mark.parametrize(
     ("attempt_number", "delay_seconds"),
     [(1, 15), (2, 30), (3, 60), (4, 120), (5, 300), (6, 300)],

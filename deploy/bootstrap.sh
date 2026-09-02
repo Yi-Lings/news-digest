@@ -233,6 +233,8 @@ TRANSLATION_MODEL=
 TRANSLATION_API_TYPE=openai_chat
 TRANSLATION_STREAM=true
 TRANSLATION_REASONING_EFFORT=
+# Luna max 等高推理档位可能需要数分钟；硬总时限 10 分钟
+TRANSLATION_TIMEOUT_SECONDS=600
 
 # ---- EasyPay 兼容支付；完成公网 HTTPS 回调验收前保持关闭 ----
 EPAY_ENABLED=false
@@ -749,6 +751,9 @@ fi
 # ---------------------------------------------------------------
 section "10/10 systemd 调度恢复与收尾自检"
 systemctl daemon-reload
+# 旧版本可能因 resume worker 连续失败留下 start-limit-hit；新单元和新超时
+# 安装后先清除该历史失败标记，避免健康的 wakeup path 仍无法再次唤醒恢复 worker。
+systemctl reset-failed news-digest-resume.service >/dev/null 2>&1 || true
 # Nginx 已成功 reload 后才恢复调度。合并 enable/start 并在任一失败时停止两者，
 # 防止只恢复一半或让未通过完整门禁的 worker 随 timer 运行。
 install -d -m 755 /var/lib/systemd/timers

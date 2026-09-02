@@ -2174,6 +2174,13 @@ def queue_provider_probe(
     _validate_test_attempt_digest(task_id, "task_id")
     actor = _non_empty(actor, "actor", maximum=128)
     now = _automation_timestamp(now)
+    # Admin is allowed to repair a stale probe even when the resume worker is
+    # down.  Without this preflight an expired ``half_open`` lease is treated
+    # as an active probe forever and every click is reduced to
+    # ``provider probe is already queued``.  The sweep is transactional and
+    # only reclaims leases whose deadline has passed, so a live probe remains
+    # idempotent below.
+    sweep_expired_leases(conn, now=now)
     action_id = uuid.uuid4().hex
     try:
         conn.execute("BEGIN IMMEDIATE")
