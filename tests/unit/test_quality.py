@@ -131,6 +131,15 @@ class TestHardGate:
             assert quality.extract_zh_values(translation) == [("plain", 2026.0)]
             assert quality.check_numbers([source], _result([[translation]])) == []
 
+    def test_chinese_year_range_preserves_both_years(self):
+        translation = "二〇二六年至二〇二七年。"
+        assert quality.extract_zh_values(translation) == [
+            ("plain", 2026.0),
+            ("plain", 2027.0),
+        ]
+        result = _result([[translation]])
+        assert quality.check_numbers(["The 2026-27 season runs into 2027."], result) == []
+
     def test_completely_missing_year_still_fails(self):
         violations = quality.check_numbers(
             ["The event happened in 2026."], _result([["事件已经发生。"]])

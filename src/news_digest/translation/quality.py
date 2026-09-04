@@ -71,6 +71,11 @@ _ZH_YEAR_DIGITS = {**_ZH_DIGIT_MAP, "〇": 0}
 _ZH_POSITIONAL_YEAR = re.compile(
     r"(?<![\d零〇一二三四五六七八九两])(?P<num>[零〇一二三四五六七八九]{4})年"
 )
+_ZH_YEAR_RANGE = re.compile(
+    r"(?<![\d零〇一二三四五六七八九两])"
+    r"(?P<first>[零〇一二三四五六七八九]{4})年?\s*(?:[-–—]|至|到)\s*"
+    r"(?P<second>[零〇一二三四五六七八九]{4})年?"
+)
 _ZH_DECADE = re.compile(
     r"(?:(?P<century>\d{1,2})世纪)?(?P<decade>\d{2})年代"
 )
@@ -228,7 +233,17 @@ def extract_zh_values(text: str) -> list[tuple[str, float]]:
     for match in _ZH_TIME.finditer(text):
         consumed.append((match.start(), match.end()))
 
+    for match in _ZH_YEAR_RANGE.finditer(text):
+        for name in ("first", "second"):
+            value = float(
+                "".join(str(_ZH_YEAR_DIGITS[ch]) for ch in match.group(name))
+            )
+            values.append(("plain", value))
+        consumed.append((match.start(), match.end()))
+
     for match in _ZH_POSITIONAL_YEAR.finditer(text):
+        if _overlap(match.start(), match.end()):
+            continue
         value = float("".join(str(_ZH_YEAR_DIGITS[ch]) for ch in match.group("num")))
         values.append(("plain", value))
         consumed.append((match.start(), match.end()))
