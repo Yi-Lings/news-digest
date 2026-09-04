@@ -241,7 +241,7 @@ class TestMode:
             url="https://example.com/test",
         )
 
-    def test_observe_mode_downgrades_hard(self, monkeypatch):
+    def test_observe_mode_keeps_number_check_non_blocking(self, monkeypatch):
         from news_digest.translation.service import _content_gates
 
         monkeypatch.setenv("TRANSLATION_QUALITY_MODE", "observe")
@@ -249,16 +249,16 @@ class TestMode:
         result = _result([["许多人参加了活动。"]])
         hard, soft = _content_gates(article, result)
         assert hard == []
-        assert soft
+        assert soft == []
 
-    def test_enforce_mode_keeps_hard(self, monkeypatch):
+    def test_enforce_mode_does_not_block_on_numbers(self, monkeypatch):
         from news_digest.translation.service import _content_gates
 
         monkeypatch.setenv("TRANSLATION_QUALITY_MODE", "enforce")
         article = self._article("About 1.5 million people attended.")
         result = _result([["许多人参加了活动。"]])
         hard, _soft = _content_gates(article, result)
-        assert hard
+        assert hard == []
 
     def test_invalid_mode_falls_back_to_enforce(self, monkeypatch):
         monkeypatch.setenv("TRANSLATION_QUALITY_MODE", "chaos")

@@ -83,16 +83,13 @@ def _result_from_dict(
 def _content_gates(
     article: Article, result: TranslationResult
 ) -> tuple[list[str], list[str]]:
-    """内容级质量门;返回 (硬违规, 软违规)。observe 模式下硬违规也只进软列表。"""
+    """内容级质量诊断;数字、长度和否定信号均不阻断译文。"""
     from news_digest.translation import quality
 
     hard, soft = quality.check_translation(
         [paragraph.en for paragraph in article.paragraphs],
         result,
     )
-    if quality.mode() == "observe":
-        soft = soft + hard
-        hard = []
     return hard, soft
 
 

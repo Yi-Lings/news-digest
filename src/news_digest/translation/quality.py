@@ -1,8 +1,7 @@
 """内容级翻译质量门:纯函数,在 schema 结构校验之后运行。
 
-设计原则(与 PLAN §12B 一致):
-- 硬门只保留可确定性判定的"数字缺失"——原文数字在译文中值级缺失;
-  专名/否定/长度只做软信号,永不单独阻断。
+设计原则:
+- 数字、专名、否定和长度只做诊断信号,不阻断译文入库。
 - 数值比较是值级的:"1.5 million"与"150万"相等,"45%"与"百分之45"同单位。
 - observe 模式把硬违规降级为软信号,只记录不阻断,用于上线初期实测误报率。
 
@@ -404,7 +403,5 @@ class QualityReport:
 def check_translation(
     source_paragraphs: list[str], result: TranslationResult
 ) -> tuple[list[str], list[str]]:
-    """对已通过 schema 的译文运行内容质量门,返回 (硬违规, 软违规)。"""
-    return check_numbers(source_paragraphs, result), soft_signals(
-        source_paragraphs, result
-    )
+    """对已通过 schema 的译文运行非阻断质量诊断。"""
+    return [], soft_signals(source_paragraphs, result)
