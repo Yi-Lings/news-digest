@@ -42,6 +42,14 @@ class TestExtraction:
         result = _result([["发生在20世纪80年代。"]])
         assert quality.check_numbers(["It happened in the 1980s."], result) == []
 
+    def test_navigation_list_artifact_does_not_create_number_obligations(self):
+        source = [
+            "list of 3 items- list 1 of 3First related story",
+            "The event happened in 2026.",
+        ]
+        result = _result([["相关报道。"], ["事件发生在2026年。"]])
+        assert quality.check_numbers(source, result) == []
+
     def test_zh_arabic_with_scales(self):
         got = quality.extract_zh_values("约150万人参加,比2023年增长45%,耗资23亿。")
         assert sorted(got) == sorted(

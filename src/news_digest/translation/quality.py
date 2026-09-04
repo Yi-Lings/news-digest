@@ -75,6 +75,7 @@ _ZH_DECADE = re.compile(
     r"(?:(?P<century>\d{1,2})世纪)?(?P<decade>\d{2})年代"
 )
 _EN_SHORT_YEAR_RANGE_END = re.compile(r"\b\d{4}[-–—]$")
+_NAV_LIST_ARTIFACT = re.compile(r"^\s*list\s+of\s+\d+\s+items?\s*-", re.IGNORECASE)
 
 # 时刻(22:00、01:30、10.30am)不是可对账的数值:ZH 侧常写作"22时""晚上10时",
 # 拆出的 0/30 只会制造幻影数值,两端都先行排除。
@@ -337,7 +338,14 @@ _ZH_NEGATION = re.compile(r"[不未无非没别勿]|难以|否认|拒绝|禁止|
 
 def check_numbers(source_paragraphs: list[str], result: TranslationResult) -> list[str]:
     """硬门:原文数字必须在译文中保值保留;返回违规描述列表。"""
-    en_text = "\n".join(source_paragraphs)
+    # Some feeds preserve a navigation widget as a pseudo-paragraph (for
+    # example, "list of 3 items- list 1 of 3...").  It is not article content
+    # and should not create hard numeric obligations for the translation.
+    en_text = "\n".join(
+        paragraph
+        for paragraph in source_paragraphs
+        if not _NAV_LIST_ARTIFACT.match(paragraph)
+    )
     zh_text = "\n".join("".join(sentences) for sentences in result.sentences_zh)
     expected = extract_en_values(en_text)
     if not expected:
