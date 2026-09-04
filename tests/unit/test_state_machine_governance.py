@@ -219,6 +219,32 @@ class TestEditionRetry:
         assert statuses[tasks[2].article_id] == "pending"
         conn.close()
 
+    def test_retry_edition_rebinds_retry_wait_tasks_to_current_provider(self, tmp_path):
+        conn, tasks = _seed(tmp_path, article_count=1)
+        old_task = tasks[0]
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
+                " error_code = 'PROVIDER_5XX', error_category = 'provider_infrastructure'"
+                " WHERE task_id = ?",
+                (old_task.task_id,),
+            )
+        counts = db.retry_edition_failed_tasks(
+            conn,
+            "2026-08-30",
+            now=_at(2),
+            actor="admin",
+            provider_id="provider-terra",
+        )
+        assert counts == {"queued": 1, "skipped": 0}
+        rebound = db.translation_task(conn, old_task.task_id)
+        assert rebound is not None
+        assert rebound.provider_id == "provider-terra"
+        assert rebound.status == "retry_wait"
+        assert rebound.next_retry_at == _at(2)
+        assert rebound.error_code is None
+        conn.close()
+
 
 class TestSweep:
     def test_sweep_reclaims_expired_lease_without_process_flag(self, tmp_path):

@@ -3592,20 +3592,51 @@ def retry_edition_failed_tasks(
     *,
     now: str,
     actor: str,
+    provider_id: str | None = None,
 ) -> dict[str, int]:
-    """刊期级一键恢复:把 failed/cancelled/config-blocked 任务批量重新入队。
+    """刊期级一键恢复:把失败任务重新入队，可选地切换到当前 provider。
 
     消灭 partial 死端:任何终态任务都能一次操作回到可调度。已排队或电路未闭合
     的任务被跳过并计数,不部分失败。返回 {queued, skipped} 计数。
     """
     _validate_test_attempt_date(edition_date)
     actor = _non_empty(actor, "actor", maximum=128)
+    if provider_id is not None:
+        provider_id = _non_empty(provider_id, "provider_id", maximum=128)
     now = _automation_timestamp(now)
     queued = 0
     skipped = 0
     tasks = list_translation_tasks(conn, edition_date)
     for task in tasks:
-        if task.status not in {"failed", "cancelled", "configuration_blocked"}:
+        if task.status not in {
+            "failed",
+            "retry_wait",
+            "cancelled",
+            "configuration_blocked",
+        }:
+            continue
+        if provider_id is not None and task.provider_id != provider_id:
+            existing = conn.execute(
+                "SELECT task_id, status FROM translation_tasks"
+                " WHERE edition_date = ? AND article_id = ? AND provider_id = ?",
+                (edition_date, task.article_id, provider_id),
+            ).fetchone()
+            if existing is not None:
+                skipped += 1
+                continue
+            with conn:
+                conn.execute(
+                    "UPDATE translation_tasks SET provider_id = ?, status = 'retry_wait',"
+                    " auto_retry = 1, error_code = NULL, error_category = NULL,"
+                    " http_status = NULL, current_stage = 'waiting', failure_stage = NULL,"
+                    " diagnostic_id = NULL, failed_at = NULL, next_retry_at = ?,"
+                    " finished_at = NULL, manual_retry_requested_at = NULL,"
+                    " manual_probe_requested_at = NULL, manual_action_id = NULL,"
+                    " updated_at = ? WHERE task_id = ? AND status IN"
+                    " ('failed', 'retry_wait', 'cancelled', 'configuration_blocked')",
+                    (provider_id, now, now, task.task_id),
+                )
+            queued += 1
             continue
         circuit = get_provider_circuit(conn, task.provider_id)
         if circuit is not None and circuit.state != "closed":

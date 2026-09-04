@@ -2480,11 +2480,26 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         try:
             conn = db.connect(self.server.translation_db_path)
             try:
+                provider = default_provider(
+                    load_profiles(
+                        self.server.providers_path.parent,
+                        self.server.providers_path.name,
+                    )
+                )
                 counts = db.retry_edition_failed_tasks(
                     conn,
                     edition_date,
                     now=dt.datetime.now(dt.UTC).isoformat(),
                     actor=self._admin_actor(),
+                    provider_id=(
+                        "default-"
+                        + translation_cache_identity(
+                            provider["api_type"],
+                            provider["base_url"],
+                            provider["model"],
+                            provider.get("reasoning_effort", ""),
+                        )[:64]
+                    ),
                 )
             finally:
                 conn.close()
