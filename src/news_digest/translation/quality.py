@@ -71,6 +71,10 @@ _ZH_YEAR_DIGITS = {**_ZH_DIGIT_MAP, "〇": 0}
 _ZH_POSITIONAL_YEAR = re.compile(
     r"(?<![\d零〇一二三四五六七八九两])(?P<num>[零〇一二三四五六七八九]{4})年"
 )
+_ZH_DECADE = re.compile(
+    r"(?:(?P<century>\d{1,2})世纪)?(?P<decade>\d{2})年代"
+)
+_EN_SHORT_YEAR_RANGE_END = re.compile(r"\b\d{4}[-–—]$")
 
 # 时刻(22:00、01:30、10.30am)不是可对账的数值:ZH 侧常写作"22时""晚上10时",
 # 拆出的 0/30 只会制造幻影数值,两端都先行排除。
@@ -152,6 +156,13 @@ def extract_en_values(text: str) -> list[tuple[str, float]]:
         raw = match.group("num")
         if not raw:
             continue
+        # A contracted range such as 2026-27 denotes one year range.  The
+        # short endpoint is not an independent value and is normally expanded
+        # in Chinese as 2026年至2027年.
+        if len(raw) <= 2 and _EN_SHORT_YEAR_RANGE_END.search(
+            text[: match.start()]
+        ):
+            continue
         pct = bool(match.group("pct"))
         scale = match.group("scale")
         try:
@@ -218,6 +229,17 @@ def extract_zh_values(text: str) -> list[tuple[str, float]]:
 
     for match in _ZH_POSITIONAL_YEAR.finditer(text):
         value = float("".join(str(_ZH_YEAR_DIGITS[ch]) for ch in match.group("num")))
+        values.append(("plain", value))
+        consumed.append((match.start(), match.end()))
+
+    for match in _ZH_DECADE.finditer(text):
+        century = match.group("century")
+        decade = int(match.group("decade"))
+        value = (
+            float((int(century) - 1) * 100 + decade)
+            if century is not None
+            else float(decade // 10 * 10)
+        )
         values.append(("plain", value))
         consumed.append((match.start(), match.end()))
 

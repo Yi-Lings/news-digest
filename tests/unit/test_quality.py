@@ -32,6 +32,16 @@ class TestExtraction:
         )
         assert sorted(got) == sorted([("plain", 198.0), ("plain", 3000.0), ("pct", 12.0)])
 
+    def test_contracted_year_range_ignores_short_endpoint(self):
+        assert quality.extract_en_values("The 2026-27 season is underway.") == [
+            ("plain", 2026.0)
+        ]
+
+    def test_chinese_century_decade_matches_english_decade(self):
+        assert quality.extract_zh_values("发生在20世纪80年代。") == [("plain", 1980.0)]
+        result = _result([["发生在20世纪80年代。"]])
+        assert quality.check_numbers(["It happened in the 1980s."], result) == []
+
     def test_zh_arabic_with_scales(self):
         got = quality.extract_zh_values("约150万人参加,比2023年增长45%,耗资23亿。")
         assert sorted(got) == sorted(
