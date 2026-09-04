@@ -395,9 +395,11 @@ class TranslationAutomationRunner:
             candidates: list[db.TranslationTask] = []
             for edition_date in db.unfinished_automation_edition_dates(conn):
                 candidates.extend(
-                    db.list_ready_translation_tasks(
+                    task
+                    for task in db.list_ready_translation_tasks(
                         conn, edition_date, now=timestamp
                     )
+                    if task.provider_id == self.provider_id
                 )
             circuit = db.get_provider_circuit(conn, self.provider_id)
             candidates.sort(
