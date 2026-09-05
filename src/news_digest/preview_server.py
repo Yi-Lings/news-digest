@@ -191,7 +191,7 @@ _IDEMPOTENCY_WARNING = (
 _PUBLIC_SUBSCRIPTION_DISABLED_MESSAGE = "匿名订阅入口已关闭，请登录会员账号管理每日简报"
 _PUBLIC_UNSUBSCRIBE_MESSAGE = "退订请求已处理；如链接有效，后续邮件将停止。"
 _AUTOMATION_EDITION_ERROR_CODES = frozenset(
-    {"BUILD_FAILED", "DELIVERY_FAILED", "DELIVERY_EXPIRED"}
+    {"BUILD_FAILED", "DELIVERY_FAILED", "DELIVERY_EXPIRED", "NO_ELIGIBLE_RECIPIENTS"}
 )
 
 
@@ -565,6 +565,17 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             super().do_GET()
             return
         self._json(404, {"error": "本服务只提供 /admin/ 面板"})
+
+    def send_head(self):
+        from news_digest.static_resources import resolve_static_resource
+
+        path = urlsplit(self.path).path
+        resource = resolve_static_resource(Path(self.directory), path)
+        if not self.server.serve_static_files or resource is None:
+            self.send_error(404)
+            return None
+        self.path = resource[1]
+        return super().send_head()
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
@@ -2162,7 +2173,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     "probe_task_id": None,
                     "csrf_token": self._csrf_for_response(),
                 }
-            tasks = db.list_translation_tasks(conn, edition.edition_date)
+            tasks = db.active_translation_tasks(conn, edition.edition_date)
             provider_id = tasks[0].provider_id if tasks else ""
             provider_circuits = {
                 task.provider_id: db.get_provider_circuit(conn, task.provider_id)
@@ -2300,6 +2311,14 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "edition": {
                     "date": edition.edition_date,
                     "status": edition.status,
+                    "delivery_status": (
+                        "skipped" if edition.last_error_code == "NO_ELIGIBLE_RECIPIENTS"
+                        else "sent" if edition.status == "delivered" else None
+                    ),
+                    "delivery_reason": (
+                        "no_eligible_recipients"
+                        if edition.last_error_code == "NO_ELIGIBLE_RECIPIENTS" else None
+                    ),
                     # partial/build_failed 刊期提供一键批量恢复入口。
                     "retry_edition_available": (
                         edition.status in {"partial", "build_failed"} and summary["failed"] > 0
@@ -5133,6 +5152,8 @@ function renderTranslations(data) {
   var edition = data.edition;
   field("translation-edition").textContent = edition ?
     "刊期 " + edition.date + " · " + edition.status +
+      (edition.delivery_status ? " · 邮件 " + edition.delivery_status : "") +
+      (edition.delivery_reason ? " (" + edition.delivery_reason + ")" : "") +
       (edition.error_code ? " · 错误 " + edition.error_code : "") +
       " · 更新 " + timeText(edition.last_updated) +
       (!dates.length ? " · 当前无待处理任务，显示最近一期结果" : "") :

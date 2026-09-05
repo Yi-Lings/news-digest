@@ -132,8 +132,6 @@ def test_formal_prompt_requires_complete_non_summary_translation():
         lambda d: d.__setitem__("title_zh", "  "),
         lambda d: d.__setitem__("sentences_zh", d["sentences_zh"][:2]),
         lambda d: d["sentences_zh"][1].__setitem__(0, ""),
-        lambda d: d["vocabulary"][0].pop("phonetic"),
-        lambda d: d.__setitem__("sentence_notes", "not-a-list"),
     ],
 )
 def test_parse_rejects_invalid(mutate):
@@ -143,12 +141,12 @@ def test_parse_rejects_invalid(mutate):
         parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
 
 
-def test_parse_rejects_title_over_40_characters():
+def test_parse_preserves_title_over_40_characters():
     data = json.loads(_valid_raw())
     data["title_zh"] = "标" * 41
 
-    with pytest.raises(InvalidTranslation, match="title_zh 不得超过 40 字"):
-        parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
+    result = parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
+    assert result.title_zh == data["title_zh"]
 
 
 def test_parse_rejects_sentence_count_mismatch_against_source():
@@ -187,12 +185,22 @@ def test_split_sentences_handles_common_news_boundaries(text, count):
         ("sentence_notes", 3),
     ],
 )
-def test_parse_rejects_learning_item_count_outside_prompt_contract(key, size):
+def test_parse_preserves_learning_items_outside_recommended_count(key, size):
     data = json.loads(_valid_raw())
     data[key] = [data[key][0] for _ in range(size)]
 
-    with pytest.raises(InvalidTranslation, match=key):
-        parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
+    result = parse_translation(json.dumps(data, ensure_ascii=False), paragraph_count=3)
+    assert len(getattr(result, key)) == size
+
+
+def test_invalid_learning_items_are_filtered_without_rejecting_body():
+    data = json.loads(_valid_raw())
+    data["vocabulary"][0].pop("phonetic")
+    data["sentence_notes"] = "not-a-list"
+    result = parse_translation(json.dumps(data), paragraph_count=3)
+    assert len(result.vocabulary) == len(data["vocabulary"]) - 1
+    assert result.sentence_notes == []
+    assert result.sentences_zh == data["sentences_zh"]
 
 
 def test_parse_rejects_non_json():

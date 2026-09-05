@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,10 +71,11 @@ def write_release_manifest(
     edition: DailyEdition,
     *,
     published_at: dt.datetime | None = None,
+    per_edition: bool = False,
 ) -> Path:
     """Write and re-read the self-contained immutable release identity before publication."""
     release_date, _ = _release_identity(release_name)
-    if edition.date != release_date:
+    if edition.date != release_date and not per_edition:
         raise ValueError("release name date does not match edition date")
     timestamp = published_at or dt.datetime.now(dt.UTC)
     if timestamp.tzinfo is None:
@@ -83,26 +85,50 @@ def write_release_manifest(
     payload = {
         "schema_version": _MANIFEST_SCHEMA,
         "release_name": release_name,
-        "release_date": release_date,
+        "release_date": edition.date,
         "published_at": timestamp.isoformat(timespec="seconds"),
         "edition_sha256": hashlib.sha256(_canonical_edition(edition)).hexdigest(),
         "edition": edition_payload,
     }
-    path = build_dir / _MANIFEST_NAME
+    path = (
+        build_dir / ".editions" / f"{edition.date}.json"
+        if per_edition else build_dir / _MANIFEST_NAME
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(payload, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
     with path.open("xb") as handle:
         handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
-    load_release_manifest(build_dir, expected_release_name=release_name)
+    load_release_manifest(
+        build_dir, expected_release_name=release_name,
+        edition_date=edition.date if per_edition else None,
+    )
     return path
 
 
 def load_release_manifest(
-    release_dir: Path, *, expected_release_name: str | None = None
+    release_dir: Path, *, expected_release_name: str | None = None,
+    edition_date: str | None = None,
 ) -> PublishedRelease:
     """Validate one manifest and all release-relative identities without database fallback."""
-    path = release_dir / _MANIFEST_NAME
+    path = (
+        release_dir / ".editions" / f"{_validated_date(edition_date, 'edition date')}.json"
+        if edition_date else release_dir / _MANIFEST_NAME
+    )
+    return _load_manifest(path, release_dir, expected_release_name, edition_date)
+
+
+def load_publication_record(output_root: Path, edition_date: str) -> PublishedRelease:
+    """Read private durable metadata; it does not assert that HTML is currently online."""
+    date = _validated_date(edition_date, "edition date")
+    return _load_manifest(output_root / ".published" / f"{date}.json", None, None, date)
+
+
+def _load_manifest(
+    path: Path, release_dir: Path | None, expected_release_name: str | None,
+    edition_date: str | None,
+) -> PublishedRelease:
     if path.is_symlink() or not path.is_file():
         raise ValueError("published release manifest is missing or unsafe")
     raw = path.read_bytes()
@@ -126,6 +152,8 @@ def load_release_manifest(
 
     release_name = data.get("release_name")
     release_date, _ = _release_identity(release_name)
+    if edition_date is not None:
+        release_date = edition_date
     if expected_release_name is not None and release_name != expected_release_name:
         raise ValueError("published release identity does not match its directory")
     if data.get("release_date") != release_date:
@@ -152,22 +180,31 @@ def load_release_manifest(
     digest = hashlib.sha256(_canonical_edition(edition)).hexdigest()
     if data.get("edition_sha256") != digest:
         raise ValueError("published edition digest does not match")
+    if (
+        type(edition.generation) is not int or edition.generation < 0
+        or not isinstance(edition.result_revisions, dict)
+        or any(type(v) is not int or v < 0 for v in edition.result_revisions.values())
+    ):
+        raise ValueError("published edition revision is invalid")
 
-    issue_dir = release_dir / "issues" / release_date
-    if not (issue_dir / "index.html").is_file():
+    issue_dir = release_dir / "issues" / release_date if release_dir else None
+    if issue_dir is not None and not (issue_dir / "index.html").is_file():
         raise ValueError("published release issue page is missing")
+    if len({a.url for a in edition.articles}) != len(edition.articles):
+        raise ValueError("published article identity is duplicated")
+    if len({a.slug for a in edition.articles}) != len(edition.articles):
+        raise ValueError("published article path is duplicated")
     for article in edition.articles:
         if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", article.slug):
             raise ValueError("published article slug is unsafe")
-        article_path = issue_dir / f"{article.slug}.html"
-        if article_path.parent != issue_dir or not article_path.is_file():
+        if issue_dir is not None and not (issue_dir / f"{article.slug}.html").is_file():
             raise ValueError("published release article page is missing")
     return PublishedRelease(
         release_name=release_name,
         release_date=release_date,
         published_at=published_at.astimezone(dt.UTC),
         edition=edition,
-        path=release_dir,
+        path=release_dir or path.parent,
         edition_sha256=digest,
     )
 
@@ -192,6 +229,11 @@ def resolve_published_release(
             raise ValueError("current published release is unavailable") from error
     else:
         wanted = _validated_date(edition_date, "requested edition date")
+        current = (output_root / "current").resolve()
+        if current.parent == releases_root and (current / ".editions" / f"{wanted}.json").is_file():
+            return load_release_manifest(
+                current, expected_release_name=current.name, edition_date=wanted,
+            )
         candidates: list[tuple[int, Path]] = []
         for entry in releases.iterdir():
             if entry.is_symlink() or not entry.is_dir():
@@ -221,8 +263,38 @@ def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
         raise FileExistsError(f"release already exists: {release_name}")
     shutil.move(str(build_dir), str(target))
     switch_current(output_root, target)
+    persist_publication_index(output_root)
     _prune_releases(releases, keep_name=target.name)
     return target
+
+
+def persist_publication_index(output_root: Path) -> None:
+    """Keep per-edition publication facts even after old HTML releases are pruned."""
+    current = (output_root / "current").resolve()
+    if not (current / _MANIFEST_NAME).is_file():
+        return
+    if current.parent != (output_root / "releases").resolve():
+        raise ValueError("published release path escapes releases directory")
+    manifests = list((current / ".editions").glob("*.json"))
+    if not manifests:
+        manifests = [current / _MANIFEST_NAME]
+    index = output_root / ".published"
+    index.mkdir(exist_ok=True)
+    for manifest in manifests:
+        date = manifest.stem if manifest.name != _MANIFEST_NAME else None
+        publication = load_release_manifest(
+            current, expected_release_name=current.name, edition_date=date,
+        )
+        destination = index / f"{publication.release_date}.json"
+        temporary = index / f".{uuid.uuid4().hex}.tmp"
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(manifest.read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _prune_releases(releases: Path, keep_name: str) -> None:

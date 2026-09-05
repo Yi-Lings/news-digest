@@ -1,11 +1,9 @@
-"""翻译执行：缓存、重试与断点续跑。
+"""Translation execution with validated caches and bounded sentence repair."""
 
-缓存键 = sha256(文章内容哈希 : 接口缓存身份 : prompt 版本)；
-仅校验通过的结果写入缓存，非法响应绝不落盘、不覆盖既有有效结果。
-"""
-
+import copy
 import hashlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -13,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from news_digest.models import Article, DailyEdition
+from news_digest.models import Article, DailyEdition, article_source_hash
 from news_digest.translation.client import TranslationError
 from news_digest.translation.schema import (
     PROMPT_VERSION,
@@ -21,6 +19,7 @@ from news_digest.translation.schema import (
     InvalidTranslation,
     TranslationResult,
     apply_translation,
+    parse_sentence_repair,
     parse_translation,
     result_to_dict,
 )
@@ -37,14 +36,7 @@ class Translator(Protocol):
 
 
 def article_content_hash(article: Article) -> str:
-    payload = (
-        article.title_en
-        + "\n"
-        + article.summary_en
-        + "\n"
-        + "\n".join(p.en for p in article.paragraphs)
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return article_source_hash(article)
 
 
 def cache_key(article: Article, cache_identity: str) -> str:
@@ -66,12 +58,11 @@ class TranslateReport:
 def _result_from_dict(
     data: dict, article: Article, frozen_counts: list[int] | None = None
 ) -> TranslationResult:
+    if not isinstance(data, dict):
+        raise InvalidTranslation("Invalid cached translation")
     cached_splitter = data.get("splitter_version")
     if cached_splitter is not None and cached_splitter != SPLITTER_VERSION:
-        # 缓存由不同版本的分句器验收:按当前规则不可信,视为未命中。
-        raise InvalidTranslation(
-            f"缓存分句器版本 {cached_splitter} 与当前 {SPLITTER_VERSION} 不一致"
-        )
+        raise InvalidTranslation("Cached splitter version mismatch")
     return parse_translation(
         json.dumps(data, ensure_ascii=False),
         len(article.paragraphs),
@@ -80,34 +71,10 @@ def _result_from_dict(
     )
 
 
-def _content_gates(
-    article: Article, result: TranslationResult
-) -> tuple[list[str], list[str]]:
-    """内容级质量诊断;数字、长度和否定信号均不阻断译文。"""
+def _content_gates(article: Article, result: TranslationResult) -> tuple[list[str], list[str]]:
     from news_digest.translation import quality
 
-    hard, soft = quality.check_translation(
-        [paragraph.en for paragraph in article.paragraphs],
-        result,
-    )
-    return hard, soft
-
-
-def _validate_candidate(
-    article: Article,
-    raw: str,
-    frozen_counts: list[int] | None,
-) -> tuple[TranslationResult, list[str]]:
-    result = parse_translation(
-        raw,
-        len(article.paragraphs),
-        [p.en for p in article.paragraphs],
-        frozen_counts,
-    )
-    hard, soft = _content_gates(article, result)
-    if hard:
-        raise InvalidTranslation("；".join(hard), code="CONTENT_NUMBER_MISSING")
-    return result, soft
+    return quality.check_translation([p.en for p in article.paragraphs], result)
 
 
 def _attempt_with_gates(
@@ -118,24 +85,27 @@ def _attempt_with_gates(
     cancel_requested: Callable[[], bool] | None,
     frozen_counts: list[int] | None,
 ) -> TranslationResult:
-    """校验候选输出;硬门失败交给调用方进入两轮修正预算,软门最多触发一次修复。"""
-    result, soft = _validate_candidate(article, raw, frozen_counts)
-    if not soft:
-        return result
-    repair = getattr(translator, "translate_with_feedback", None)
-    if not callable(repair):
-        return result
+    # Soft diagnostics are observational and never cause another provider request.
+    return parse_translation(
+        raw,
+        len(article.paragraphs),
+        [p.en for p in article.paragraphs],
+        frozen_counts,
+    )
+
+
+def _write_json_cache(cache_file: Path, data: dict) -> None:
+    temporary = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex}.tmp")
     try:
-        repaired = repair(
-            article,
-            "译文存在以下质量风险，请修正后完整重新输出 JSON：" + "；".join(soft),
-            cancel_requested=cancel_requested,
-            previous_output=raw,
-        )
-        fixed, _ = _validate_candidate(article, repaired, frozen_counts)
-    except Exception:
-        return result
-    return fixed
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        temporary.replace(cache_file)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _check_cancel(cancel_requested: Callable[[], bool] | None) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise TranslationError("Translation cancelled", category="request_cancelled")
 
 
 def translate_article_once(
@@ -145,67 +115,143 @@ def translate_article_once(
     *,
     cancel_requested: Callable[[], bool] | None = None,
     frozen_counts: list[int] | None = None,
+    frozen_sentences: list[list[str]] | None = None,
+    on_result: Callable[[TranslationResult], None] | None = None,
+    on_request: Callable[[int, str | None, str, float], None] | None = None,
+    force: bool = False,
 ) -> tuple[Article, bool]:
-    """Translate one article once, returning the persisted-schema result or raising safely."""
+    """Repair invalid sentence slots within the article's single request/time budget."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     identity = getattr(translator, "cache_identity", translator.model)
     cache_file = cache_dir / f"{cache_key(article, identity)}.json"
-    if cache_file.is_file():
+    _check_cancel(cancel_requested)
+    if not force and cache_file.is_file():
         try:
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            result = _result_from_dict(cached, article, frozen_counts)
-            return apply_translation(article, result, translator.label), True
-        except (InvalidTranslation, json.JSONDecodeError):
-            pass
-
-    translate_with_cancel = getattr(translator, "translate_with_cancel", None)
-    if cancel_requested is not None and callable(translate_with_cancel):
-        raw = translate_with_cancel(article, cancel_requested=cancel_requested)
-    else:
-        raw = translator.translate(article)
-
-    try:
-        result = _attempt_with_gates(
-            article,
-            translator,
-            raw,
-            cancel_requested=cancel_requested,
-            frozen_counts=frozen_counts,
-        )
-    except InvalidTranslation as first_error:
-        # Model output can be structurally valid JSON but miss a sentence or a
-        # key number. Give the provider two bounded correction attempts with
-        # the previous output attached before surfacing a terminal task.
-        repair = getattr(translator, "translate_with_feedback", None)
-        if not callable(repair):
-            raise
-        last_error = first_error
-        last_raw = raw
-        for _ in range(2):
-            raw = repair(
+            result = _result_from_dict(
+                json.loads(cache_file.read_text(encoding="utf-8")),
                 article,
-                str(last_error),
-                cancel_requested=cancel_requested,
-                previous_output=last_raw,
+                frozen_counts,
             )
-            last_raw = raw
-            try:
-                result = _validate_candidate(article, raw, frozen_counts)[0]
-            except InvalidTranslation as error:
-                last_error = error
-            else:
-                break
+        except (InvalidTranslation, ValueError):
+            pass
         else:
-            raise last_error
-    temporary = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(result_to_dict(result), ensure_ascii=False, indent=1),
-            encoding="utf-8",
+            if on_result is not None:
+                on_result(result)
+            return apply_translation(article, result, translator.label), True
+
+    started = time.monotonic()
+    budget = getattr(translator, "timeout_seconds", 600.0)
+    last_error: InvalidTranslation | None = None
+    raw = ""
+    result = None
+    for request_number in range(1, 4):
+        _check_cancel(cancel_requested)
+        remaining = budget - (time.monotonic() - started)
+        if remaining <= 0:
+            raise TranslationError(
+                "Translation execution deadline exceeded",
+                category="total_timeout",
+            )
+        repair = getattr(translator, "translate_sentence_repair", None)
+        local = (
+            last_error is not None
+            and last_error.sentence_failures
+            and frozen_sentences is not None
+            and callable(repair)
         )
-        temporary.replace(cache_file)
-    finally:
-        temporary.unlink(missing_ok=True)
+        target = last_error.sentence_failures[0] if local else None
+        target_id = f"P{target[0]}S{target[1]}" if target else None
+        if on_request is not None:
+            on_request(request_number, target_id, "started", time.monotonic() - started)
+        outcome = "failed"
+        try:
+            if target is not None:
+                p, s = target
+                sentences = frozen_sentences[p - 1]
+                prior = last_error.candidate["sentences_zh"][p - 1][s - 1]
+                response = repair(
+                    title_en=article.title_en,
+                    paragraph_index=p,
+                    sentence_index=s,
+                    source_sentence=sentences[s - 1],
+                    previous_translation=prior if isinstance(prior, str) else "",
+                    context_before=sentences[s - 2] if s > 1 else "",
+                    context_after=sentences[s] if s < len(sentences) else "",
+                    evidence=[{"code": "CONTENT_FIELD_MISSING", "target": target_id}],
+                    cancel_requested=cancel_requested,
+                    timeout_seconds=remaining,
+                )
+                fixed = parse_sentence_repair(response, paragraph_index=p, sentence_index=s)
+                candidate = copy.deepcopy(last_error.candidate)
+                candidate["sentences_zh"][p - 1][s - 1] = fixed.translation_zh
+                raw = json.dumps(candidate, ensure_ascii=False)
+            else:
+                request = getattr(translator, "translate_request", None)
+                feedback = getattr(translator, "translate_with_feedback", None)
+                cancellable = getattr(translator, "translate_with_cancel", None)
+                if callable(request):
+                    raw = request(
+                        article,
+                        frozen_sentences=frozen_sentences,
+                        cancel_requested=cancel_requested,
+                        timeout_seconds=remaining,
+                        feedback=str(last_error) if last_error else None,
+                        previous_output=raw,
+                    )
+                elif last_error is not None and callable(feedback):
+                    raw = feedback(
+                        article,
+                        str(last_error),
+                        cancel_requested=cancel_requested,
+                        previous_output=raw,
+                    )
+                elif last_error is not None:
+                    raise last_error
+                elif cancel_requested is not None and callable(cancellable):
+                    raw = cancellable(article, cancel_requested=cancel_requested)
+                else:
+                    raw = translator.translate(article)
+            _check_cancel(cancel_requested)
+            if time.monotonic() - started >= budget:
+                raise TranslationError(
+                    "Translation execution deadline exceeded", category="total_timeout"
+                )
+            result = parse_translation(
+                raw,
+                len(article.paragraphs),
+                [p.en for p in article.paragraphs],
+                frozen_counts,
+            )
+            outcome = "succeeded"
+        except InvalidTranslation as error:
+            # A bad repair response must retain the candidate and its original target.
+            if target is None or error.candidate is not None:
+                last_error = error
+            outcome = "invalid_sentence" if target else "invalid_structure"
+            if target is not None and error.candidate is not None:
+                if target not in error.sentence_failures:
+                    outcome = "succeeded"
+        except TranslationError as error:
+            outcome = error.category
+            raise
+        finally:
+            if on_request is not None:
+                try:
+                    on_request(request_number, target_id, outcome, time.monotonic() - started)
+                except Exception:
+                    # Recording must not replace cancellation or uncertain termination.
+                    if outcome in {"request_cancelled", "termination_unconfirmed", "total_timeout"}:
+                        logging.getLogger(__name__).warning("Translation request audit failed")
+                    else:
+                        raise
+        if result is not None:
+            break
+    if result is None:
+        raise last_error or InvalidTranslation("Translation request budget exhausted")
+    _check_cancel(cancel_requested)
+    if on_result is not None:
+        on_result(result)
+    _write_json_cache(cache_file, result_to_dict(result))
     return apply_translation(article, result, translator.label), False
 
 

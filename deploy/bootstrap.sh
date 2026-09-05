@@ -513,6 +513,10 @@ with sqlite3.connect(
   echo "迁移前数据库备份已验证：${backup_path}（SHA-256：${checksum_path}）"
 }
 
+# Stop every long-lived database writer before taking the migration restore point.
+if [ -f "${APP_DIR}/compose.yaml" ]; then
+  docker compose -f "${APP_DIR}/compose.yaml" stop site admin
+fi
 backup_database_before_migration
 
 # Admin 以 0:10001 且 cap_drop=ALL 运行，不能依赖 root 绕过目录权限；worker 则以
@@ -536,6 +540,13 @@ find /data -type d -exec chmod g+s {} +
 prepare_shared_data_volume
 install_file "${TMP_DIR}/compose.yaml" "${APP_DIR}/compose.yaml" 644
 COMPOSE=(docker compose -f "${APP_DIR}/compose.yaml")
+# This command has no provider, payment or mail calls. It runs before new writers start.
+docker volume create news-digest_news-site >/dev/null
+docker run --rm --network none --read-only --user 10001:10001 \
+  --entrypoint news-digest \
+  --mount type=volume,src=news-digest_news-data,dst=/data \
+  --mount type=volume,src=news-digest_news-site,dst=/site,readonly \
+  "$WORKER_IMAGE" migrate-content || die "Content migration failed; Site/Admin remain stopped"
 # 记录本次实际部署的镜像 digest，供回滚溯源（回滚指引见收尾段与 README §10）。pull 后本地
 # 镜像已按 Release digest 固定；同时把运行时解析结果落盘台账供回滚核对。
 record_deployed() {

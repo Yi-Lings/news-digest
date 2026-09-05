@@ -75,6 +75,8 @@ http {
             return 200 "ok";
         }
 
+        location = /release.json { return 404; }
+        location ~ /\. { return 404; }
         location / {
             try_files $uri $uri/ =404;
         }

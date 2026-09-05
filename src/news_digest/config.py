@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 SITE_NAME = "Cheapcoding News"
 SITE_TAGLINE = "每日双语新闻"
+MAX_TRANSLATION_TIMEOUT_SECONDS = 3600
 _SMTP_PASSWORD_ENCODING_PREFIX = "nd-b64-v1:"
 
 

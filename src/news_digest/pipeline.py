@@ -1,6 +1,7 @@
 """Composition of the full build flow. The only module that wires stages together."""
 
 import datetime
+import hashlib
 import json
 import shutil
 import zoneinfo
@@ -57,7 +58,7 @@ class FetchReport:
 
 def _within_window(candidate: Candidate, now: datetime.datetime, hours: int) -> bool:
     published = datetime.datetime.fromisoformat(candidate.published_at_utc)
-    return published >= now - datetime.timedelta(hours=hours)
+    return now - datetime.timedelta(hours=hours) <= published <= now + datetime.timedelta(minutes=5)
 
 
 def _collect_candidates(
@@ -128,7 +129,7 @@ def _candidate_to_article(
             credit=f"图片来源：{candidate.source_name}",
         )
     return Article(
-        slug=slugify(candidate.title),
+        slug=f"{slugify(candidate.title)}-{hashlib.sha256(candidate.url.encode()).hexdigest()[:16]}",
         source=candidate.source_name,
         title_en=candidate.title,
         summary_en=candidate.summary or candidate.title,
@@ -241,6 +242,9 @@ def selected_edition(
     conn, date: str, now: datetime.datetime, main_count: int = 6
 ) -> DailyEdition | None:
     """从文章池选出主文章，未入选者与既有简讯合并为当日简讯。"""
+    frozen = db.frozen_edition(conn, date)
+    if frozen is not None:
+        return frozen
     pool = db.get_edition(conn, date)
     if pool is None:
         return None
@@ -356,10 +360,34 @@ def build_editions(
 
     env = create_environment(demo=demo)
     latest = editions[0]
+    if latest.source_status in {"source_only", "unavailable"}:
+        raise ValueError("Latest edition lacks a confirmed source snapshot")
+
+    previous_issues = output_root / "current" / "issues"
+    if previous_issues.is_dir():
+        shutil.copytree(previous_issues, build_dir / "issues")
+        known_dates = {edition.date for edition in editions}
+        editions = list(editions)
+        for issue in previous_issues.iterdir():
+            if issue.is_dir() and issue.name not in known_dates:
+                try:
+                    date = datetime.date.fromisoformat(issue.name).isoformat()
+                except ValueError:
+                    continue
+                editions.append(DailyEdition(date=date, source_status="unavailable"))
+        editions.sort(key=lambda edition: edition.date, reverse=True)
     all_dates = [edition.date for edition in editions]
 
     for edition in editions:
+        slugs = [article.slug for article in edition.articles]
+        urls = [article.url for article in edition.articles]
+        if len(set(slugs)) != len(slugs) or len(set(urls)) != len(urls):
+            raise ValueError(f"Duplicate article identity or page path in {edition.date}")
         issue_dir = build_dir / "issues" / edition.date
+        if edition.source_status in {"source_only", "unavailable"} and issue_dir.is_dir():
+            continue
+        if issue_dir.is_dir():
+            shutil.rmtree(issue_dir)
         issue_dir.mkdir(parents=True)
         home_html = render_home(
             env,
@@ -391,7 +419,10 @@ def build_editions(
             "date": edition.date,
             "lead_title_en": edition.articles[0].title_en if edition.articles else "",
             "lead_title_zh": edition.articles[0].title_zh if edition.articles else "",
-            "article_count": len(edition.articles),
+            "article_count": (
+                len(edition.articles)
+                if edition.source_status not in {"source_only", "unavailable"} else None
+            ),
             "brief_count": len(edition.briefs),
         }
         for edition in editions
@@ -409,6 +440,9 @@ def build_editions(
     _validate_build(build_dir)
     release_name = _release_name(output_root, latest.date)
     write_release_manifest(build_dir, release_name, latest)
+    for edition in editions:
+        if edition.source_status not in {"source_only", "unavailable"}:
+            write_release_manifest(build_dir, release_name, edition, per_edition=True)
     _validate_build(build_dir, require_manifest=True)
     return publish(build_dir, output_root, release_name)
 

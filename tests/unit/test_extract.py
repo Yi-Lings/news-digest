@@ -46,3 +46,15 @@ def test_garbage_returns_none():
 def test_reading_minutes_floor():
     assert reading_minutes(["word " * 10]) == 1
     assert reading_minutes(["word " * 450]) == 2
+
+
+def test_normal_short_paragraphs_survive_cleaning(monkeypatch):
+    from news_digest.extractors import body
+
+    monkeypatch.setattr(
+        body.trafilatura, "extract", lambda *a, **kw: "It stopped.\nNobody left.\nShare this",
+    )
+    monkeypatch.setattr(body.trafilatura, "extract_metadata", lambda *a, **kw: None)
+    result = extract_body("fixture", "https://example.test/story")
+    assert result is not None
+    assert result.paragraphs == ["It stopped.", "Nobody left."]

@@ -587,7 +587,10 @@ def test_missing_task_article_releases_claim_as_visible_failure(tmp_path):
     runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
     conn = db.connect(database)
     try:
-        conn.execute("DELETE FROM articles WHERE date = ?", ("2026-07-28",))
+        conn.execute(
+            "UPDATE edition_items SET source_hash = 'invalid' WHERE edition_date = ?",
+            ("2026-07-28",),
+        )
         conn.commit()
     finally:
         conn.close()

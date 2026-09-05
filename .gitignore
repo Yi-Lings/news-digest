@@ -18,6 +18,7 @@ dist/
 var/
 
 # Local secrets
+.env
 .env.local
 .env.providers.local
 

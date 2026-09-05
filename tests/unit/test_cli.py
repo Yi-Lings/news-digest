@@ -291,8 +291,9 @@ def test_daily_yes_uses_persistent_article_automation_not_bulk_translation(
     assert captured and captured[0][1] is fetched
 
 
+@pytest.mark.parametrize("publication_interrupt", [False, True])
 def test_production_automation_waits_and_retries_only_failed_article(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, publication_interrupt
 ):
     now = [dt.datetime(2026, 7, 28, tzinfo=dt.UTC)]
     calls = 0
@@ -363,15 +364,17 @@ def test_production_automation_waits_and_retries_only_failed_article(
     def load_editions(config):
         conn = db.connect(config.database)
         try:
-            return [db.get_edition(conn, edition.date)]
+            return [db.frozen_edition(conn, edition.date)]
         finally:
             conn.close()
 
-    release = tmp_path / "site" / "releases" / "2026-07-28-01"
+    from news_digest.pipeline import build_editions as real_build_editions
 
     def build_editions(editions, config):
         build_counts.append(len(editions[0].articles))
-        release.mkdir(parents=True, exist_ok=True)
+        release = real_build_editions(editions, config)
+        if publication_interrupt:
+            raise OSError("interrupted after publication")
         return release
 
     report = types.SimpleNamespace(
@@ -408,18 +411,19 @@ def test_production_automation_waits_and_retries_only_failed_article(
     def sleep(seconds):
         now[0] += dt.timedelta(seconds=seconds)
 
-    assert (
-        _run_automation_daily(
-            fetch_config,
-            edition,
-            clock=lambda: now[0],
-            sleep=sleep,
-        )
-        == 0
+    exit_code = _run_automation_daily(
+        fetch_config, edition, clock=lambda: now[0], sleep=sleep,
     )
+    if publication_interrupt:
+        assert exit_code == 10
+        assert _run_automation_daily(
+            fetch_config, edition, clock=lambda: now[0], sleep=sleep,
+        ) == 0
+    else:
+        assert exit_code == 0
     assert calls == 2
     assert build_counts == [1]
-    assert delivery_calls == [edition.date]
+    assert delivery_calls == []
     assert now[0] == dt.datetime(2026, 7, 28, 0, 0, 17, tzinfo=dt.UTC)
 
 
@@ -507,10 +511,14 @@ def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
     )
     monkeypatch.setattr(
         "news_digest.storage.db.automation_edition",
-        lambda conn, date: types.SimpleNamespace(status="partial"),
+        lambda conn, date: types.SimpleNamespace(
+            status="partial",
+            dirty_generation=0,
+            built_generation=0,
+        ),
     )
     monkeypatch.setattr(
-        "news_digest.storage.db.list_translation_tasks",
+        "news_digest.storage.db.active_translation_tasks",
         lambda conn, date: [types.SimpleNamespace(status="failed", auto_retry=False)],
     )
 

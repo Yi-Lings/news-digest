@@ -9,8 +9,8 @@ StartLimitBurst=4
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flock -E 75 -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
-# 与每日 worker 一致：最多 6 篇各 10 分钟，再留出抓取/构建/投递余量
-TimeoutStartSec=90min
+# Same bounded multi-attempt budget as the daily worker.
+TimeoutStartSec=24h
 SuccessExitStatus=10
 Restart=on-failure
 RestartPreventExitStatus=10

@@ -457,9 +457,15 @@ sudo docker compose up -d web site admin   # web、公开站点与面板立即�
 ```
 
 注意（PLAN §10）：镜像回滚不会自动恢复数据库，数据库 schema 只前滚。若旧镜像不兼容
-当前 schema，必须先停止 Admin/worker，由操作员人工选择指定的迁移前备份，核验对应
+当前 schema，必须先停止 Site/Admin/worker 以及 timer/wakeup path，由操作员人工选择指定的迁移前备份，核验对应
 SHA-256 与 `PRAGMA integrity_check` 后再手工恢复；不得自动选择“最新”备份，也不得直接
 覆盖仍在线的 `news.db`。
+
+schema 11 部署会在备份前停止 Site/Admin，在新服务启动前离线执行
+`news-digest migrate-content`，仅恢复当前刊期成员与匹配缓存；往期页面原样保留，不补译、不重建、不补发。
+该命令不抓取、不调用模型、不发邮件。迁移失败时服务保持停止，不自动用旧镜像打开升级库。
+schema 10 镜像不兼容 schema 11。恢复备份前必须保留升级后的数据库，核对备份时间之后的
+支付到账、会员权益、已发送邮件及 `unknown` 投递；不能覆盖这些外部事实后直接重跑任务。
 
 ## 11. 日常观察
 

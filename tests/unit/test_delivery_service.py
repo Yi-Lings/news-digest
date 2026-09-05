@@ -513,15 +513,16 @@ def test_manual_zero_recipient_run_closes_after_last_recipient_withdraws(
 
     assert report.status == "skipped"
     assert report.total_count == 0
-    assert report.error_category is None
+    assert report.error_category == "no_eligible_recipients"
     assert FakeSMTP.messages == []
     conn = db.connect(database)
     try:
         run = db.latest_delivery_run(conn)
         assert run is not None and run.mode == "manual"
-        assert run.status == "completed" and run.total_count == 0
+        assert run.status == "skipped" and run.total_count == 0
         edition = db.automation_edition(conn, DATE)
-        assert edition is not None and edition.status == "delivered"
+        assert edition is not None and edition.status == "complete"
+        assert edition.last_error_code == "NO_ELIGIBLE_RECIPIENTS"
     finally:
         conn.close()
 
@@ -610,14 +611,15 @@ def test_completed_zero_recipient_run_finalizes_ineligible_unknown(tmp_path):
     )
 
     assert report.status == "skipped"
-    assert report.error_category is None
+    assert report.error_category == "no_eligible_recipients"
     assert FakeSMTP.messages == []
     conn = db.connect(database)
     try:
         state = db.delivery_states(conn, DATE)[0]
         assert state.status == "ineligible"
         assert state.ineligible_from_status == "unknown"
-        assert db.automation_edition(conn, DATE).status == "delivered"
+        assert db.automation_edition(conn, DATE).status == "complete"
+        assert db.automation_edition(conn, DATE).last_error_code == "NO_ELIGIBLE_RECIPIENTS"
     finally:
         conn.close()
 
@@ -1375,7 +1377,7 @@ def test_schema_v9_migrates_delivery_rows_and_index_without_data_loss(tmp_path):
     conn = db.connect(path)
     assert conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()["value"] == "10"
+    ).fetchone()["value"] == str(db.SCHEMA_VERSION)
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert conn.execute("SELECT COUNT(*) FROM email_deliveries").fetchone()[0] == 1

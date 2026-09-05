@@ -13,7 +13,6 @@ import trafilatura
 
 from news_digest.textutil import collapse_ws, html_to_text
 
-_MIN_PARAGRAPH_CHARS = 30
 _MIN_PARAGRAPH_COUNT = 2
 _WORDS_PER_MINUTE = 200
 
@@ -51,7 +50,6 @@ def extract_body(page_html: str, url: str) -> ExtractedBody | None:
         for line in text.splitlines()
         if collapse_ws(line)
     ]
-    paragraphs = [p for p in paragraphs if len(p) >= _MIN_PARAGRAPH_CHARS]
     paragraphs = [
         p
         for p in paragraphs

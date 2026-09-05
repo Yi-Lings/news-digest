@@ -41,6 +41,13 @@ def _config(**overrides) -> TranslationConfig:
     return TranslationConfig(**values)
 
 
+@pytest.mark.parametrize("timeout", [0, -1, 3601, float("nan"), float("inf")])
+def test_article_budget_must_fit_worker_lease(timeout):
+    with pytest.raises(TranslationError) as error:
+        ApiTranslator(_config(timeout_seconds=timeout))
+    assert error.value.category == "configuration"
+
+
 def _article() -> Article:
     return Article(
         slug="s",

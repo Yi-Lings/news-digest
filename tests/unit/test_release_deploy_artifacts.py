@@ -50,6 +50,19 @@ def test_release_bundle_carries_exact_version_and_image_digests():
     assert "sha256sum news-digest-deploy.tgz" in workflow
     assert "news-digest-deploy.tgz.sha256" in workflow
     assert not re.search(r"uses:\s+[^\s#]+@v\d+", workflow)
+    assert "pull_request:" in workflow
+    assert "branches: [main]" in workflow
+    assert "build:\n    if: startsWith(github.ref, 'refs/tags/')" in workflow
+
+
+def test_content_migration_stops_writers_before_backup_and_startup():
+    bootstrap = _read("deploy/bootstrap.sh")
+    stop = bootstrap.index('stop site admin')
+    backup = bootstrap.index('\nbackup_database_before_migration\n')
+    migrate = bootstrap.index('"$WORKER_IMAGE" migrate-content')
+    start = bootstrap.index('"${COMPOSE[@]}" up -d web site admin')
+    assert stop < backup < migrate < start
+    assert "--network none" in bootstrap[backup:migrate]
 
 
 def test_release_workflow_distinguishes_stable_and_candidate_tags():
@@ -451,8 +464,8 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert "SuccessExitStatus=10" in daily_service
     assert "SuccessExitStatus=10" in resume_service
     assert "RestartPreventExitStatus=10" in resume_service
-    assert "TimeoutStartSec=90min" in daily_service
-    assert "TimeoutStartSec=90min" in resume_service
+    assert "TimeoutStartSec=24h" in daily_service
+    assert "TimeoutStartSec=24h" in resume_service
     assert "/usr/bin/flock -E 75 -n /run/news-digest-worker.lock" in resume_service
     assert "PathChanged=/srv/news-digest/config/automation.wake" in wake_path
     assert "Unit=news-digest-resume.service" in wake_path

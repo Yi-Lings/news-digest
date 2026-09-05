@@ -16,9 +16,19 @@ from urllib.parse import urlsplit
 import httpcore
 import httpx
 
-from news_digest.config import TranslationConfig, normalize_translation_base_url
+from news_digest.config import (
+    MAX_TRANSLATION_TIMEOUT_SECONDS,
+    TranslationConfig,
+    normalize_translation_base_url,
+)
 from news_digest.models import Article
-from news_digest.translation.schema import PROMPT_VERSION, SYSTEM_PROMPT, build_user_prompt
+from news_digest.translation.schema import (
+    PROMPT_VERSION,
+    SENTENCE_REPAIR_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_sentence_repair_prompt,
+    build_user_prompt,
+)
 
 ApiType = Literal["openai_chat", "anthropic_messages"]
 _MAX_RETRY_AFTER_SECONDS = 5.0
@@ -480,9 +490,9 @@ class ApiTranslator:
                 "不支持的 TRANSLATION_API_TYPE",
                 category="configuration",
             )
-        if config.timeout_seconds <= 0:
+        if not 0 < config.timeout_seconds <= MAX_TRANSLATION_TIMEOUT_SECONDS:
             raise TranslationError(
-                "TRANSLATION_TIMEOUT_SECONDS 必须大于 0",
+                "TRANSLATION_TIMEOUT_SECONDS must be > 0 and <= 3600",
                 category="configuration",
             )
         self._config = config
@@ -519,6 +529,10 @@ class ApiTranslator:
         return self._config.model
 
     @property
+    def timeout_seconds(self) -> float:
+        return self._config.timeout_seconds
+
+    @property
     def cache_identity(self) -> str:
         return translation_cache_identity(
             self._config.api_type,
@@ -533,6 +547,67 @@ class ApiTranslator:
             SYSTEM_PROMPT,
             build_user_prompt(article),
             max_tokens=self._completion_budget(article),
+        )
+
+    def translate_request(
+        self,
+        article: Article,
+        *,
+        frozen_sentences: list[list[str]] | None,
+        cancel_requested: Callable[[], bool] | None,
+        timeout_seconds: float,
+        feedback: str | None = None,
+        previous_output: str = "",
+    ) -> str:
+        prompt = build_user_prompt(article, frozen_sentences)
+        if feedback:
+            prompt += (
+                "\nCorrect the following validation error and return complete JSON:\n"
+                + feedback
+                + "\nPrevious output:\n"
+                + previous_output[:4000]
+            )
+        return self._request_text(
+            SYSTEM_PROMPT,
+            prompt,
+            max_tokens=self._completion_budget(article),
+            timeout_seconds=timeout_seconds,
+            cancel_requested=cancel_requested,
+        )
+
+    def translate_sentence_repair(
+        self,
+        *,
+        title_en: str,
+        paragraph_index: int,
+        sentence_index: int,
+        source_sentence: str,
+        previous_translation: str,
+        context_before: str,
+        context_after: str,
+        evidence: list[dict[str, object]],
+        cancel_requested: Callable[[], bool] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        prompt = build_sentence_repair_prompt(
+            title_en=title_en,
+            paragraph_index=paragraph_index,
+            sentence_index=sentence_index,
+            source_sentence=source_sentence,
+            previous_translation=previous_translation,
+            context_before=context_before,
+            context_after=context_after,
+            evidence=evidence,
+        )
+        return self._request_text(
+            SENTENCE_REPAIR_SYSTEM_PROMPT,
+            prompt,
+            max_tokens=min(
+                self._config.max_tokens,
+                max(512, int(len(source_sentence) * 1.2) + 256),
+            ),
+            timeout_seconds=timeout_seconds,
+            cancel_requested=cancel_requested,
         )
 
     def translate_with_timeout(self, article: Article, *, timeout_seconds: float) -> str:

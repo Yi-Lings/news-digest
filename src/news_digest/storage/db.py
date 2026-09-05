@@ -9,16 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from news_digest.config import MAX_TRANSLATION_TIMEOUT_SECONDS
 from news_digest.models import (
     Article,
     BriefItem,
     DailyEdition,
     article_from_dict,
+    article_source_hash,
     article_to_dict,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 PAYMENT_CREATION_LEASE_SECONDS = 30
+_MAX_TRANSLATION_LEASE_SECONDS = MAX_TRANSLATION_TIMEOUT_SECONDS + 60
 
 # v1.3.0 新增的内容级错误码:与 SCHEMA_VALIDATION_FAILED 同为终态(不自动重试)。
 CONTENT_ERROR_CODES = ("CONTENT_NUMBER_MISSING",)
@@ -291,6 +294,8 @@ class TranslationAttempt:
     error_category: str | None
     failure_stage: str | None
     diagnostic_id: str | None
+    provider_id: str | None = None
+    requests_json: str = "[]"
 
 
 @dataclass(frozen=True)
@@ -522,6 +527,24 @@ CREATE TABLE IF NOT EXISTS automation_editions (
     last_error_code TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+"""
+
+_EDITION_ITEMS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS edition_items (
+    edition_date TEXT NOT NULL REFERENCES automation_editions(edition_date),
+    article_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    source_json TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    segmentation_json TEXT,
+    active_task_id TEXT NOT NULL REFERENCES translation_tasks(task_id),
+    result_json TEXT,
+    result_revision INTEGER NOT NULL DEFAULT 0,
+    force_refresh INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (edition_date, article_id),
+    UNIQUE (edition_date, position)
 );
 """
 
@@ -946,6 +969,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         _apply_v8_schema(conn)
+        _apply_v11_schema(conn)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -957,7 +981,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         return conn
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}:
         found = row["value"]
         raise RuntimeError(f"schema 版本不匹配:库中为 {found},代码期望 {SCHEMA_VERSION},需迁移")
     if version in {1, 2}:
@@ -979,7 +1003,10 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
     if version in {1, 2, 3, 4, 5, 6, 7, 8}:
         _migrate_to_v9(conn, path)
         _set_schema_version(conn, 9)
-    _migrate_to_v10(conn, path)
+    if version <= 9:
+        _migrate_to_v10(conn, path)
+        _set_schema_version(conn, 10)
+    _migrate_to_v11(conn, path)
     _set_schema_version(conn, SCHEMA_VERSION)
     return conn
 
@@ -1233,6 +1260,113 @@ def _validate_v10_backup(backup_path: Path) -> None:
             backup.close()
     if integrity is None or integrity[0] != "ok" or version is None or version[0] != "9":
         raise RuntimeError("schema v10 迁移前数据库备份校验失败")
+
+
+def _apply_v11_schema(conn: sqlite3.Connection) -> None:
+    statement = ""
+    for line in _TRANSLATION_AUTOMATION_SCHEMA.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    conn.execute(_EDITION_ITEMS_SCHEMA)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(translation_attempts)")}
+    for name, definition in (
+        ("provider_id", "TEXT"),
+        ("requests_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE translation_attempts ADD COLUMN {name} {definition}")
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(automation_editions)")}
+    if "briefs_json" not in columns:
+        conn.execute("ALTER TABLE automation_editions ADD COLUMN briefs_json TEXT")
+    if "history_status" not in columns:
+        conn.execute(
+            "ALTER TABLE automation_editions ADD COLUMN"
+            " history_status TEXT NOT NULL DEFAULT 'pending'"
+        )
+
+
+def _migrate_to_v11(conn: sqlite3.Connection, path: Path) -> None:
+    backup_path = path.with_name(f"{path.name}.pre-v11.bak")
+    created = not backup_path.exists()
+    backup = sqlite3.connect(backup_path)
+    try:
+        if created:
+            conn.backup(backup)
+        integrity = backup.execute("PRAGMA integrity_check").fetchone()
+        version = backup.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        if integrity != ("ok",) or version != ("10",):
+            raise RuntimeError("schema v11 migration backup validation failed")
+    except sqlite3.Error as error:
+        backup.close()
+        if created:
+            backup_path.unlink(missing_ok=True)
+        raise RuntimeError("schema v11 migration backup validation failed") from error
+    finally:
+        backup.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _apply_v11_schema(conn)
+        # Only freeze editions whose task members still have matching dated sources.
+        # Missing historical sources cannot be reconstructed from today's article pool.
+        for edition in conn.execute("SELECT edition_date FROM automation_editions").fetchall():
+            date = edition["edition_date"]
+            tasks = conn.execute(
+                "SELECT t.*, a.payload FROM translation_tasks t LEFT JOIN articles a"
+                " ON a.url = t.article_id AND a.date = t.edition_date"
+                " WHERE t.edition_date = ? ORDER BY (t.status = 'succeeded') DESC,"
+                " t.updated_at DESC, t.task_id",
+                (date,),
+            ).fetchall()
+            members = {}
+            for task in tasks:
+                members.setdefault(task["article_id"], task)
+            if not members or any(task["payload"] is None for task in members.values()):
+                continue
+            for position, task in enumerate(members.values()):
+                article = article_from_dict(json.loads(task["payload"]))
+                conn.execute(
+                    "INSERT OR IGNORE INTO edition_items"
+                    " (edition_date, article_id, position, source_json, payload, source_hash,"
+                    " segmentation_json, active_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        date,
+                        article.url,
+                        position,
+                        task["payload"],
+                        task["payload"],
+                        article_source_hash(article),
+                        task["segmentation_json"],
+                        task["task_id"],
+                    ),
+                )
+            briefs = [
+                json.loads(row["payload"])
+                for row in conn.execute(
+                    "SELECT payload FROM briefs WHERE date = ? ORDER BY url",
+                    (date,),
+                )
+            ]
+            conn.execute(
+                "UPDATE automation_editions SET target_count = ?, briefs_json = ?,"
+                " succeeded_count = (SELECT COUNT(*) FROM edition_items i JOIN translation_tasks t"
+                " ON t.task_id = i.active_task_id WHERE i.edition_date = ?"
+                " AND t.status = 'succeeded'),"
+                " online_count = (SELECT COUNT(*) FROM edition_items i JOIN translation_tasks t"
+                " ON t.task_id = i.active_task_id WHERE i.edition_date = ?"
+                " AND t.build_status = 'online') WHERE edition_date = ?",
+                (len(members), json.dumps(briefs, ensure_ascii=False), date, date, date),
+            )
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("schema v11 foreign key validation failed")
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("schema v11 integrity validation failed")
+        conn.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
@@ -1802,6 +1936,8 @@ def _translation_attempt(row: sqlite3.Row) -> TranslationAttempt:
         error_category=row["error_category"],
         failure_stage=row["failure_stage"],
         diagnostic_id=row["diagnostic_id"],
+        provider_id=row["provider_id"],
+        requests_json=row["requests_json"],
     )
 
 
@@ -1811,7 +1947,7 @@ def list_translation_attempts(
     _validate_test_attempt_digest(task_id, "task_id")
     rows = conn.execute(
         "SELECT id, task_id, attempt_number, owner, kind, status, started_at, finished_at,"
-        " error_code, error_category, failure_stage, diagnostic_id"
+        " error_code, error_category, failure_stage, diagnostic_id, provider_id, requests_json"
         " FROM translation_attempts WHERE task_id = ? ORDER BY attempt_number",
         (task_id,),
     ).fetchall()
@@ -1844,6 +1980,20 @@ def latest_translation_admin_action(
     )
 
 
+def _automatic_translation_attempts(conn: sqlite3.Connection, task_id: str) -> int:
+    # Automatic circuit probes share the cap; explicit Admin probes do not.
+    return conn.execute(
+        "SELECT COUNT(*) FROM translation_attempts a JOIN translation_tasks t"
+        " ON t.task_id = a.task_id JOIN translation_tasks current"
+        " ON current.edition_date = t.edition_date AND current.article_id = t.article_id"
+        " WHERE current.task_id = ? AND (a.kind = 'automatic' OR"
+        " (a.kind = 'probe' AND NOT EXISTS (SELECT 1 FROM translation_admin_actions action"
+        " WHERE action.task_id = a.task_id AND action.action = 'probe'"
+        " AND action.started_at = a.started_at)))",
+        (task_id,),
+    ).fetchone()[0]
+
+
 def claim_translation_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -1857,8 +2007,8 @@ def claim_translation_task(
     _validate_test_attempt_digest(task_id, "task_id")
     owner = _non_empty(owner, "owner", maximum=128)
     now = _automation_timestamp(now)
-    if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
-        raise ValueError("lease_seconds must be between 1 and 3600")
+    if type(lease_seconds) is not int or not 1 <= lease_seconds <= _MAX_TRANSLATION_LEASE_SECONDS:
+        raise ValueError("translation lease_seconds must be between 1 and 3660")
     lease_expires_at = _future_timestamp(now, lease_seconds)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1871,6 +2021,9 @@ def claim_translation_task(
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task does not exist")
+        if not _is_current_translation_task(conn, task_id):
+            conn.commit()
+            return None
         circuit = conn.execute(
             "SELECT state FROM provider_circuits WHERE provider_id ="
             " (SELECT provider_id FROM translation_tasks WHERE task_id = ?)",
@@ -1911,6 +2064,14 @@ def claim_translation_task(
         kind: TranslationAttemptKind = "probe" if probe else (
             "manual" if manual else "automatic"
         )
+        if not manual and _automatic_translation_attempts(conn, task_id) >= 3:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+                " next_retry_at = NULL, updated_at = ? WHERE task_id = ?",
+                (now, task_id),
+            )
+            conn.commit()
+            return None
         cursor = conn.execute(
             "UPDATE translation_tasks SET status = 'running', attempt_count = ?,"
             " error_code = NULL, error_category = NULL, http_status = NULL,"
@@ -1938,9 +2099,10 @@ def claim_translation_task(
             return None
         conn.execute(
             "INSERT INTO translation_attempts"
-            " (task_id, attempt_number, owner, kind, status, started_at)"
-            " VALUES (?, ?, ?, ?, 'running', ?)",
-            (task_id, attempt_number, owner, kind, now),
+            " (task_id, attempt_number, owner, kind, status, started_at, provider_id)"
+            " VALUES (?, ?, ?, ?, 'running', ?,"
+            " (SELECT provider_id FROM translation_tasks WHERE task_id = ?))",
+            (task_id, attempt_number, owner, kind, now, task_id),
         )
         if row["manual_action_id"] is not None:
             conn.execute(
@@ -1959,8 +2121,8 @@ def touch_translation_task(
     conn: sqlite3.Connection, task_id: str, *, owner: str, now: str, lease_seconds: int
 ) -> bool:
     now = _automation_timestamp(now)
-    if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
-        raise ValueError("lease_seconds must be between 1 and 3600")
+    if type(lease_seconds) is not int or not 1 <= lease_seconds <= _MAX_TRANSLATION_LEASE_SECONDS:
+        raise ValueError("translation lease_seconds must be between 1 and 3660")
     future = _future_timestamp(now, lease_seconds)
     with conn:
         cursor = conn.execute(
@@ -2073,6 +2235,8 @@ def queue_translation_task_dispatch(
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task does not exist")
+        if not _is_current_translation_task(conn, task_id):
+            raise RuntimeError("Historical task cannot be dispatched")
         if row["status"] != "pending":
             raise RuntimeError("translation task is not waiting for dispatch")
         if row["manual_retry_requested_at"] is not None:
@@ -2111,6 +2275,7 @@ def queue_translation_task_retry(
     *,
     now: str,
     actor: str,
+    force: bool = False,
 ) -> TranslationTask:
     _validate_test_attempt_digest(task_id, "task_id")
     actor = _non_empty(actor, "actor", maximum=128)
@@ -2125,12 +2290,14 @@ def queue_translation_task_retry(
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task does not exist")
+        if not _is_current_translation_task(conn, task_id):
+            raise RuntimeError("Historical task is not retryable")
         if row["status"] not in {
             "failed",
             "retry_wait",
             "cancelled",
             "configuration_blocked",
-        }:
+        } and not (force and row["status"] in {"succeeded", "pending"}):
             raise RuntimeError("translation task is not retryable")
         if row["manual_retry_requested_at"] is not None:
             raise RuntimeError("translation retry is already queued")
@@ -2152,6 +2319,13 @@ def queue_translation_task_retry(
             " updated_at = ? WHERE task_id = ?",
             (now, now, action_id, now, task_id),
         )
+        if force:
+            if translation_item(conn, task_id) is None:
+                raise RuntimeError("Forced retry requires a frozen edition item")
+            conn.execute(
+                "UPDATE edition_items SET force_refresh = 1 WHERE active_task_id = ?",
+                (task_id,),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2184,6 +2358,8 @@ def queue_provider_probe(
     action_id = uuid.uuid4().hex
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if not _is_current_translation_task(conn, task_id):
+            raise RuntimeError("Historical task cannot be used as a probe")
         circuit = conn.execute(
             "SELECT state, probe_task_id FROM provider_circuits WHERE provider_id = ?",
             (provider_id,),
@@ -2361,6 +2537,9 @@ def finish_translation_task_failure(
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task is not owned by this worker")
+        automatic_attempts = _automatic_translation_attempts(conn, task_id)
+        if automatic_attempts >= 3:
+            auto_retry = False
         status = "configuration_blocked" if configuration_blocked else (
             "retry_wait" if auto_retry else "failed"
         )
@@ -2422,18 +2601,47 @@ def finish_translation_task_failure(
 
 
 def finish_translation_task_success(
-    conn: sqlite3.Connection, task_id: str, *, owner: str, now: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    owner: str,
+    now: str,
+    article: Article | None = None,
+    result_json: str | None = None,
+    expected_attempt: int | None = None,
 ) -> TranslationTask:
     now = _automation_timestamp(now)
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT attempt_count, manual_action_id FROM translation_tasks"
+            "SELECT attempt_count, manual_action_id, cancel_requested_at, lease_expires_at"
+            " FROM translation_tasks"
             " WHERE task_id = ? AND status = 'running' AND lease_owner = ?",
             (task_id, owner),
         ).fetchone()
         if row is None:
             raise RuntimeError("translation task is not owned by this worker")
+        if not _is_current_translation_task(conn, task_id):
+            raise RuntimeError("Translation active task changed")
+        if expected_attempt is not None and row["attempt_count"] != expected_attempt:
+            raise RuntimeError("Translation attempt changed")
+        if article is not None:
+            if row["cancel_requested_at"] is not None or row["lease_expires_at"] <= now:
+                raise RuntimeError("Translation lease expired or cancellation requested")
+            item = translation_item(conn, task_id)
+            if (
+                item is None
+                or item["source_hash"] != article_source_hash(article)
+                or item["article_id"] != article.url
+                or result_json is None
+            ):
+                raise RuntimeError("Translation source or active task changed")
+            conn.execute(
+                "UPDATE edition_items SET payload = ?, result_json = ?,"
+                " result_revision = result_revision + 1, force_refresh = 0"
+                " WHERE active_task_id = ?",
+                (json.dumps(article_to_dict(article), ensure_ascii=False), result_json, task_id),
+            )
         conn.execute(
             "UPDATE translation_tasks SET status = 'succeeded', error_code = NULL,"
             " error_category = NULL, http_status = NULL, current_stage = 'waiting_build',"
@@ -2455,6 +2663,12 @@ def finish_translation_task_success(
                 " result_code = 'SUCCEEDED' WHERE action_id = ? AND status = 'running'",
                 (now, row["manual_action_id"]),
             )
+        if article is not None:
+            conn.execute(
+                "UPDATE translation_tasks SET success_generation = NULL WHERE task_id = ?",
+                (task_id,),
+            )
+            mark_translation_ready_for_build(conn, task_id, now=now, _commit=False)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2668,6 +2882,7 @@ def list_ready_translation_tasks(
         _translation_task_select()
         + " WHERE edition_date = ? AND (status = 'pending' OR"
         " (status IN ('failed', 'retry_wait') AND auto_retry = 1 AND next_retry_at <= ?))"
+        " AND " + _CURRENT_TRANSLATION_TASK_SQL +
         " ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,"
         " COALESCE(next_retry_at, created_at), task_id"
     )
@@ -2753,6 +2968,7 @@ def automation_problem_dates(conn: sqlite3.Connection) -> list[str]:
         "SELECT DISTINCT edition_date FROM translation_tasks "
         "WHERE status IN ('pending', 'running', 'failed', 'retry_wait', "
         "'configuration_blocked', 'cancelled') "
+        "AND " + _CURRENT_TRANSLATION_TASK_SQL +
         "ORDER BY edition_date DESC"
     ).fetchall()
     return [row["edition_date"] for row in rows]
@@ -2788,10 +3004,13 @@ def unfinished_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         "SELECT edition_date FROM automation_editions"
         " WHERE status NOT IN ('delivered', 'delivery_pending')"
-        " AND NOT (status = 'complete' AND last_error_code = 'DELIVERY_EXPIRED')"
+        " AND history_status != 'source_only'"
+        " AND NOT (status = 'complete' AND COALESCE(last_error_code, '')"
+        " IN ('DELIVERY_EXPIRED', 'NO_ELIGIBLE_RECIPIENTS'))"
         " OR EXISTS (SELECT 1 FROM translation_tasks"
         "   WHERE translation_tasks.edition_date = automation_editions.edition_date"
-        "   AND translation_tasks.status IN ('pending', 'retry_wait', 'running'))"
+        "   AND translation_tasks.status IN ('pending', 'retry_wait', 'running')"
+        "   AND " + _CURRENT_TRANSLATION_TASK_SQL + ")"
         " ORDER BY edition_date DESC"
     ).fetchall()
     return [row["edition_date"] for row in rows]
@@ -2830,12 +3049,14 @@ def mark_translation_ready_for_build(
     *,
     now: str,
     debounce_seconds: int = 2,
+    _commit: bool = True,
 ) -> AutomationEdition:
     now = _automation_timestamp(now)
     if type(debounce_seconds) is not int or not 0 <= debounce_seconds <= 60:
         raise ValueError("debounce_seconds must be between 0 and 60")
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
         task_row = conn.execute(
             "SELECT edition_date, status, success_generation FROM translation_tasks"
             " WHERE task_id = ?",
@@ -2843,6 +3064,8 @@ def mark_translation_ready_for_build(
         ).fetchone()
         if task_row is None or task_row["status"] != "succeeded":
             raise RuntimeError("only a succeeded task can enter build")
+        if not _is_current_translation_task(conn, task_id):
+            raise RuntimeError("Historical task cannot enter build")
         edition_row = conn.execute(
             "SELECT dirty_generation FROM automation_editions WHERE edition_date = ?",
             (task_row["edition_date"],),
@@ -2862,8 +3085,9 @@ def mark_translation_ready_for_build(
                 "UPDATE automation_editions SET status ="
                 " CASE WHEN status = 'building' THEN 'building' ELSE 'build_pending' END,"
                 " dirty_generation = ?, build_not_before = ?,"
-                " succeeded_count = (SELECT COUNT(*) FROM translation_tasks"
-                "   WHERE edition_date = ? AND status = 'succeeded'),"
+                " succeeded_count = (SELECT COUNT(DISTINCT article_id) FROM translation_tasks"
+                "   WHERE edition_date = ? AND status = 'succeeded'"
+                "   AND " + _CURRENT_TRANSLATION_TASK_SQL + "),"
                 " last_error_code = NULL, updated_at = ? WHERE edition_date = ?",
                 (
                     generation,
@@ -2873,7 +3097,8 @@ def mark_translation_ready_for_build(
                     task_row["edition_date"],
                 ),
             )
-        conn.commit()
+        if _commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -2900,7 +3125,8 @@ def claim_automation_build(
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT status, dirty_generation, built_generation, build_not_before"
+            "SELECT status, dirty_generation, built_generation, build_not_before,"
+            " build_lease_expires_at"
             " FROM automation_editions WHERE edition_date = ?",
             (edition_date,),
         ).fetchone()
@@ -2909,7 +3135,10 @@ def claim_automation_build(
         )
         if (
             row is None
-            or row["status"] == "building"
+            or (
+                row["status"] == "building" and row["build_lease_expires_at"] is not None
+                and row["build_lease_expires_at"] > now
+            )
             or row["dirty_generation"] <= row["built_generation"]
             or not due
         ):
@@ -2918,7 +3147,7 @@ def claim_automation_build(
         conn.execute(
             "UPDATE automation_editions SET status = 'building', building_generation = ?,"
             " build_owner = ?, build_lease_expires_at = ?, updated_at = ?"
-            " WHERE edition_date = ? AND status != 'building'",
+            " WHERE edition_date = ?",
             (
                 row["dirty_generation"],
                 owner,
@@ -2941,6 +3170,7 @@ def finish_automation_build(
     owner: str,
     now: str,
     succeeded: bool,
+    publication: DailyEdition | None = None,
 ) -> AutomationEdition:
     now = _automation_timestamp(now)
     try:
@@ -2963,26 +3193,24 @@ def finish_automation_build(
             )
         else:
             generation = row["building_generation"]
+            if publication is not None:
+                if not publication_covers_build(conn, edition_date, generation, publication):
+                    raise RuntimeError("Published article does not match the committed result")
             conn.execute(
                 "UPDATE translation_tasks SET build_status = 'online',"
                 " current_stage = 'online', failure_stage = NULL, updated_at = ?"
                 " WHERE edition_date = ? AND status = 'succeeded'"
-                " AND success_generation <= ?",
+                " AND success_generation <= ? AND " + _CURRENT_TRANSLATION_TASK_SQL,
                 (now, edition_date, generation),
             )
-            counts = conn.execute(
-                "SELECT"
-                " SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded_count,"
-                " SUM(CASE WHEN build_status = 'online' THEN 1 ELSE 0 END) AS online_count,"
-                " SUM(CASE WHEN status IN ('pending', 'running', 'retry_wait')"
-                "   OR (status = 'failed' AND auto_retry = 1) THEN 1 ELSE 0 END)"
-                "   AS active_count"
-                " FROM translation_tasks WHERE edition_date = ?",
-                (edition_date,),
-            ).fetchone()
-            succeeded_count = int(counts["succeeded_count"] or 0)
-            online_count = int(counts["online_count"] or 0)
-            active_count = int(counts["active_count"] or 0)
+            tasks = active_translation_tasks(conn, edition_date)
+            succeeded_count = len({t.article_id for t in tasks if t.status == "succeeded"})
+            online_count = len({t.article_id for t in tasks if t.build_status == "online"})
+            active_count = sum(
+                t.status in {"pending", "running", "retry_wait"}
+                or (t.status == "failed" and t.auto_retry)
+                for t in tasks
+            )
             complete = (
                 succeeded_count >= row["target_count"]
                 and online_count >= row["target_count"]
@@ -3019,6 +3247,26 @@ def finish_automation_build(
     if edition is None:
         raise RuntimeError("automation edition does not exist")
     return edition
+
+
+def publication_covers_build(
+    conn: sqlite3.Connection, edition_date: str, generation: int, publication: DailyEdition,
+) -> bool:
+    if publication.date != edition_date or publication.generation < generation:
+        return False
+    items = conn.execute(
+        "SELECT i.article_id, i.source_hash, i.result_revision FROM edition_items i"
+        " JOIN translation_tasks t ON t.task_id = i.active_task_id"
+        " WHERE i.edition_date = ? AND t.status = 'succeeded'"
+        " AND t.success_generation <= ?", (edition_date, generation),
+    ).fetchall()
+    published = {article.url: article for article in publication.articles}
+    return all(
+        (article := published.get(item["article_id"])) is not None
+        and article_source_hash(article) == item["source_hash"]
+        and publication.result_revisions.get(article.url) == item["result_revision"]
+        for item in items
+    )
 
 
 _DELIVERY_CLAIM_LEASE_SECONDS = 600
@@ -3118,6 +3366,7 @@ def finish_automation_delivery(
     delivery_key: str,
     now: str,
     succeeded: bool,
+    skipped: bool = False,
 ) -> AutomationEdition:
     _validate_test_attempt_digest(delivery_key, "delivery_key")
     now = _automation_timestamp(now)
@@ -3127,9 +3376,9 @@ def finish_automation_delivery(
             " delivery_expires_at = NULL, last_error_code = ?, updated_at = ?"
             " WHERE edition_date = ? AND status = 'delivery_pending' AND delivery_key = ?",
             (
-                "delivered" if succeeded else "complete",
+                "delivered" if succeeded and not skipped else "complete",
                 now,
-                None if succeeded else "DELIVERY_FAILED",
+                "NO_ELIGIBLE_RECIPIENTS" if skipped else None if succeeded else "DELIVERY_FAILED",
                 now,
                 edition_date,
                 delivery_key,
@@ -3305,8 +3554,8 @@ def claim_provider_probe(
     _validate_test_attempt_digest(task_id, "task_id")
     owner = _non_empty(owner, "owner", maximum=128)
     now = _automation_timestamp(now)
-    if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
-        raise ValueError("lease_seconds must be between 1 and 3600")
+    if type(lease_seconds) is not int or not 1 <= lease_seconds <= _MAX_TRANSLATION_LEASE_SECONDS:
+        raise ValueError("translation lease_seconds must be between 1 and 3660")
     try:
         conn.execute("BEGIN IMMEDIATE")
         circuit = _ensure_provider_circuit(conn, provider_id, now)
@@ -3606,7 +3855,7 @@ def retry_edition_failed_tasks(
     now = _automation_timestamp(now)
     queued = 0
     skipped = 0
-    tasks = list_translation_tasks(conn, edition_date)
+    tasks = active_translation_tasks(conn, edition_date)
     for task in tasks:
         if task.status not in {
             "failed",
@@ -3616,6 +3865,20 @@ def retry_edition_failed_tasks(
         }:
             continue
         if provider_id is not None and task.provider_id != provider_id:
+            if translation_item(conn, task.task_id) is not None:
+                try:
+                    rebind_translation_item(
+                        conn,
+                        task.task_id,
+                        provider_id=provider_id,
+                        now=now,
+                        actor=actor,
+                    )
+                except (ValueError, RuntimeError):
+                    skipped += 1
+                else:
+                    queued += 1
+                continue
             existing = conn.execute(
                 "SELECT task_id, status FROM translation_tasks"
                 " WHERE edition_date = ? AND article_id = ? AND provider_id = ?",
@@ -3692,8 +3955,313 @@ def upsert_briefs(conn: sqlite3.Connection, date: str, briefs: list[BriefItem]) 
             )
 
 
+def frozen_edition(conn: sqlite3.Connection, date: str) -> DailyEdition | None:
+    row = conn.execute(
+        "SELECT briefs_json, dirty_generation, history_status FROM automation_editions"
+        " WHERE edition_date = ?",
+        (date,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["briefs_json"] is None:
+        if row["history_status"] == "source_only":
+            return DailyEdition(date=date, source_status="unavailable")
+        return None
+    items = conn.execute(
+        "SELECT payload, article_id, result_revision FROM edition_items"
+        " WHERE edition_date = ? ORDER BY position",
+        (date,),
+    ).fetchall()
+    return DailyEdition(
+        date=date,
+        generation=row["dirty_generation"],
+        result_revisions={item["article_id"]: item["result_revision"] for item in items},
+        source_status=row["history_status"],
+        articles=[article_from_dict(json.loads(item["payload"])) for item in items],
+        briefs=[BriefItem(**data) for data in json.loads(row["briefs_json"])],
+    )
+
+
+def seed_edition_items(
+    conn: sqlite3.Connection,
+    edition: DailyEdition,
+    *,
+    provider_id: str,
+    snapshots: dict[str, str],
+    now: str,
+) -> None:
+    """Freeze the selected members once; refetches cannot replace their sources."""
+    now = _automation_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if frozen_edition(conn, edition.date) is not None:
+            conn.commit()
+            return
+        conn.execute(
+            "INSERT INTO automation_editions"
+            " (edition_date, status, target_count, created_at, updated_at, briefs_json)"
+            " VALUES (?, 'translating', ?, ?, ?, ?)"
+            " ON CONFLICT(edition_date) DO UPDATE SET briefs_json = excluded.briefs_json,"
+            " target_count = excluded.target_count",
+            (
+                edition.date,
+                len(edition.articles),
+                now,
+                now,
+                json.dumps([vars(brief) for brief in edition.briefs], ensure_ascii=False),
+            ),
+        )
+        conn.execute(
+            "UPDATE automation_editions SET history_status = 'ready' WHERE edition_date = ?",
+            (edition.date,),
+        )
+        seen = set()
+        for position, article in enumerate(edition.articles):
+            if article.url in seen:
+                raise ValueError("Duplicate edition article")
+            seen.add(article.url)
+            task_id = _translation_task_id(edition.date, article.url, provider_id)
+            conn.execute(
+                "INSERT OR IGNORE INTO translation_tasks"
+                " (task_id, edition_date, article_id, article_title, provider_id, status,"
+                " segmentation_json, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (
+                    task_id,
+                    edition.date,
+                    article.url,
+                    article.title_en,
+                    provider_id,
+                    snapshots[article.url],
+                    now,
+                    now,
+                ),
+            )
+            task = translation_task(conn, task_id)
+            payload = json.dumps(article_to_dict(article), ensure_ascii=False)
+            conn.execute(
+                "INSERT INTO edition_items (edition_date, article_id, position, source_json,"
+                " payload, source_hash, segmentation_json, active_task_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    edition.date,
+                    article.url,
+                    position,
+                    payload,
+                    payload,
+                    article_source_hash(article),
+                    task.segmentation_json,
+                    task_id,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def translation_item(conn: sqlite3.Connection, task_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM edition_items WHERE active_task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def active_translation_tasks(conn: sqlite3.Connection, date: str) -> list[TranslationTask]:
+    return [
+        _translation_task(row)
+        for row in conn.execute(
+            _translation_task_select()
+            + " WHERE edition_date = ? AND "
+            + _CURRENT_TRANSLATION_TASK_SQL
+            + " ORDER BY created_at, task_id",
+            (date,),
+        )
+    ]
+
+
+_CURRENT_TRANSLATION_TASK_SQL = (
+    "(NOT EXISTS (SELECT 1 FROM automation_editions e"
+    " WHERE e.edition_date = translation_tasks.edition_date AND e.briefs_json IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM edition_items i"
+    " WHERE i.active_task_id = translation_tasks.task_id)) "
+)
+
+
+def _is_current_translation_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM translation_tasks WHERE task_id = ? AND "
+            + _CURRENT_TRANSLATION_TASK_SQL,
+            (task_id,),
+        ).fetchone()
+        is not None
+    )
+
+
+def rebind_translation_item(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    provider_id: str,
+    now: str,
+    actor: str,
+    force: bool = False,
+) -> str:
+    """Switch the active failed task, preserving every historical provider attempt."""
+    provider_id = _non_empty(provider_id, "provider_id", maximum=128)
+    actor = _non_empty(actor, "actor", maximum=128)
+    now = _automation_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        task = translation_task(conn, task_id)
+        item = translation_item(conn, task_id)
+        if (
+            item is None
+            or (
+                task.status
+                not in {
+                    "failed",
+                    "cancelled",
+                    "retry_wait",
+                    "configuration_blocked",
+                }
+                and not (force and task.status in {"pending", "succeeded"})
+            )
+            or task.manual_retry_requested_at is not None
+            or task.manual_probe_requested_at is not None
+        ):
+            raise RuntimeError("Active task is not available for rebinding")
+        circuit = get_provider_circuit(conn, provider_id)
+        if circuit is not None and circuit.state != "closed":
+            raise RuntimeError("Provider requires a controlled probe")
+        new_id = _translation_task_id(task.edition_date, task.article_id, provider_id)
+        previous = translation_task(conn, new_id)
+        if previous is not None and (
+            previous.status == "running" or (previous.status == "succeeded" and not force)
+        ):
+            raise RuntimeError("Target provider task is already running or succeeded")
+        action_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO translation_tasks"
+            " (task_id, edition_date, article_id, article_title, provider_id, status,"
+            " segmentation_json, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, 'retry_wait', ?, ?, ?)"
+            " ON CONFLICT(task_id) DO NOTHING",
+            (
+                new_id,
+                task.edition_date,
+                task.article_id,
+                task.article_title,
+                provider_id,
+                item["segmentation_json"],
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
+            " next_retry_at = ?, manual_retry_requested_at = ?, manual_action_id = ?,"
+            " segmentation_json = ?, updated_at = ? WHERE task_id = ?",
+            (now, now, action_id, item["segmentation_json"], now, new_id),
+        )
+        conn.execute(
+            "INSERT INTO translation_admin_actions"
+            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
+            " VALUES (?, ?, ?, 'retry', ?, 'requested', ?)",
+            (action_id, new_id, provider_id, actor, now),
+        )
+        conn.execute(
+            "UPDATE edition_items SET active_task_id = ?,"
+            " force_refresh = MAX(force_refresh, ?) WHERE active_task_id = ?",
+            (new_id, int(force), task_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return new_id
+
+
+def record_translation_request(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    owner: str,
+    attempt_number: int,
+    request_number: int,
+    target: str | None,
+    outcome: str,
+    elapsed: float,
+) -> None:
+    import re
+
+    if target is not None and re.fullmatch(r"P[1-9][0-9]*S[1-9][0-9]*", target) is None:
+        raise ValueError("Invalid sentence target")
+    if (
+        outcome
+        not in {
+            "started",
+            "succeeded",
+            "failed",
+            "invalid_sentence",
+            "invalid_structure",
+            "request_cancelled",
+            "termination_unconfirmed",
+            "total_timeout",
+            "network",
+            "tls",
+            "connection_timeout",
+            "read_timeout",
+            "configuration",
+            "endpoint",
+            "request",
+            "authentication",
+            "upstream",
+            "provider",
+            "provider_permanent",
+            "rate_limit",
+            "empty_response",
+            "response_format",
+        }
+        or not 1 <= request_number <= 3
+    ):
+        raise ValueError("Invalid request audit")
+    with conn:
+        row = conn.execute(
+            "SELECT a.id, a.requests_json FROM translation_attempts a JOIN translation_tasks t"
+            " ON t.task_id = a.task_id WHERE a.task_id = ? AND a.owner = ?"
+            " AND a.attempt_number = ? AND a.status = 'running'"
+            " AND t.status = 'running' AND t.lease_owner = ? AND t.attempt_count = ?",
+            (task_id, owner, attempt_number, owner, attempt_number),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Translation attempt ownership changed")
+        requests = json.loads(row["requests_json"])
+        entry = {
+            "request_number": request_number,
+            "kind": "sentence_repair" if target else "article",
+            "target": target,
+            "reason": "CONTENT_FIELD_MISSING" if target else None,
+            "outcome": outcome,
+            "elapsed_seconds": round(elapsed, 3),
+        }
+        if request_number <= len(requests):
+            requests[request_number - 1] = entry
+        else:
+            requests.append(entry)
+        conn.execute(
+            "UPDATE translation_attempts SET requests_json = ? WHERE id = ?",
+            (json.dumps(requests), row["id"]),
+        )
+
+
 def get_edition(conn: sqlite3.Connection, date: str) -> DailyEdition | None:
     """组装指定日期的日刊;该日期完全无数据时返回 None。"""
+    frozen = frozen_edition(conn, date)
+    if frozen is not None:
+        return frozen
     article_rows = conn.execute(
         "SELECT payload FROM articles WHERE date = ? ORDER BY published_at DESC", (date,)
     ).fetchall()
@@ -4667,7 +5235,7 @@ def reconcile_completed_delivery_run(
             conn.commit()
             return "not_applicable"
         if (
-            run["status"] != "completed"
+            run["status"] not in {"completed", "skipped"}
             or run["finished_at"] is None
             or run["failed_count"]
             or run["unknown_count"]
@@ -4722,15 +5290,20 @@ def reconcile_completed_delivery_run(
         delivery_key = hashlib.sha256(
             f"automation-delivery\n{edition_date}".encode()
         ).hexdigest()
+        any_sent = conn.execute(
+            "SELECT 1 FROM email_deliveries WHERE edition_date = ? AND status = 'sent' LIMIT 1",
+            (edition_date,),
+        ).fetchone() is not None
         cursor = conn.execute(
-            "UPDATE automation_editions SET status = 'delivered',"
+            "UPDATE automation_editions SET status = ?,"
             " delivery_key = COALESCE(delivery_key, ?), delivery_expires_at = NULL,"
             " delivery_started_at = COALESCE(delivery_started_at, ?),"
-            " delivery_finished_at = ?, last_error_code = NULL, updated_at = ?"
+            " delivery_finished_at = ?, last_error_code = ?, updated_at = ?"
             " WHERE edition_date = ? AND (status = 'complete' OR"
             " (status = 'delivery_pending' AND delivery_expires_at IS NOT NULL"
             " AND delivery_expires_at <= ?))",
-            (delivery_key, first_started_at, finished_at, updated_at, edition_date, now),
+            ("delivered" if any_sent else "complete", delivery_key, first_started_at, finished_at,
+             None if any_sent else "NO_ELIGIBLE_RECIPIENTS", updated_at, edition_date, now),
         )
         conn.commit()
     except Exception:
@@ -4812,7 +5385,8 @@ def sent_detail(conn: sqlite3.Connection, date: str) -> str | None:
 def list_dates(conn: sqlite3.Connection) -> list[str]:
     """articles 与 briefs 两表出现过的日期并集,降序。"""
     rows = conn.execute(
-        "SELECT date FROM articles UNION SELECT date FROM briefs ORDER BY date DESC"
+        "SELECT date FROM articles UNION SELECT date FROM briefs"
+        " UNION SELECT edition_date AS date FROM automation_editions ORDER BY date DESC"
     ).fetchall()
     return [row["date"] for row in rows]
 

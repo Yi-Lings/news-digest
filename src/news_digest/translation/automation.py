@@ -6,6 +6,7 @@ article bodies, provider endpoints, and raw responses never enter automation sta
 
 import datetime as dt
 import json
+import math
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -13,12 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from news_digest.models import Article, DailyEdition
+from news_digest.models import Article, DailyEdition, article_from_dict, article_source_hash
 from news_digest.storage import db
 from news_digest.translation.client import TranslationError
 from news_digest.translation.schema import (
     InvalidTranslation,
-    expected_sentence_counts,
+    build_sentence_snapshot,
+    read_sentence_snapshot,
+    result_to_dict,
 )
 from news_digest.translation.service import Translator, translate_article_once
 
@@ -268,11 +271,22 @@ def succeed_translation_work(
     *,
     owner: str,
     now: str,
+    article: Article | None = None,
+    result_json: str | None = None,
+    expected_attempt: int | None = None,
 ) -> db.TranslationTask:
     task = db.translation_task(conn, task_id)
     if task is None:
         raise RuntimeError("translation task does not exist")
-    succeeded = db.finish_translation_task_success(conn, task_id, owner=owner, now=now)
+    succeeded = db.finish_translation_task_success(
+        conn,
+        task_id,
+        owner=owner,
+        now=now,
+        article=article,
+        result_json=result_json,
+        expected_attempt=expected_attempt,
+    )
     circuit = db.get_provider_circuit(conn, task.provider_id)
     if circuit is not None and circuit.state == "half_open" and circuit.probe_owner == owner:
         db.finish_provider_probe(conn, task.provider_id, owner=owner, outcome="success", now=now)
@@ -292,8 +306,9 @@ class TranslationAutomationRunner:
         translator: Translator,
         cache_dir: Path,
         build_callback: Callable[[str], str],
-        delivery_callback: Callable[[str, str], bool],
+        delivery_callback: Callable[[str, str], bool | str],
         clock: Callable[[], dt.datetime] | None = None,
+        publication_reader: Callable[[str], DailyEdition] | None = None,
     ) -> None:
         self.database = database
         self.provider_id = provider_id
@@ -302,6 +317,7 @@ class TranslationAutomationRunner:
         self.build_callback = build_callback
         self.delivery_callback = delivery_callback
         self.clock = clock
+        self.publication_reader = publication_reader
 
     @staticmethod
     def _iso(now: dt.datetime) -> str:
@@ -324,31 +340,31 @@ class TranslationAutomationRunner:
         timestamp = self._iso(now)
         conn = db.connect(self.database)
         try:
-            db.upsert_articles(conn, edition.date, edition.articles)
-            db.upsert_briefs(conn, edition.date, edition.briefs)
-            db.ensure_automation_edition(
-                conn, edition.date, target_count=len(edition.articles), now=timestamp
+            snapshots = {
+                article.url: json.dumps(
+                    build_sentence_snapshot([paragraph.en for paragraph in article.paragraphs]),
+                    ensure_ascii=False,
+                )
+                for article in edition.articles
+            }
+            db.seed_edition_items(
+                conn,
+                edition,
+                provider_id=self.provider_id,
+                snapshots=snapshots,
+                now=timestamp,
             )
-            for article in edition.articles:
-                # 任务创建即冻结逐段句数快照:校验只与快照比对,原文重抓或
-                # 分句规则调整都不会让同一任务的验收标准漂移。
-                counts = expected_sentence_counts(
-                    [paragraph.en for paragraph in article.paragraphs]
-                )
-                db.ensure_translation_task(
-                    conn,
-                    edition_date=edition.date,
-                    article_id=article.url,
-                    article_title=article.title_en,
-                    provider_id=self.provider_id,
-                    now=timestamp,
-                    segmentation_json=json.dumps(counts),
-                )
         finally:
             conn.close()
 
     @staticmethod
     def _article_for_task(conn: sqlite3.Connection, task: db.TranslationTask) -> Article:
+        item = db.translation_item(conn, task.task_id)
+        if item is not None:
+            article = article_from_dict(json.loads(item["source_json"]))
+            if article_source_hash(article) != item["source_hash"]:
+                raise TranslationTaskDataError("Frozen source hash mismatch")
+            return article
         edition = db.get_edition(conn, task.edition_date)
         if edition is not None:
             for article in edition.articles:
@@ -358,24 +374,37 @@ class TranslationAutomationRunner:
 
     @staticmethod
     def _frozen_counts(task: db.TranslationTask, article: Article) -> list[int] | None:
+        return TranslationAutomationRunner._frozen_segmentation(task, article)[0]
+
+    @staticmethod
+    def _frozen_segmentation(
+        task: db.TranslationTask,
+        article: Article,
+    ) -> tuple[list[int] | None, list[list[str]] | None]:
         """解出任务冻结的句数快照;快照与文章段落数不一致视为数据完整性错误。"""
         if not task.segmentation_json:
-            return None
+            return None, None
         try:
             counts = json.loads(task.segmentation_json)
         except json.JSONDecodeError as error:
             raise TranslationTaskDataError(
                 "translation task segmentation snapshot is invalid"
             ) from error
+        if isinstance(counts, dict):
+            try:
+                sentences = read_sentence_snapshot(counts, [p.en for p in article.paragraphs])
+            except ValueError as error:
+                raise TranslationTaskDataError("Invalid frozen source sentences") from error
+            return [len(sentences_) for sentences_ in sentences], sentences
         if (
             not isinstance(counts, list)
             or len(counts) != len(article.paragraphs)
-            or any(not isinstance(value, int) or value < 1 for value in counts)
+            or any(type(value) is not int or value < 1 for value in counts)
         ):
             raise TranslationTaskDataError(
                 "translation task segmentation snapshot does not match the article"
             )
-        return counts
+        return counts, None
 
     def run_ready(
         self,
@@ -385,10 +414,15 @@ class TranslationAutomationRunner:
         max_tasks: int = 1,
         # Keep the task lease longer than the default 600s provider deadline;
         # recovery must never reclaim a request that can still be running.
-        lease_seconds: int = 900,
+        lease_seconds: int | None = None,
+        task_ids: set[str] | None = None,
     ) -> AutomationRunResult:
         if type(max_tasks) is not int or max_tasks < 1:
             raise ValueError("max_tasks must be a positive integer")
+        if lease_seconds is None:
+            lease_seconds = max(
+                900, math.ceil(getattr(self.translator, "timeout_seconds", 600)) + 60
+            )
         timestamp = self._iso(now)
         conn = db.connect(self.database)
         try:
@@ -400,6 +434,7 @@ class TranslationAutomationRunner:
                         conn, edition_date, now=timestamp
                     )
                     if task.provider_id == self.provider_id
+                    and (task_ids is None or task.task_id in task_ids)
                 )
             circuit = db.get_provider_circuit(conn, self.provider_id)
             candidates.sort(
@@ -421,6 +456,7 @@ class TranslationAutomationRunner:
 
         result = AutomationRunResult()
         for candidate in candidates[:max_tasks]:
+            timestamp = self._completion_timestamp(now)
             result.considered += 1
             conn = db.connect(self.database)
             try:
@@ -441,7 +477,9 @@ class TranslationAutomationRunner:
                 frozen: list[int] | None = None
                 try:
                     article = self._article_for_task(conn, claim.task)
-                    frozen = self._frozen_counts(claim.task, article)
+                    frozen, frozen_sentences = self._frozen_segmentation(claim.task, article)
+                    item = db.translation_item(conn, claim.task.task_id)
+                    force = bool(item and item["force_refresh"])
                 except TranslationTaskDataError as error:
                     missing_article = error
                 else:
@@ -466,6 +504,31 @@ class TranslationAutomationRunner:
                 result.failed += 1
                 continue
 
+            accepted = []
+
+            def audit_request(
+                number,
+                target,
+                outcome,
+                elapsed,
+                task_id=candidate.task_id,
+                attempt_number=claim.task.attempt_count,
+            ):
+                audit_conn = db.connect(self.database)
+                try:
+                    db.record_translation_request(
+                        audit_conn,
+                        task_id,
+                        owner=owner,
+                        attempt_number=attempt_number,
+                        request_number=number,
+                        target=target,
+                        outcome=outcome,
+                        elapsed=elapsed,
+                    )
+                finally:
+                    audit_conn.close()
+
             try:
                 translated, cache_hit = translate_article_once(
                     article,
@@ -475,6 +538,10 @@ class TranslationAutomationRunner:
                         task_id
                     ),
                     frozen_counts=frozen,
+                    frozen_sentences=frozen_sentences,
+                    on_result=accepted.append,
+                    on_request=audit_request,
+                    force=force,
                 )
             except Exception as error:
                 completed_at = self._completion_timestamp(now)
@@ -509,13 +576,25 @@ class TranslationAutomationRunner:
             completed_at = self._completion_timestamp(now)
             conn = db.connect(self.database)
             try:
-                db.upsert_articles(conn, candidate.edition_date, [translated])
-                succeed_translation_work(
-                    conn, candidate.task_id, owner=owner, now=completed_at
-                )
-                db.mark_translation_ready_for_build(
-                    conn, candidate.task_id, now=completed_at
-                )
+                if db.translation_item(conn, candidate.task_id) is not None:
+                    succeed_translation_work(
+                        conn,
+                        candidate.task_id,
+                        owner=owner,
+                        now=completed_at,
+                        article=translated,
+                        result_json=json.dumps(result_to_dict(accepted[0])),
+                        expected_attempt=claim.task.attempt_count,
+                    )
+                else:
+                    db.upsert_articles(conn, candidate.edition_date, [translated])
+                    succeed_translation_work(
+                        conn,
+                        candidate.task_id,
+                        owner=owner,
+                        now=completed_at,
+                    )
+                    db.mark_translation_ready_for_build(conn, candidate.task_id, now=completed_at)
             finally:
                 conn.close()
             result.succeeded += 1
@@ -576,6 +655,10 @@ class TranslationAutomationRunner:
                 owner=owner,
                 now=completed_at,
                 succeeded=True,
+                publication=(
+                    self.publication_reader(claimed.edition_date)
+                    if self.publication_reader else None
+                ),
             )
         finally:
             conn.close()
@@ -608,6 +691,7 @@ class TranslationAutomationRunner:
                 delivery_key=delivery_key,
                 now=completed_at,
                 succeeded=bool(delivered),
+                skipped=delivered == "no_eligible_recipients",
             )
         finally:
             conn.close()

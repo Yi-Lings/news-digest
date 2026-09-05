@@ -67,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resume.add_argument("--yes", action="store_true", help="确认执行真实翻译与后续构建/投递")
 
+    subparsers.add_parser(
+        "migrate-content", help="从发布快照恢复当前刊期（不处理往期、不调用模型或邮件）",
+    )
+
     import_edition = subparsers.add_parser(
         "import-edition", help="把一期版次 JSON 併入数据库（翻译成果原样保留，幂等）"
     )
@@ -157,6 +161,19 @@ def main(argv: list[str] | None = None) -> int:
         return _run_fetch(args.window_hours)
     if args.command == "build":
         return _run_build(args.fixtures)
+    if args.command == "migrate-content":
+        import json
+
+        from news_digest.config import build_config_from_env
+        from news_digest.storage.history import restore_history
+
+        fetch = _fetch_config(None)
+        report = restore_history(
+            fetch.database, build_config_from_env().output_root, fetch.data_dir / "translations",
+            latest_only=True,
+        )
+        print(json.dumps(report))
+        return 0
     if args.command == "translate":
         return _run_translate(args.date, args.limit, args.yes, frozenset(args.redo))
     if args.command == "run":
@@ -435,10 +452,38 @@ def _run_build(fixtures: str | None) -> int:
     else:
         from news_digest.config import fetch_config_from_env
 
-        release = build_editions(load_db_editions(fetch_config_from_env()), config)
+        fetch_config = fetch_config_from_env()
+        release = build_editions(load_db_editions(fetch_config), config)
+        _confirm_published_editions(fetch_config.database, config.output_root)
     print(f"构建完成：{release}")
     print("本地预览：双击 preview.bat")
     return 0
+
+
+def _confirm_published_editions(database: Path, output_root: Path) -> None:
+    import datetime as dt
+
+    from news_digest.delivery.publisher import resolve_published_release
+    from news_digest.storage import db
+
+    now = dt.datetime.now(dt.UTC).isoformat()
+    owner = f"build-{os.getpid()}"
+    conn = db.connect(database)
+    try:
+        for date in db.pending_automation_build_dates(conn):
+            publication = resolve_published_release(output_root, edition_date=date).edition
+            state = db.automation_edition(conn, date)
+            if not db.publication_covers_build(conn, date, state.dirty_generation, publication):
+                continue
+            claimed = db.claim_automation_build(
+                conn, date, owner=owner, now=now, lease_seconds=300, force=True,
+            )
+            if claimed is not None:
+                db.finish_automation_build(
+                    conn, date, owner=owner, now=now, succeeded=True, publication=publication,
+                )
+    finally:
+        conn.close()
 
 
 def _translate_edition_for(date: str | None, config) -> tuple[str, object] | None:
@@ -466,9 +511,11 @@ def _runtime_translation_config():
 
 
 def _run_translate(date: str | None, limit: int | None, yes: bool, redo: frozenset[str]) -> int:
-    from news_digest.pipeline import store_translated
+    import datetime as dt
+
+    from news_digest.storage import db
+    from news_digest.translation.automation import TranslationAutomationRunner
     from news_digest.translation.client import ApiTranslator, TranslationError
-    from news_digest.translation.service import translate_edition
 
     fetch_config = _fetch_config(None)
     located = _translate_edition_for(date, fetch_config)
@@ -493,7 +540,7 @@ def _run_translate(date: str | None, limit: int | None, yes: bool, redo: frozens
     if redo:
         print(f"强制重翻：{', '.join(sorted(redo))}")
     print(f"接口：{config.base_url or '（未配置）'}；模型：{config.model or '（未配置）'}")
-    print(f"本次计划翻译：{planned} 篇；预计 API 请求 {planned} 次（缓存命中会减少）")
+    print(f"本次计划翻译：{planned} 篇；每篇最多 3 次 API 请求（缓存命中不请求）")
     if not yes:
         print("当前为预览模式，未产生任何调用。确认无误后加 --yes 执行。")
         return 0
@@ -503,26 +550,74 @@ def _run_translate(date: str | None, limit: int | None, yes: bool, redo: frozens
     except TranslationError as error:
         print(str(error))
         return 1
+
+    def clock():
+        return dt.datetime.now(dt.UTC)
+
+    runner = TranslationAutomationRunner(
+        database=fetch_config.database,
+        provider_id=f"default-{translator.cache_identity[:64]}",
+        translator=translator,
+        cache_dir=config.cache_dir,
+        build_callback=lambda _: "",
+        delivery_callback=lambda *_: False,
+        clock=clock,
+    )
     try:
-        updated, report = translate_edition(
-            edition, translator, config.cache_dir, limit=limit, on_progress=print, redo=redo
+        runner.seed_edition(edition, now=clock())
+        selected = {a.url for a in (pending if limit is None else pending[:limit])}
+        selected.update(a.url for a in edition.articles if a.slug in redo)
+        forced = {a.url for a in edition.articles if a.slug in redo}
+        task_ids = set()
+        unavailable = 0
+        conn = db.connect(fetch_config.database)
+        try:
+            for task in db.active_translation_tasks(conn, date):
+                if task.article_id not in selected:
+                    continue
+                try:
+                    if task.provider_id != runner.provider_id:
+                        task_id = db.rebind_translation_item(
+                            conn,
+                            task.task_id,
+                            provider_id=runner.provider_id,
+                            now=clock().isoformat(),
+                            actor="cli",
+                            force=task.article_id in forced,
+                        )
+                        task = db.translation_task(conn, task_id)
+                    elif task.article_id in forced or task.status not in {"pending", "running"}:
+                        task = db.queue_translation_task_retry(
+                            conn,
+                            task.task_id,
+                            now=clock().isoformat(),
+                            actor="cli",
+                            force=task.article_id in forced,
+                        )
+                    task_ids.add(task.task_id)
+                except RuntimeError as error:
+                    unavailable += 1
+                    print(f"未执行 {task.article_title}: {error}")
+        finally:
+            conn.close()
+        report = runner.run_ready(
+            now=clock(),
+            owner=f"translate-{os.getpid()}",
+            max_tasks=max(1, len(task_ids)),
+            task_ids=task_ids,
         )
     except KeyboardInterrupt:
-        print("\n已中断。已成功的篇目在缓存中，重跑同一命令会瞬时续接。")
+        print("\n已中断。已成功的篇目已保存，未完成任务等待租约恢复。")
         return 130
     finally:
         translator.close()
 
-    store_translated(fetch_config, date, updated.articles)
     print(
         f"完成：成功 {report.succeeded} 篇（缓存命中 {report.cache_hits}），"
-        f"API 请求 {report.api_calls} 次，失败 {report.failed} 篇，"
-        f"此前已翻译 {report.already_done} 篇"
+        f"失败 {report.failed} 篇，未执行 {unavailable + len(task_ids) - report.claimed} 篇"
     )
-    for slug, reason in report.failures:
-        print(f"  失败 {slug}: {reason}")
     print("下一步：uv run news-digest build（或双击 preview.bat）")
-    return 0 if report.failed == 0 else 1
+    return 0 if report.succeeded == len(task_ids) and unavailable == 0 else 1
 
 
 def _run_daily(window_hours: int | None, yes: bool) -> int:
@@ -659,7 +754,7 @@ def _run_automation_daily(
         DeliveryServiceError,
         deliver_published,
     )
-    from news_digest.models import DailyEdition
+    from news_digest.delivery.publisher import persist_publication_index, resolve_published_release
     from news_digest.pipeline import (
         build_editions,
         latest_db_date,
@@ -674,7 +769,15 @@ def _run_automation_daily(
     if date is None:
         print("数据库无内容；无法创建逐篇翻译任务。")
         return 1
-    edition = selected_mains_for_translation(fetch_config, date)
+    resume = bool(getattr(fetched_edition, "resume", False))
+    if resume:
+        conn = db.connect(fetch_config.database)
+        try:
+            edition = db.get_edition(conn, date)
+        finally:
+            conn.close()
+    else:
+        edition = selected_mains_for_translation(fetch_config, date)
     if edition is None or not edition.articles:
         print(f"{date} 没有可翻译的主文章")
         return 1
@@ -690,6 +793,29 @@ def _run_automation_daily(
     build_config = build_config_from_env()
 
     def build_callback(edition_date: str) -> str:
+        from dataclasses import replace
+
+        conn = db.connect(fetch_config.database)
+        try:
+            state = db.automation_edition(conn, edition_date)
+            try:
+                current = resolve_published_release(
+                    build_config.output_root, edition_date=edition_date,
+                )
+            except ValueError:
+                current = None
+            reusable = (
+                current is not None and state is not None
+                and state.building_generation is not None
+                and db.publication_covers_build(
+                    conn, edition_date, state.building_generation, current.edition,
+                )
+            )
+        finally:
+            conn.close()
+        if reusable:
+            persist_publication_index(build_config.output_root)
+            return current.release_name
         editions = load_db_editions(fetch_config)
         visible_editions = []
         for current in editions:
@@ -698,17 +824,13 @@ def _run_automation_daily(
                 continue
             visible = [article for article in current.articles if article.translated_by]
             visible_editions.append(
-                DailyEdition(
-                    date=current.date,
-                    articles=visible,
-                    briefs=current.briefs,
-                )
+                replace(current, articles=visible)
             )
         release = build_editions(visible_editions, build_config)
         print(f"增量构建完成：{release.name}")
         return release.name
 
-    def delivery_callback(edition_date: str, delivery_key: str) -> bool:
+    def delivery_callback(edition_date: str, delivery_key: str) -> bool | str:
         del delivery_key
         report = deliver_published(
             "auto",
@@ -724,6 +846,8 @@ def _run_automation_daily(
             f"unknown {report.unknown_count}，跳过 {report.skipped_count}"
         )
         error_category = getattr(report, "error_category", None)
+        if report.status == "skipped" and error_category == "no_eligible_recipients":
+            return "no_eligible_recipients"
         if error_category:
             print(f"自动投递错误分类：{error_category}")
         return report.succeeded or report.status == "skipped"
@@ -738,6 +862,9 @@ def _run_automation_daily(
         build_callback=build_callback,
         delivery_callback=delivery_callback,
         clock=clock,
+        publication_reader=lambda date: resolve_published_release(
+            build_config.output_root, edition_date=date,
+        ).edition,
     )
     owner = f"daily-{os.getpid()}"
     recovery_conn = db.connect(fetch_config.database)
@@ -751,7 +878,8 @@ def _run_automation_daily(
         )
     finally:
         recovery_conn.close()
-    runner.seed_edition(edition, now=clock())
+    if not resume:
+        runner.seed_edition(edition, now=clock())
     print(f"[2/4] 逐篇翻译自动化：{date}，任务 {len(edition.articles)} 篇")
     try:
         while True:
@@ -767,14 +895,19 @@ def _run_automation_daily(
                 maintenance_conn.close()
             result = runner.run_ready(now=now, owner=owner, max_tasks=1)
             built = runner.flush_build(now=clock(), owner=owner)
-            delivered = runner.flush_delivery(edition_date=date, now=clock())
+            delivered = (
+                runner.flush_delivery(edition_date=date, now=clock()) if delivery_enabled else False
+            )
             conn = db.connect(fetch_config.database)
             try:
                 state = db.automation_edition(conn, date)
-                tasks = db.list_translation_tasks(conn, date)
+                tasks = db.active_translation_tasks(conn, date)
             finally:
                 conn.close()
-            if state is not None and state.status == "delivered":
+            if state is not None and (
+                state.status == "delivered"
+                or getattr(state, "last_error_code", None) == "NO_ELIGIBLE_RECIPIENTS"
+            ):
                 return 0
             action_required = any(
                 task.status == "configuration_blocked"
@@ -783,7 +916,12 @@ def _run_automation_daily(
             )
             # A non-retryable task is isolated: keep draining other ready tasks
             # before stopping so one bad article cannot strand the whole edition.
-            if action_required and not (result.claimed or built or delivered):
+            waiting_build = (
+                state is not None
+                and state.dirty_generation > state.built_generation
+                and state.status != "build_failed"
+            )
+            if action_required and not (result.claimed or built or delivered or waiting_build):
                 print("自动化已安全停止：存在需要人工处理的翻译任务。")
                 return _AUTOMATION_ACTION_REQUIRED
             if (
@@ -797,7 +935,28 @@ def _run_automation_daily(
             if state is not None and state.status == "build_failed" and not built:
                 print("增量构建失败；旧站点保持不变。")
                 return _AUTOMATION_ACTION_REQUIRED
+            if (not tasks and not waiting_build) or (
+                not delivery_enabled and state is not None and state.status == "complete"
+            ):
+                return 0
             if not (result.claimed or built or delivered):
+                pending_current = any(
+                    task.provider_id == runner.provider_id
+                    and (
+                        task.status in {"pending", "running"}
+                        or (
+                            task.status in {"failed", "retry_wait"}
+                            and task.auto_retry
+                            and task.next_retry_at is not None
+                        )
+                    )
+                    for task in tasks
+                )
+                if not pending_current and not waiting_build:
+                    if any(task.status != "succeeded" for task in tasks):
+                        print("当前接口无可执行待办；请在 Admin 检查或重绑定剩余任务。")
+                        return _AUTOMATION_ACTION_REQUIRED
+                    return 0
                 sleep(1.0)
     except (DeliveryServiceError, KeyboardInterrupt, ValueError) as error:
         print(f"自动化已停止：{error}")
@@ -833,7 +992,7 @@ def _run_automation_resume(yes: bool) -> int:
         return 0
     return _run_automation_daily(
         fetch_config,
-        types.SimpleNamespace(date=unfinished[0]),
+        types.SimpleNamespace(date=unfinished[0], resume=True),
     )
 
 

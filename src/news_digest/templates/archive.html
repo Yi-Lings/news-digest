@@ -102,7 +102,11 @@
         <span>{{ entry.lead_title_en }}</span>
         {% endif %}
       </a>
+      {% if entry.article_count is not none %}
       <span class="archive-count">主文章 {{ entry.article_count }} 篇 · 简讯 {{ entry.brief_count }} 条</span>
+      {% else %}
+      <span class="archive-count">历史页面</span>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>

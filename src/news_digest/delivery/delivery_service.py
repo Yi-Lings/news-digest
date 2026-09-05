@@ -446,7 +446,7 @@ def deliver_published(
             )
             if not recipients:
                 finished_at = _utc_iso(clock())
-                db.finish_delivery_run(conn, run_id, "completed", finished_at)
+                db.finish_delivery_run(conn, run_id, "skipped", finished_at)
                 state_sync_result = _reconcile_completed_run_safely(
                     conn, run_id, release.release_date, finished_at
                 )
@@ -456,6 +456,12 @@ def deliver_published(
                 state_sync_ok = state_sync_result == "reconciled" or (
                     state_sync_result == "not_applicable" and completion_ready
                 )
+                any_sent = conn.execute(
+                    "SELECT 1 FROM email_deliveries"
+                    " WHERE edition_date = ? AND status = 'sent' LIMIT 1",
+                    (release.release_date,),
+                ).fetchone() is not None
+                reason = "already_sent" if any_sent else "no_eligible_recipients"
                 return DeliveryServiceReport(
                     run_id,
                     release.release_name,
@@ -469,9 +475,9 @@ def deliver_published(
                     0,
                     rendered.metadata.degraded,
                     "not_requested",
-                    error_category=None if state_sync_ok else "state_sync_failed",
+                    error_category=reason if state_sync_ok else "state_sync_failed",
                     message=(
-                        "没有待投递收件人；已成功者不会重复发送"
+                        ("已投递，不重复发送" if any_sent else "没有符合资格的收件人，已跳过")
                         if state_sync_ok
                         else "投递事实已持久化，但刊期状态同步失败；"
                         "禁止重发，请检查投递审计。"

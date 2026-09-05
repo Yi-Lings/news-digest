@@ -918,24 +918,22 @@ class SiteHandler(BaseHTTPRequestHandler):
     # -- 静态 + 门控 ----------------------------------------------------------
 
     def _resolve_file(self, path: str) -> Path | None:
-        site_root: Path = self.server.site_dir
-        relative = path.lstrip("/")
-        if relative in {"", "index.html"}:
-            relative = "index.html"
-        elif not relative.endswith(".html") and "." not in relative.rsplit("/", 1)[-1]:
-            candidate = site_root / relative / "index.html"
-            if candidate.is_file():
-                return candidate.resolve() if candidate.exists() else None
-        target = (site_root / relative).resolve()
-        try:
-            target.relative_to(site_root.resolve())
-        except ValueError:
-            return None
-        return target if target.is_file() else None
+        from news_digest.static_resources import resolve_static_resource
+
+        resource = resolve_static_resource(self.server.site_dir, path)
+        return resource[0] if resource else None
 
     def _serve_static(self, path: str, *, confirm_free_read: bool = False) -> None:
+        from news_digest.static_resources import resolve_static_resource
+
+        resource = resolve_static_resource(self.server.site_dir, path)
+        if resource is None:
+            self._html(404, _page("404", "<p>页面不存在。</p>"))
+            return
+        file_path, path = resource
         kind, edition_date, slug = accounts.classify_page(path)
-        file_path = self._resolve_file(path)
+        if slug == "index":
+            kind = "public"
         if kind != "article" or file_path is None:
             if file_path is None:
                 self._html(404, _page("404", "<p>页面不存在。</p>"))

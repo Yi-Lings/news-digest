@@ -1,5 +1,9 @@
 # Cheapcoding News Digest - 本地开发与服务器部署计划
 
+> 2026-09-05：t26 之后以 [新版架构与迭代计划](docs/plans/v1.4-next/PLAN.md) 为实施依据。
+> 已按小规模网站需求精简；[系统架构审查](docs/plans/v1.4-next/SYSTEM_REVIEW.md) 保留发现和取舍，取消项不作为后续必做任务。
+> 本文件保留历史决策和既有草稿；其中旧阶段门禁及 12A/12B/12D 不再作为并行执行清单。
+
 ## 1. 项目目标
 
 建设一个面向个人英语学习的每日双语新闻站，最终发布到 `news.cheapcoding.top`。
@@ -1315,17 +1319,18 @@ Admin UI
 
 ### 12D.1 目标与边界
 
-目标是当整篇译文通过 JSON/schema、但某些句子触发内容质量门时，只重译可定位的失败句，
+目标是当整篇译文通过 JSON/schema、但某些句子命中可定位的内容诊断时，只重译可定位的目标句，
 保留同一篇文章中已经通过校验的句子和教学字段，降低长文重复生成导致的同错重现与费用。
-这不是放宽质量门，也不是把失败任务标记为成功；局部修复合并后仍必须通过整篇 schema、句段数量、
-数字保值和现有软门验收。provider、model、endpoint 均不得写死，局部重译沿用当前任务绑定的
-provider 与 cache identity。
+数字诊断不再是硬门，也不能单独使任务失败；句子修复是有预算的最佳尝试，失败时保留原译文并继续
+按现行非阻断策略处理。局部修复合并后仍必须通过整篇 schema 和句段数量校验。provider、model、
+endpoint 均不得写死，局部重译沿用当前任务绑定的 provider 与 cache identity。
 
 ### 12D.2 失败定位契约
 
 1. `quality.py` 新增结构化 evidence API，在返回人类可读错误的同时返回：段落索引、句子索引、
    原文数值、译文候选值和匹配失败原因；保留现有 `check_translation` 兼容接口。
-2. schema 错误继续按整篇修复处理；只有 schema 已通过且质量门能唯一定位到句子的错误，才进入句子级修复。
+2. schema 错误继续按整篇修复处理；只有 schema 已通过且诊断能唯一定位到句子的错误，才进入句子级修复。
+   数字、长度和否定诊断均不得升级为文章失败；数字 evidence 仅用于观测或有预算的最佳尝试。
    无法定位、跨句数值、段落边界不确定或存在多个冲突候选时，必须回退为整篇有限修复，不得猜测替换。
 3. 句子编号使用任务已冻结的 `segmentation_json`，禁止重试时重新分句；编号必须包含 `P#S#`，
    并校验目标句与任务原文 hash 一致，防止抓取刷新后错写其他句子。
@@ -1336,8 +1341,8 @@ provider 与 cache identity。
    provider 返回严格 JSON：`paragraph_index`、`sentence_index`、`translation_zh`。
 2. 修复请求不得重新生成 title、summary、vocabulary、collocations 或 sentence_notes；
    合并器只允许替换一个已定位句子的 `sentences_zh[P][S]`，拒绝越界、空值、重复编号和额外字段。
-3. 合并后重新构造完整 `TranslationResult` 并运行整篇 schema 与质量门。若仍失败，按句子级预算继续；
-   达到上限后保留失败，不降级为 observe，不覆盖上一次有效缓存。
+3. 合并后重新构造完整 `TranslationResult` 并运行整篇 schema 与非阻断诊断。若目标诊断仍存在，按句子级
+   预算继续；达到上限后保留原译文，不把诊断升级为失败，不降级为 observe，不覆盖上一次有效缓存。
 4. 句子级结果不单独作为公开页面或邮件内容写入；只有完整文章通过最终验收后，才原子替换文章和缓存。
 
 ### 12D.4 状态、缓存与预算
@@ -1364,9 +1369,9 @@ provider 与 cache identity。
 
 ### 12D.6 明确不做
 
-- 不通过 `TRANSLATION_QUALITY_MODE=observe` 掩盖真实失败。
+- 不通过 `TRANSLATION_QUALITY_MODE=observe` 掩盖真实失败；数字诊断也不得恢复为硬失败门。
 - 不默认切换 provider，不锁死 Terra，不重写已成功句子，不删除旧任务或审计。
-- 不让句子级修复绕过完整 schema、数字门、文章级租约或人工重试确认。
+- 不让句子级修复绕过完整 schema、句段数量校验、文章级租约或人工重试确认。
 
 ## 13. 待用户确认
 

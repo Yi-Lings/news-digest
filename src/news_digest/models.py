@@ -1,5 +1,6 @@
 """Shared data models. Pure data structures: no network, database, or file IO."""
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,14 +89,23 @@ class DailyEdition:
     date: str
     articles: list[Article] = field(default_factory=list)
     briefs: list[BriefItem] = field(default_factory=list)
+    generation: int = 0
+    result_revisions: dict[str, int] = field(default_factory=dict)
+    source_status: str = "ready"
 
     @property
     def sources(self) -> list[str]:
         """Distinct article sources in first-appearance order."""
         seen: dict[str, None] = {}
-        for article in self.articles:
+        for article in [*self.articles, *self.briefs]:
             seen.setdefault(article.source, None)
         return list(seen)
+
+
+def article_source_hash(article: Article) -> str:
+    text = article.title_en + "\n" + article.summary_en + "\n"
+    text += "\n".join(paragraph.en for paragraph in article.paragraphs)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def article_from_dict(data: dict[str, Any]) -> Article:
@@ -178,6 +188,8 @@ def article_to_dict(article: Article) -> dict[str, Any]:
 def edition_from_dict(data: dict[str, Any]) -> DailyEdition:
     return DailyEdition(
         date=data["date"],
+        generation=data.get("generation", 0),
+        result_revisions=data.get("result_revisions", {}),
         articles=[article_from_dict(a) for a in data["articles"]],
         briefs=[
             BriefItem(
@@ -192,8 +204,12 @@ def edition_from_dict(data: dict[str, Any]) -> DailyEdition:
 
 
 def edition_to_dict(edition: DailyEdition) -> dict[str, Any]:
-    return {
+    data = {
         "date": edition.date,
         "articles": [article_to_dict(a) for a in edition.articles],
         "briefs": [vars(b) for b in edition.briefs],
     }
+    if edition.generation or edition.result_revisions:
+        data["generation"] = edition.generation
+        data["result_revisions"] = edition.result_revisions
+    return data
