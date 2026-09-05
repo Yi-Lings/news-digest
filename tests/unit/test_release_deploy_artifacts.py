@@ -63,6 +63,7 @@ def test_content_migration_stops_writers_before_backup_and_startup():
     start = bootstrap.index('"${COMPOSE[@]}" up -d web site admin')
     assert stop < backup < migrate < start
     assert "--network none" in bootstrap[backup:migrate]
+    assert "--tmpfs /tmp:size=64m,mode=1777" in bootstrap[backup:migrate]
 
 
 def test_release_workflow_distinguishes_stable_and_candidate_tags():

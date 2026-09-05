@@ -543,6 +543,7 @@ COMPOSE=(docker compose -f "${APP_DIR}/compose.yaml")
 # This command has no provider, payment or mail calls. It runs before new writers start.
 docker volume create news-digest_news-site >/dev/null
 docker run --rm --network none --read-only --user 10001:10001 \
+  --tmpfs /tmp:size=64m,mode=1777 \
   --entrypoint news-digest \
   --mount type=volume,src=news-digest_news-data,dst=/data \
   --mount type=volume,src=news-digest_news-site,dst=/site,readonly \
