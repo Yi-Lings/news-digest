@@ -218,12 +218,13 @@ bootstrap/Admin 会把 `NEWS_SITE_URL`、SMTP、EasyPay 等 Site 必需字段原
 ## 4. 固定镜像 digest
 
 **已有实例升级不得先改 live compose。** 无论使用 `server-push.ps1`、bootstrap 还是手工升级，
-都必须先冻结下面四个运行入口；preflight 与 bootstrap 会读取 `ActiveState` 并在任一入口仍活动时
+都必须先冻结下面所有运行入口；preflight 与 bootstrap 会读取 `ActiveState` 并在任一入口仍活动时
 fail closed。unit 保持 `enabled` 不影响部署，升级结束后 bootstrap 会重新启动 timer 与 wakeup path。
 
 ```bash
 cd /srv/news-digest
 sudo systemctl stop news-digest.timer news-digest-wakeup.path news-digest-resume.service
+sudo systemctl stop news-digest-backup.timer
 if sudo systemctl is-active --quiet news-digest.service; then
   echo 'worker 仍在运行；等待其结束后重新执行本步骤' >&2
   exit 1
@@ -232,12 +233,16 @@ if sudo systemctl is-active --quiet news-digest-resume.service; then
   echo '恢复 worker 仍在运行；等待其结束后重新执行本步骤' >&2
   exit 1
 fi
-sudo docker compose stop admin
+if sudo systemctl is-active --quiet news-digest-backup.service; then
+  echo '备份 worker 仍在运行；等待其结束后重新执行本步骤' >&2
+  exit 1
+fi
+sudo docker compose stop admin site
 ```
 
 保持四处旧 digest 不变，按 §9 使用旧 worker 镜像完成迁移前 SQLite online backup，核验
 `PRAGMA integrity_check` 与 SHA-256 后，才可继续编辑 live compose。备份失败时应恢复旧
-Admin 与 timer 并终止升级。首次安装不存在旧 timer、Admin 和数据卷，可直接执行下文。
+Site/Admin 与 timer/path 并终止升级。首次安装不存在旧 timer、Admin 和数据卷，可直接执行下文。
 
 编辑 `/srv/news-digest/compose.yaml`，替换四处 `image:`：worker、site 与 admin 三处使用
 同一个 worker digest，web 使用 web digest；四处必须来自同一 Release：
@@ -293,7 +298,7 @@ curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8620/healthz        # 公开读者站点，期望输出 ok
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web healthy，site/admin running
-sudo systemctl start news-digest.timer news-digest-wakeup.path
+sudo systemctl start news-digest.timer news-digest-wakeup.path news-digest-backup.timer
 ```
 
 v1.4.0 首次启用账号与付费阅读时，先在服务器
@@ -353,10 +358,10 @@ sudo docker inspect --format '{{index .Config.Labels "org.opencontainers.image.r
 ## 7. 安装 systemd 定时任务
 
 ```bash
-sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer /etc/systemd/system/
+sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer /etc/systemd/system/
 command -v docker    # 若不是 /usr/bin/docker，同步修改 service 中 ExecStart 的绝对路径
 sudo systemctl daemon-reload
-sudo systemctl enable --now news-digest.timer news-digest-wakeup.path
+sudo systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-backup.timer
 systemctl list-timers news-digest.timer        # 核对下次触发时间为 08:00（Asia/Shanghai）
 sudo systemctl start news-digest.service       # 手动触发一次，验证 timer→service→容器链路
 journalctl -u news-digest.service -n 50        # 查看运行日志
@@ -430,7 +435,7 @@ sudo /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh   # 直接执行�
 - **迁移前 SQLite 一致性备份**：bootstrap 在任何新 Admin/worker 启动前使用 SQLite
   online backup API 备份 `news-digest_news-data` 中的 `news.db`，验证完整性并生成同名
   `.sha256` 文件；两者均为 `root:root/0600`。该备份是 schema 自动迁移前的人工恢复点。
-- **停写后的整卷归档**（SQLite、翻译缓存、站点归档）：以下 tar 仅适用于 Admin 与 worker 停止写入后的整卷归档，
+- **停写后的整卷归档**（SQLite、翻译缓存、站点归档）：以下 tar 仅适用于 Site、Admin、daily/resume/backup worker 及人工 CLI 全部停止写入后的整卷归档，
   不替代迁移前 SQLite online backup：
 
 ```bash
@@ -446,7 +451,8 @@ sudo docker run --rm -v news-digest_news-site:/site:ro -v /srv/news-digest/backu
 
 ## 10. 回滚
 
-前提：台账里始终留有上一版 digest（第 9 步）。
+前提：台账里始终留有上一版 digest（第 9 步），且已确认该镜像兼容当前数据库 schema。
+不兼容时禁止执行下面的直接镜像回滚流程。
 
 ```bash
 cd /srv/news-digest
@@ -461,13 +467,35 @@ sudo docker compose up -d web site admin   # web、公开站点与面板立即�
 SHA-256 与 `PRAGMA integrity_check` 后再手工恢复；不得自动选择“最新”备份，也不得直接
 覆盖仍在线的 `news.db`。
 
-schema 11 部署会在备份前停止 Site/Admin，在新服务启动前离线执行
+schema 12（t28）部署会在备份前停止 Site/Admin，并冻结 daily/resume/backup 调度，在新服务启动前离线执行
 `news-digest migrate-content`，仅恢复当前刊期成员与匹配缓存；往期页面原样保留，不补译、不重建、不补发。
 该命令不抓取、不调用模型、不发邮件。迁移失败时服务保持停止，不自动用旧镜像打开升级库。
-schema 10 镜像不兼容 schema 11。恢复备份前必须保留升级后的数据库，核对备份时间之后的
+schema 11 的 t27 镜像不兼容 schema 12。恢复备份前必须保留升级后的数据库，核对备份时间之后的
 支付到账、会员权益、已发送邮件及 `unknown` 投递；不能覆盖这些外部事实后直接重跑任务。
 
 ## 11. 日常观察
+
+t28 新增 `news-digest-backup.timer`：每天 10:30 创建一致性恢复包并隔离解包核对，成功后
+有限清理 30 天前的验证码、过期 session 和已结束 account outbox，每表最多 500 条。
+订单、权益变更、正式邮件和 `unknown` 审计不清理。恢复包保留 14 份，包含有效配置与
+发布证据。完整范围及停写/外部事实核对要求见 [运维手册](../docs/OPERATIONS.md#5-数据备份)。
+
+Site `/healthz` 表示存活，`/readyz` 核对 schema 和已发布首页；Compose 为 Site/Admin/Web
+分别执行健康检查。Admin 顶部“运行状态”显示刊期覆盖率、任务、投递、outbox、异常结算、
+备份和配置状态；持续 10 分钟的异常只记录一次 `business_alert`，恢复时再记录一次，
+查看 Admin 容器日志即可。不把零收件人的 skipped 当作邮件失败。
+
+`/config/.env` 为权威源，`/site-config/.env` 为可重建投影。Admin 显示 desired/applied
+revision，保存后只有投影读回及 DB 激活提交均成功才返回成功；失败时明确标记待生效，
+Admin 每 30 秒按源配置恢复，不声称文件已回滚。所有 Python 入口拒绝重复配置键；CLI
+启动参数/进程环境优先于本地 dotenv，生产 provider 仍只取 `providers.json` 默认项。
+Site 的 SMTP/支付读取投影；worker 下一次启动读取源文件；域名变更仍需重启 Site/Admin。
+
+支付取消只结束购买意图，不截断结算责任。已验签但取消后/超窗到账进入 `PAYMENT_REVIEW`，
+后台每次最多查询一单，最多 8 次、60 秒起指数退避、最高 1 小时，独立于翻译锁。
+异常单可登记补权益、外部退款引用、争议或核实未到账关闭；不调用自动退款。
+退款扣减天数必须显式填写，0 表示只登记资金事实，不清空其他购买的会员时长。
+未确认关闭的订单保留配置绑定；不能用换密钥代替结算处理。
 
 ```bash
 journalctl -u news-digest.service --since today     # 每日任务结果（退出码非 0 即失败）

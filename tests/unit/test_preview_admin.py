@@ -1600,7 +1600,12 @@ def test_site_admin_account_controls_require_auth_csrf_and_are_idempotent(
     status, data = _post(
         port,
         "/admin/api/site/user-subscription-clear",
-        {"user_id": user.id, "confirm": True},
+        {
+            "user_id": user.id,
+            "confirm": True,
+            "expected_paid_until": (second_paid_until + dt.timedelta(days=366)).isoformat(),
+            "operation_id": "clear-test",
+        },
         auth,
     )
     assert status == 200 and data["plan"] is None and data["paid_until"] is None
@@ -2164,11 +2169,12 @@ def test_admin_reconcile_uses_query_completion_time_for_settlement_deadline(
     status, data = _post(
         port, "/admin/api/site/payment-reconcile", {"order_id": order.id}, auth
     )
-    assert status == 409 and data["category"] == "payment"
+    assert status == 200
     conn = db.connect(root / "news.db")
     expired_order = db.order_by_id(conn, order.id)
     assert expired_order.status == "expired"
-    assert expired_order.last_error_code == "PAYMENT_EXPIRED"
+    assert expired_order.last_error_code == "PAYMENT_REVIEW"
+    assert db.list_payment_cases(conn)[0]["state"] == "received"
     assert db.user_by_id(conn, user.id).paid_until is None
     conn.close()
 
@@ -2660,9 +2666,10 @@ def test_deployment_schedule_artifacts_are_consistent():
 
     assert "NEWS_TIMEZONE=Asia/Shanghai" in env_example
     assert "NEWS_TIMEZONE=Asia/Shanghai" in bootstrap
-    assert 'count == 1 && value == "Asia/Shanghai"' in bootstrap
-    assert bootstrap.index('count == 1 && value == "Asia/Shanghai"') < bootstrap.index(
-        'install_file "${SRC_DIR}/news-digest.timer"'
+    assert 'read_env(source).get("NEWS_TIMEZONE") == "Asia/Shanghai"' in bootstrap
+    timezone_check = 'read_env(source).get("NEWS_TIMEZONE") == "Asia/Shanghai"'
+    assert bootstrap.index(timezone_check) < bootstrap.index(
+        "systemctl enable --now news-digest.timer"
     )
     assert "OnCalendar=*-*-* 08:00:00 Asia/Shanghai" in timer
     assert "Type=oneshot" in service
@@ -3752,7 +3759,7 @@ def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input
     assert 'field("site-orders")' not in users_loader
     assert 'field("site-codes")' not in users_loader
     assert "loadPayments()" not in users_loader
-    assert 'api("/admin/api/payments/overview")' in payments_loader
+    assert 'api("/admin/api/payments/overview?page="' in payments_loader
     assert 'api("/admin/api/users/overview")' not in payments_loader
     assert 'field("site-users")' not in payments_loader
     assert "loadUsers()" not in payments_loader
@@ -3924,5 +3931,5 @@ def test_admin_dom_has_return_to_main_site_and_orders_search():
     assert '<p id="orders-count" class="meta">' in ADMIN_HTML
     assert '<div class="table-scroll" id="site-orders"' in ADMIN_HTML
     assert "function renderOrders()" in ADMIN_HTML
-    assert 'field("orders-search").addEventListener("input", renderOrders);' in ADMIN_HTML
+    assert "ordersSearchTimer = setTimeout(loadPayments, 300)" in ADMIN_HTML
     assert 'field("orders-status-filter").addEventListener("change", renderOrders);' in ADMIN_HTML

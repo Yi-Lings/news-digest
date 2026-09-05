@@ -15,6 +15,7 @@ from news_digest.textutil import collapse_ws, html_to_text
 
 _MIN_PARAGRAPH_COUNT = 2
 _WORDS_PER_MINUTE = 200
+EXTRACTOR_VERSION = f"trafilatura-{trafilatura.__version__}/clean-2"
 
 # 常见站点样板句（页脚、分享、订阅、播放器占位）；仅对短段落生效，避免误伤正文。
 _BOILERPLATE = re.compile(
@@ -33,32 +34,49 @@ class ExtractedBody:
     image_url: str = ""
 
 
-def extract_body(page_html: str, url: str) -> ExtractedBody | None:
+def extract_body(
+    page_html: str, url: str, *, diagnostics: dict | None = None
+) -> ExtractedBody | None:
     """Return cleaned paragraphs plus metadata, or None if not extractable."""
+    details = diagnostics if diagnostics is not None else {}
+    details.update(
+        version=EXTRACTOR_VERSION,
+        completeness="unverified",
+        raw_paragraphs=0,
+        removed_paragraphs=0,
+        kept_paragraphs=0,
+        fallback_reason=None,
+    )
     text = trafilatura.extract(
         page_html,
         url=url,
         output_format="txt",
         favor_precision=True,
         include_comments=False,
-        include_tables=False,
+        include_tables=True,
     )
     if not text:
+        details["fallback_reason"] = "EXTRACT_EMPTY"
         return None
     paragraphs = [
         collapse_ws(html_to_text(line))
         for line in text.splitlines()
         if collapse_ws(line)
     ]
+    details["raw_paragraphs"] = len(paragraphs)
     paragraphs = [
         p
         for p in paragraphs
         if not (len(p) <= _BOILERPLATE_MAX_CHARS and _BOILERPLATE.search(p))
     ]
+    details["kept_paragraphs"] = len(paragraphs)
+    details["removed_paragraphs"] = details["raw_paragraphs"] - len(paragraphs)
     if len(paragraphs) < _MIN_PARAGRAPH_COUNT:
+        details["fallback_reason"] = "EXTRACT_TOO_FEW_PARAGRAPHS"
         return None
     if len(set(paragraphs)) == 1:
         # 全部段落相同：典型的播放器占位或反爬占位页
+        details["fallback_reason"] = "EXTRACT_REPEATED_PLACEHOLDER"
         return None
 
     author = ""

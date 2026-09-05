@@ -12,6 +12,7 @@ import html
 import ipaddress
 import json
 import secrets
+import sqlite3
 import threading
 import time
 import zoneinfo
@@ -318,6 +319,38 @@ def _default_delivery(mode: str, **kwargs) -> DeliveryServiceReport:
 
 
 class _AdminServer(ThreadingHTTPServer):
+    def service_actions(self) -> None:
+        if self.site_env_path is None or self.db_path is None:
+            return
+        if time.monotonic() < getattr(self, "next_config_recovery", 0):
+            return
+        self.next_config_recovery = time.monotonic() + 30
+        from news_digest.operations import monitor
+        from news_digest.site_config import recover_environment
+
+        configuration_failed = False
+        try:
+            recover_environment(
+                self.project_root / self.env_file,
+                self.site_env_path,
+                self.db_path,
+                site_url=self.site_url,
+            )
+        except Exception:
+            configuration_failed = True
+        try:
+            if self.output_root:
+                monitor(
+                    self.db_path,
+                    self.output_root / "current",
+                    timezone=self.timezone,
+                    configuration_failed=configuration_failed,
+                )
+        except Exception as error:
+            import logging
+
+            logging.getLogger(__name__).warning("business_monitor error=%s", type(error).__name__)
+
     project_root: Path
     env_file: str
     profiles_file: str
@@ -356,15 +389,25 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     server: _AdminServer
 
-    def _sync_site_environment(self) -> None:
+    def _sync_site_environment(self, conn=None) -> None:
         if self.server.site_env_path is None:
             return
-        from news_digest.site_config import sync_site_environment
+        from news_digest.site_config import apply_environment, recover_environment
 
         try:
-            sync_site_environment(self._env_path(), self.server.site_env_path)
-        except OSError:
-            raise ValueError("Site 配置投影写入失败") from None
+            if conn is not None:
+                apply_environment(
+                    self._env_path(), self.server.site_env_path, conn, site_url=self.server.site_url
+                )
+            elif self.server.db_path is not None:
+                recover_environment(
+                    self._env_path(),
+                    self.server.site_env_path,
+                    self.server.db_path,
+                    site_url=self.server.site_url,
+                )
+        except (OSError, ValueError, sqlite3.Error):
+            raise ValueError("源配置已保存，Site 投影尚未生效；后台将重试恢复") from None
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         pass
@@ -520,6 +563,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
+        if path == "/healthz":
+            self._json(200, {"status": "ok"})
+            return
         if path == "/subscribe/api/csrf":
             self._issue_public_csrf()
             return
@@ -548,6 +594,36 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         if path in {"/admin/api/payments/overview", "/admin/api/site/overview"}:
             self._handle_payments_overview()
+            return
+        if path == "/admin/api/operations":
+            if not self._authed():
+                self._json(401, {"error": "未登录"})
+                return
+            from news_digest.operations import business_status
+            from news_digest.site_config import configuration_status
+
+            if self.server.db_path is None or self.server.output_root is None:
+                self._json(503, {"error": "运行目录未配置"})
+                return
+            state = business_status(
+                self.server.db_path,
+                self.server.output_root / "current",
+                timezone=self.server.timezone,
+                now=dt.datetime.now(dt.UTC),
+            )
+            conn = db.connect(self.server.db_path)
+            try:
+                state["configuration"] = configuration_status(
+                    self._env_path(),
+                    self.server.site_env_path,
+                    conn,
+                )
+                state["checks"]["configuration_pending"] = (
+                    state["configuration"]["state"] != "applied"
+                )
+            finally:
+                conn.close()
+            self._json(200, state)
             return
         if path == "/admin/api/translations":
             self._handle_translations_get(parse_qs(urlsplit(self.path).query).get("edition", [None])[0])
@@ -700,6 +776,8 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._limited(
                 "site-payment-reconcile", lambda: self._handle_site_payment_reconcile(body)
             )
+        elif path == "/admin/api/site/payment-case":
+            self._limited("site-payment-case", lambda: self._handle_site_payment_case(body))
         elif path == "/admin/api/translations/dispatch":
             self._limited("translation-dispatch", lambda: self._handle_translation_dispatch(body))
         elif path == "/admin/api/translations/retry":
@@ -961,6 +1039,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         except (AdminEmailError, DeliveryServiceError, ValueError) as error:
             self._safe_error(error)
             return
+        except OSError:
+            self._json(503, {"error": "源配置写入失败，请检查存储后重试", "category": "configuration"})
+            return
         self._json(200, {"ok": True, "password_set": bool(smtp.password)})
 
     def _handle_mail_clear_password(self, body: dict[str, Any]) -> None:
@@ -970,8 +1051,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         try:
             clear_password(self._env_path(), confirm=body.get("confirm") is True)
             self._sync_site_environment()
-        except AdminEmailError as error:
+        except (AdminEmailError, ValueError) as error:
             self._safe_error(error)
+            return
+        except OSError:
+            self._json(503, {"error": "源配置写入失败，请检查存储后重试", "category": "configuration"})
             return
         self._json(200, {"ok": True, "password_set": False})
 
@@ -1423,6 +1507,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             newsletter_states = {
                 user.id: db.subscription_by_email(conn, user.email) for user in users
             }
+            changes = {
+                user.id: db.list_entitlement_changes(conn, user_id=user.id) for user in users
+            }
         finally:
             conn.close()
         self._json(
@@ -1436,6 +1523,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         "is_admin": user.is_admin,
                         "plan": user.plan,
                         "paid_until": user.paid_until,
+                        "entitlement_changes": changes[user.id],
                         "newsletter_subscription_id": (
                             newsletter_states[user.id].id
                             if newsletter_states[user.id] is not None
@@ -1466,13 +1554,22 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             db.expire_payment_orders(conn, now=dt.datetime.now(dt.UTC).isoformat())
-            orders = db.list_orders(conn)
+            query = parse_qs(urlsplit(self.path).query)
+            search = query.get("query", [""])[0][:200]
+            try:
+                page = max(1, min(int(query.get("page", ["1"])[0]), 100000))
+            except ValueError:
+                self._json(400, {"error": "分页参数无效"})
+                return
+            orders = db.list_orders(conn, query=search, offset=(page - 1) * 200)
+            cases = {
+                case["order_id"]: case
+                for case in db.list_payment_cases(conn, order_ids=[order.id for order in orders])
+            }
             codes = db.list_redemption_codes(conn)
             settings = {
                 key: (
-                    db.get_setting(conn, key)
-                    if db.get_setting(conn, key) is not None
-                    else default
+                    db.get_setting(conn, key) if db.get_setting(conn, key) is not None else default
                 )
                 for key, default in accounts.DEFAULT_SETTINGS.items()
             }
@@ -1483,6 +1580,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     legacy_current = accounts.price_cents(settings, plan)
                     settings[list_key] = str(legacy_base)
                     settings[f"{plan}_price_cents"] = str(legacy_current)
+            from news_digest.site_config import configuration_status
+
+            config_state = configuration_status(self._env_path(), self.server.site_env_path, conn)
         finally:
             conn.close()
         try:
@@ -1510,6 +1610,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         "payment_type": order.payment_type,
                         "paid_at": order.paid_at,
                         "last_error_code": order.last_error_code,
+                        "settlement_case": cases.get(order.id),
                         "status": order.status,
                         "admin_actor": order.admin_actor,
                         "created_at": order.created_at,
@@ -1530,6 +1631,8 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 ],
                 "settings": settings,
                 "payment": payment,
+                "configuration": config_state,
+                "orders_page": page,
                 "csrf_token": self._csrf_for_response(),
             },
         )
@@ -1582,7 +1685,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if conn is None:
             return
         try:
-            if set(body) != {"user_id", "plan", "days"}:
+            if set(body) not in (
+                {"user_id", "plan", "days"},
+                {"user_id", "plan", "days", "operation_id"},
+            ):
                 raise ValueError("user_id、plan 与 days 为必填字段")
             user_id = body.get("user_id")
             plan = body.get("plan")
@@ -1595,14 +1701,15 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             ):
                 raise ValueError("plan 或 days 非法")
             now = dt.datetime.now(dt.UTC)
-            existing = db.user_by_id(conn, user_id)
-            if existing is None:
-                raise RuntimeError("user does not exist")
-            current_expiry = accounts.parse_paid_until(existing.paid_until)
-            base = current_expiry if current_expiry is not None and current_expiry > now else now
-            until = (base + dt.timedelta(days=days)).isoformat()
-            user = db.grant_paid_until(
-                conn, user_id, plan=plan, paid_until=until, now=now.isoformat()
+            user = db.add_membership_days(
+                conn,
+                user_id,
+                plan=plan,
+                days=days,
+                now=now.isoformat(),
+                operation_id=body.get("operation_id") or f"admin-{secrets.token_hex(16)}",
+                actor=self._admin_actor(),
+                reason="admin_grant",
             )
         except (TypeError, ValueError, RuntimeError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
@@ -1619,12 +1726,18 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         if conn is None:
             return
         try:
-            if set(body) != {"user_id", "confirm"}:
-                raise ValueError("user_id 与 confirm 为必填字段")
+            if set(body) != {"user_id", "confirm", "expected_paid_until", "operation_id"}:
+                raise ValueError("清除订阅需要当前到期时间与 operation_id")
             if type(body.get("user_id")) is not int or body.get("confirm") is not True:
                 raise ValueError("清除订阅需要合法 user_id 与 confirm=true")
             user = db.clear_user_subscription(
-                conn, body["user_id"], now=dt.datetime.now(dt.UTC).isoformat()
+                conn,
+                body["user_id"],
+                now=dt.datetime.now(dt.UTC).isoformat(),
+                actor=self._admin_actor(),
+                expected_paid_until=body["expected_paid_until"],
+                check_expected=True,
+                operation_id=body["operation_id"],
             )
         except (TypeError, ValueError, RuntimeError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
@@ -1817,9 +1930,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 ),
                 now=now,
             )
-            self._sync_site_environment()
+            self._sync_site_environment(conn)
             conn.commit()
-        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError) as error:
+        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError,
+                OSError, sqlite3.Error) as error:
             conn.rollback()
             self._json(409, {"error": str(error), "category": "configuration"})
             return
@@ -1843,9 +1957,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             db.set_active_payment_config_id(
                 conn, payment_config_id=None, now=now
             )
-            self._sync_site_environment()
+            self._sync_site_environment(conn)
             conn.commit()
-        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError) as error:
+        except (admin_payments.AdminPaymentError, payments.PaymentError, ValueError,
+                OSError, sqlite3.Error) as error:
             conn.rollback()
             self._json(409, {"error": str(error), "category": "configuration"})
             return
@@ -1853,12 +1968,30 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             conn.close()
         self._json(200, {"ok": True, "pkey_set": False, "enabled": False})
 
+    def _handle_site_payment_case(self, body: dict[str, Any]) -> None:
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            if set(body) != {"order_id", "action", "reference", "days", "operation_id"}:
+                raise ValueError("异常处理参数不完整")
+            if type(body["order_id"]) is not int:
+                raise ValueError("order_id 非法")
+            db.resolve_payment_case(
+                conn, **body, actor=self._admin_actor(), now=dt.datetime.now(dt.UTC).isoformat()
+            )
+        except (ValueError, RuntimeError) as error:
+            self._json(409, {"error": str(error), "category": "payment"})
+            return
+        finally:
+            conn.close()
+        self._json(200, {"ok": True})
+
     def _handle_site_payment_reconcile(self, body: dict[str, Any]) -> None:
         if set(body) != {"order_id"} or type(body.get("order_id")) is not int:
             self._json(409, {"error": "订单参数无效", "category": "lifecycle"})
             return
         now_datetime = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
-        now = now_datetime.isoformat()
         conn = self._site_db()
         if conn is None:
             return
@@ -1870,8 +2003,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             order is None
             or order.status not in {"pending", "expired", "failed"}
             or not order.merchant_order_no
-            or not order.settlement_expires_at
-            or order.settlement_expires_at <= now
             or (
                 order.last_error_code == "GATEWAY_CREATE_RUNNING"
                 and (
@@ -3871,6 +4002,13 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       <a href="/" class="mast-home-btn" title="返回 Cheapcoding News 主页">返回主站</a>
     </div>
   </header>
+  <details id="operations-status">
+    <summary>运行状态</summary>
+    <p id="operations-summary" aria-live="polite"></p>
+    <p id="operations-payment-slots"></p>
+    <div class="table-scroll" id="operations-sources"></div>
+    <div class="table-scroll" id="operations-selection"></div>
+  </details>
   <nav class="nav" role="tablist" aria-label="管理职责">
     <button class="tab" id="tab-models" role="tab" data-tab="models" aria-controls="models" aria-selected="true">模型接口</button>
     <button class="tab" id="tab-mail" role="tab" data-tab="mail" aria-controls="mail" aria-selected="false">邮件设置</button>
@@ -4047,6 +4185,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
           </select>
         </div>
         <div class="table-scroll" id="site-orders" aria-live="polite"></div>
+        <div class="actions"><button id="orders-prev" title="上一页" aria-label="上一页">&larr;</button><span id="orders-page"></span><button id="orders-next" title="下一页" aria-label="下一页">&rarr;</button></div>
       </section>
       <section class="panel"><h3>生成卡密</h3>
         <div class="fields"><label>计划<select id="site-code-plan"><option value="monthly">月刊会员</option><option value="yearly">年刊会员</option></select></label><label>数量<input id="site-code-count" type="number" min="1" max="50" value="1"></label><label class="span2">备注<input id="site-code-note"></label></div>
@@ -4649,18 +4788,32 @@ function renderUsers() {
       });
       var grantAction = button("增加时长", function () {
         setBusy(grantAction, true);
-        api("/admin/api/site/user-grant", {user_id: item.id, plan: grantPlan.value, days: Number(grantDays.value)})
+        var command = grantPlan.value + ":" + grantDays.value;
+        if (grantAction.dataset.command !== command) {
+          grantAction.dataset.command = command; grantAction.dataset.operation = crypto.randomUUID();
+        }
+        api("/admin/api/site/user-grant", {user_id: item.id, plan: grantPlan.value, days: Number(grantDays.value), operation_id: grantAction.dataset.operation})
           .then(function (result) { say("已增加 " + result.days_added + " 天订阅时长。", true); return loadUsers(); })
           .catch(function (error) { say(error.message, false); })
           .finally(function () { setBusy(grantAction, false); });
       });
       grantControls.append(grantPlan, grantDays, grantAction);
       actions.appendChild(grantControls);
+      var history = document.createElement("details");
+      var historyTitle = document.createElement("summary"); historyTitle.textContent = "权益记录";
+      history.appendChild(historyTitle);
+      (item.entitlement_changes || []).forEach(function (entry) {
+        var line = document.createElement("p");
+        line.textContent = entry.created_at + " " + entry.actor + " " + entry.reason + " "
+          + (entry.before_until || "-") + " -> " + (entry.after_until || "-");
+        history.appendChild(line);
+      });
+      actions.appendChild(history);
       if (item.plan || item.paid_until) {
         var clearAction = button("清除订阅", function () {
           if (!confirm("确认清除该账号的订阅计划与剩余时长？账号状态和管理员权限不会改变。")) { return; }
           setBusy(clearAction, true);
-          api("/admin/api/site/user-subscription-clear", {user_id: item.id, confirm: true})
+          api("/admin/api/site/user-subscription-clear", {user_id: item.id, confirm: true, expected_paid_until: item.paid_until, operation_id: crypto.randomUUID()})
             .then(function () { say("订阅已清除。", true); return loadUsers(); })
             .catch(function (error) { say(error.message, false); })
             .finally(function () { setBusy(clearAction, false); });
@@ -4706,6 +4859,37 @@ function renderUsers() {
     field("users-summary").textContent = summary;
 }
 
+field("operations-status").addEventListener("toggle", function () {
+  if (!field("operations-status").open) { return; }
+  api("/admin/api/operations").then(function (data) {
+    var issues = Object.keys(data.checks).filter(function (key) { return data.checks[key]; });
+    var config = data.configuration;
+    field("operations-summary").textContent = data.date + " | "
+      + (issues.length ? issues.join(", ") : "运行正常")
+      + " | 备份: " + (data.backup_verified_at || "未验证")
+      + " | 配置: " + config.state + " " + (config.applied_revision || "未生效").slice(0, 12)
+      + " | DB: " + (data.database_bytes / 1048576).toFixed(1) + " MB";
+    var report = data.fetch || {};
+    field("operations-payment-slots").textContent = "支付金额槽位: "
+      + (data.payment_slots.groups.length ? data.payment_slots.groups.map(function (group) {
+        return (group.base_amount_cents / 100).toFixed(2) + " 元: " + group.occupied
+          + "/" + data.payment_slots.capacity_per_price;
+      }).join(" | ") : "无占用");
+    field("operations-sources").replaceChildren(table(
+      ["来源", "原始", "有效", "时间窗", "未来异常", "正文提取", "摘要降级", "入选", "失败阶段"],
+      Object.entries(report.diagnostics || {}).map(function (entry) {
+        var d = entry[1]; return [entry[0], d.raw, d.parsed, d.window, d.future, d.full,
+          d.summary, d.selected, JSON.stringify(d.failures || {})];
+      })
+    ));
+    field("operations-selection").replaceChildren(table(["候选", "分数", "选择原因"],
+      Object.entries(report.selection || {}).map(function (entry) {
+        return [entry[0], entry[1].score, entry[1].reason];
+      })
+    ));
+  }).catch(function (error) { field("operations-summary").textContent = error.message; });
+});
+
 function loadUsers() {
   var requestSerial = ++usersRequestSerial;
   var query = encodeURIComponent(field("users-search").value.trim());
@@ -4747,7 +4931,7 @@ function setEpayChannelState(val, enabled) {
 }
 
 function loadPayments() {
-  api("/admin/api/payments/overview").then(function (data) {
+  api("/admin/api/payments/overview?page=" + ordersPage + "&query=" + encodeURIComponent(field("orders-search").value.trim())).then(function (data) {
     csrf = data.csrf_token || csrf;
     field("site-paywall").checked = data.settings.paywall_enabled === "true";
     field("site-contact-email").value = data.settings.contact_email || "";
@@ -4767,6 +4951,9 @@ function loadPayments() {
     field("site-epay-notify").textContent = data.payment.notify_url || "站点域名尚未配置";
     field("site-epay-return").textContent = data.payment.return_url || "站点域名尚未配置";
     allOrders = data.orders || [];
+    field("orders-page").textContent = "第 " + data.orders_page + " 页";
+    field("orders-prev").disabled = ordersPage <= 1;
+    field("orders-next").disabled = allOrders.length < 200;
     renderOrders();
 
     var codeRows = data.codes.map(function (item) {
@@ -4788,6 +4975,8 @@ function loadPayments() {
 }
 
 var allOrders = [];
+var ordersPage = 1;
+var ordersSearchTimer;
 
 function renderOrders() {
   var search = (field("orders-search").value || "").trim().toLowerCase();
@@ -4817,7 +5006,7 @@ function renderOrders() {
     var offsetLabel = offset === 0 ? "¥0.00" : (offset > 0 ? "+" : "-") + "¥" + (Math.abs(offset) / 100).toFixed(2);
     var actions = document.createElement("div"); actions.className = "actions";
     var reconcilable = ["pending", "expired", "failed"].indexOf(item.status) !== -1 &&
-      item.settlement_expires_at && Date.parse(item.settlement_expires_at) > Date.now();
+      item.merchant_order_no && !item.paid_at;
     if (reconcilable) {
       var reconcileAction = button("重新查询支付状态", function () {
         setBusy(reconcileAction, true);
@@ -4830,6 +5019,43 @@ function renderOrders() {
           .finally(function () { setBusy(reconcileAction, false); });
       });
       actions.appendChild(reconcileAction);
+    }
+    var settlement = item.settlement_case;
+    if (item.paid_at || settlement) {
+      var caseDetails = document.createElement("details");
+      var caseTitle = document.createElement("summary");
+      caseTitle.textContent = settlement ? "结算: " + settlement.state : "结算处理";
+      caseDetails.appendChild(caseTitle);
+      if (settlement && settlement.reference) {
+        var caseRef = document.createElement("p"); caseRef.textContent = settlement.reference;
+        caseDetails.appendChild(caseRef);
+      }
+      if (!settlement || ["refunded", "closed"].indexOf(settlement.state) === -1) {
+        var caseAction = document.createElement("select"); caseAction.setAttribute("aria-label", "结算处理");
+        [["grant", "补发权益"], ["refunded", "登记外部退款"], ["disputed", "登记争议"], ["closed", "核实未到账关闭"]].forEach(function (entry) {
+          var option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1]; caseAction.appendChild(option);
+        });
+        var reference = document.createElement("input"); reference.placeholder = "凭证编号 / 处理依据";
+        reference.setAttribute("aria-label", "处理凭证"); reference.maxLength = 200;
+        var deduction = document.createElement("input"); deduction.type = "number";
+        deduction.min = "0"; deduction.max = "3660"; deduction.value = "0";
+        deduction.setAttribute("aria-label", "退款扣减天数");
+        var caseSubmit = button("确认处理", function () {
+          if (!reference.value.trim() || !confirm("确认登记结算处理？此操作不会调用网关退款。")) { return; }
+          var command = caseAction.value + ":" + reference.value + ":" + deduction.value;
+          if (caseSubmit.dataset.command !== command) {
+            caseSubmit.dataset.command = command; caseSubmit.dataset.operation = crypto.randomUUID();
+          }
+          setBusy(caseSubmit, true);
+          api("/admin/api/site/payment-case", {order_id: item.id, action: caseAction.value,
+            reference: reference.value, days: Number(deduction.value), operation_id: caseSubmit.dataset.operation})
+            .then(function () { say("结算记录已保存。", true); return loadPayments(); })
+            .catch(function (error) { say(error.message, false); })
+            .finally(function () { setBusy(caseSubmit, false); });
+        });
+        caseDetails.append(caseAction, reference, deduction, caseSubmit);
+      }
+      actions.appendChild(caseDetails);
     }
     return [
       item.merchant_order_no || "历史 #" + item.id,
@@ -4864,7 +5090,11 @@ field("users-next").addEventListener("click", function () {
   loadUsers();
 });
 field("site-refresh").addEventListener("click", loadPayments);
-field("orders-search").addEventListener("input", renderOrders);
+field("orders-search").addEventListener("input", function () {
+  ordersPage = 1; clearTimeout(ordersSearchTimer); ordersSearchTimer = setTimeout(loadPayments, 300);
+});
+field("orders-prev").addEventListener("click", function () { ordersPage = Math.max(1, ordersPage - 1); loadPayments(); });
+field("orders-next").addEventListener("click", function () { ordersPage++; loadPayments(); });
 field("orders-status-filter").addEventListener("change", renderOrders);
 ["monthly", "yearly"].forEach(function (plan) {
   field("site-" + plan).addEventListener("input", updateDiscountPreviews);

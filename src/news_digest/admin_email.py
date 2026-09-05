@@ -11,7 +11,7 @@ from typing import Any
 from news_digest.config import (
     SmtpConfig,
     encode_smtp_password,
-    parse_dotenv_value,
+    parse_env_text,
     smtp_config_from_env,
 )
 from news_digest.config_io import update_text
@@ -78,18 +78,9 @@ class AdminEmailError(ValueError):
 
 
 def read_env(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
     if not path.is_file():
-        return values
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        parsed = parse_dotenv_value(value)
-        values[key] = parsed
-    return values
+        return {}
+    return parse_env_text(path.read_text(encoding="utf-8"))
 
 
 def _bool_value(value: Any, field: str) -> bool:
@@ -392,16 +383,7 @@ def clear_password(env_path: Path, *, confirm: bool) -> None:
 
 
 def read_env_text(content: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        parsed = parse_dotenv_value(value)
-        values[key] = parsed
-    return values
+    return parse_env_text(content)
 
 
 def settings_payload(

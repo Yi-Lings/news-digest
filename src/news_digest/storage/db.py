@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -19,7 +20,7 @@ from news_digest.models import (
     article_to_dict,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 PAYMENT_CREATION_LEASE_SECONDS = 30
 _MAX_TRANSLATION_LEASE_SECONDS = MAX_TRANSLATION_TIMEOUT_SECONDS + 60
 
@@ -970,6 +971,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         _ensure_accounts_schema(conn)
         _apply_v8_schema(conn)
         _apply_v11_schema(conn)
+        _apply_v12_schema(conn)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -981,7 +983,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         return conn
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
         found = row["value"]
         raise RuntimeError(f"schema 版本不匹配:库中为 {found},代码期望 {SCHEMA_VERSION},需迁移")
     if version in {1, 2}:
@@ -1006,9 +1008,65 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
     if version <= 9:
         _migrate_to_v10(conn, path)
         _set_schema_version(conn, 10)
-    _migrate_to_v11(conn, path)
+    if version <= 10:
+        _migrate_to_v11(conn, path)
+    _migrate_to_v12(conn, path)
     _set_schema_version(conn, SCHEMA_VERSION)
     return conn
+
+
+def _apply_v12_schema(conn: sqlite3.Connection) -> None:
+    for statement in (
+        "CREATE TABLE IF NOT EXISTS entitlement_changes (operation_id TEXT PRIMARY KEY,"
+        " user_id INTEGER NOT NULL REFERENCES users(id), command_json TEXT NOT NULL,"
+        " actor TEXT NOT NULL, reason TEXT NOT NULL, before_plan TEXT, before_until TEXT,"
+        " after_plan TEXT, after_until TEXT, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS payment_cases"
+        " (order_id INTEGER PRIMARY KEY REFERENCES orders(id),"
+        " provider_trade_no TEXT, amount_cents INTEGER, state TEXT NOT NULL,"
+        " reference TEXT, actor TEXT, note TEXT,"
+        " observed_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS payment_case_actions (operation_id TEXT PRIMARY KEY,"
+        " order_id INTEGER NOT NULL REFERENCES orders(id), command_json TEXT NOT NULL,"
+        " actor TEXT NOT NULL, created_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS payment_checks"
+        " (order_id INTEGER PRIMARY KEY REFERENCES orders(id),"
+        " attempts INTEGER NOT NULL DEFAULT 0, next_check_at TEXT,"
+        " owner TEXT, lease_expires_at TEXT,"
+        " last_error TEXT, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS operational_events (event_key TEXT PRIMARY KEY,"
+        " status TEXT NOT NULL, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL,"
+        " notified_status TEXT, detail_json TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS fetch_reports (edition_date TEXT PRIMARY KEY,"
+        " report_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_entitlement_user"
+        " ON entitlement_changes(user_id,created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_payment_checks_ready"
+        " ON payment_checks(next_check_at,lease_expires_at)",
+    ):
+        conn.execute(statement)
+
+
+def _migrate_to_v12(conn: sqlite3.Connection, path: Path) -> None:
+    backup_path = path.with_name(f"{path.name}.pre-v12.bak")
+    with closing(sqlite3.connect(backup_path)) as backup:
+        if backup_path.stat().st_size == 0:
+            conn.backup(backup)
+        if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+            raise RuntimeError("schema v12 backup integrity failed")
+        version = backup.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if version != ("11",):
+            raise RuntimeError("schema v12 backup version mismatch")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _apply_v12_schema(conn)
+        conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("schema v12 foreign key validation failed")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _ensure_accounts_schema(conn: sqlite3.Connection) -> None:
@@ -3914,6 +3972,185 @@ def retry_edition_failed_tasks(
     return {"queued": queued, "skipped": skipped}
 
 
+def database_facts(conn) -> dict:
+    """Stable table fingerprints for isolated restore verification, with no row disclosure."""
+    names = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+    result = {}
+    for name in names:
+        escaped = name.replace('"', '""')
+        digest = hashlib.sha256()
+        count = 0
+        for row in conn.execute(f'SELECT * FROM "{escaped}" ORDER BY rowid'):
+            digest.update(json.dumps(tuple(row), ensure_ascii=True).encode())
+            digest.update(b"\n")
+            count += 1
+        result[name] = {"rows": count, "sha256": digest.hexdigest()}
+    return result
+
+
+def online_backup(database: Path, target: Path) -> dict:
+    if target.exists():
+        raise ValueError("backup target already exists")
+    with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as source:
+        with closing(sqlite3.connect(target)) as backup:
+            source.backup(backup)
+            backup.execute("PRAGMA journal_mode=DELETE")
+            return verify_database(backup)
+
+
+def verify_database(conn) -> dict:
+    if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        raise ValueError("database integrity check failed")
+    if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise ValueError("database foreign key check failed")
+    return database_facts(conn)
+
+
+def schema_is_current(conn) -> bool:
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    return row is not None and row[0] == str(SCHEMA_VERSION)
+
+
+def operational_snapshot(conn, *, date: str, now: str) -> dict:
+    edition = conn.execute(
+        "SELECT edition_date,status,target_count,succeeded_count,online_count,last_error_code"
+        " FROM automation_editions WHERE edition_date=?",
+        (date,),
+    ).fetchone()
+    tasks = dict(
+        conn.execute(
+            "SELECT t.status,COUNT(*) FROM edition_items e JOIN translation_tasks t"
+            " ON t.task_id=e.active_task_id WHERE e.edition_date=? GROUP BY t.status",
+            (date,),
+        )
+    )
+    delivery = dict(
+        conn.execute(
+            "SELECT status,COUNT(*) FROM email_deliveries WHERE edition_date=? GROUP BY status",
+            (date,),
+        )
+    )
+    outbox = conn.execute(
+        "SELECT COUNT(*) FROM account_mail_outbox WHERE status IN ('pending','sending')"
+        " AND created_at < ?",
+        (_future_timestamp(now, -600),),
+    ).fetchone()[0]
+    cases = conn.execute(
+        "SELECT COUNT(*) FROM payment_cases WHERE state IN ('received','unconfirmed','disputed')"
+    ).fetchone()[0]
+    slots = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT base_amount_cents, COUNT(DISTINCT amount_cents) AS occupied FROM orders"
+            " WHERE merchant_order_no IS NOT NULL AND status IN ('pending','expired','failed')"
+            " AND COALESCE(settlement_expires_at,expires_at) > ? GROUP BY base_amount_cents",
+            (now,),
+        )
+    ]
+    return {
+        "date": date,
+        "edition": dict(edition) if edition else None,
+        "tasks": tasks,
+        "delivery": delivery,
+        "outbox_overdue": outbox,
+        "payment_cases_open": cases,
+        "payment_slots": {"capacity_per_price": len(_PAYMENT_OFFSETS), "groups": slots},
+        "backup_verified_at": get_setting(conn, "backup_verified_at"),
+        "fetch": fetch_report(conn, date),
+    }
+
+
+def record_operational_event(
+    conn,
+    *,
+    key: str,
+    unhealthy: bool,
+    detail: dict,
+    now: str,
+    persistence_seconds: int = 600,
+) -> str | None:
+    now = _accounts_timestamp(now)
+    status = "unhealthy" if unhealthy else "healthy"
+    with conn:
+        previous = conn.execute(
+            "SELECT * FROM operational_events WHERE event_key=?", (key,)
+        ).fetchone()
+        first = previous["first_seen_at"] if previous and previous["status"] == status else now
+        notified = previous["notified_status"] if previous else None
+        event = None
+        if unhealthy and first <= _future_timestamp(now, -persistence_seconds):
+            if notified != "unhealthy":
+                event = notified = "unhealthy"
+        elif not unhealthy and notified == "unhealthy":
+            event = notified = "recovered"
+        conn.execute(
+            "INSERT INTO operational_events VALUES (?,?,?,?,?,?) ON CONFLICT(event_key)"
+            " DO UPDATE SET status=excluded.status,first_seen_at=excluded.first_seen_at,"
+            " updated_at=excluded.updated_at,notified_status=excluded.notified_status,"
+            " detail_json=excluded.detail_json",
+            (key, status, first, now, notified, json.dumps(detail)),
+        )
+        return event
+
+
+def cleanup_temporary_data(conn, *, now: str, limit: int = 500) -> dict:
+    """Only disposable account state is pruned, never financial or delivery audit facts."""
+    cutoff = _future_timestamp(_accounts_timestamp(now), -30 * 86400)
+    limit = max(1, min(int(limit), 500))
+    rules = {
+        "user_sessions": "expires_at < ?",
+        "email_codes": "expires_at < ? AND id NOT IN (SELECT email_code_id FROM account_mail_outbox"
+        " WHERE status IN ('pending','sending') AND email_code_id IS NOT NULL)",
+        "account_mail_outbox": "updated_at < ? AND status IN ('sent','failed')",
+    }
+    deleted = {}
+    with conn:
+        for table, where in rules.items():
+            deleted[table] = conn.execute(
+                f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table}"
+                f" WHERE {where} ORDER BY rowid LIMIT ?)",
+                (cutoff, limit),
+            ).rowcount
+    return deleted
+
+
+def save_fetch_report(conn, date: str, report: dict, *, now: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO fetch_reports VALUES (?,?,?) ON CONFLICT(edition_date) DO UPDATE SET"
+            " report_json=excluded.report_json,updated_at=excluded.updated_at",
+            (date, json.dumps(report), now),
+        )
+
+
+def fetch_report(conn, date: str) -> dict:
+    row = conn.execute(
+        "SELECT report_json FROM fetch_reports WHERE edition_date=?", (date,)
+    ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def record_selection_report(conn, date: str, reasons: dict, *, now: str) -> None:
+    report = fetch_report(conn, date)
+    if not report:
+        return
+    report["selection"] = reasons
+    source_counts = {}
+    for row in conn.execute("SELECT payload FROM articles WHERE date=?", (date,)):
+        article = json.loads(row[0])
+        if reasons.get(article["url"], {}).get("reason") == "selected":
+            key = article.get("source_key", "")
+            source_counts[key] = source_counts.get(key, 0) + 1
+    for key, details in report.get("diagnostics", {}).items():
+        details["selected"] = source_counts.get(key, 0)
+    save_fetch_report(conn, date, report, now=now)
+
+
 def upsert_articles(conn: sqlite3.Connection, date: str, articles: list[Article]) -> None:
     """按 url 写入文章,单个事务提交。
 
@@ -5703,36 +5940,174 @@ def revoke_user_sessions(conn: sqlite3.Connection, *, user_id: int, now: str) ->
     return cursor.rowcount
 
 
+def _change_entitlement(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    plan: str | None,
+    days: int | None,
+    paid_until: str | None = None,
+    operation_id: str,
+    actor: str,
+    reason: str,
+    now: str,
+) -> User:
+    """Apply a command inside the caller's transaction and retain its immutable receipt."""
+    operation_id = _non_empty(operation_id, "operation_id", maximum=160)
+    actor = _non_empty(actor, "actor", maximum=128)
+    reason = _non_empty(reason, "reason", maximum=200)
+    command = json.dumps([user_id, plan, days, paid_until])
+    previous = conn.execute(
+        "SELECT command_json FROM entitlement_changes WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    if previous is not None:
+        if previous[0] != command:
+            raise RuntimeError("operation_id already belongs to another entitlement command")
+        return user_by_id(conn, user_id)
+    current = user_by_id(conn, user_id)
+    if current is None:
+        raise RuntimeError("user does not exist")
+    if days is not None:
+        if type(days) is not int or not -3660 <= days <= 3660 or days == 0:
+            raise ValueError("days must be a nonzero integer between -3660 and 3660")
+        base = max(current.paid_until or now, now)
+        paid_until = max(_future_timestamp(base, days * 86400), now)
+        plan = (
+            _merge_user_plan(current.plan, current.paid_until, plan, now)
+            if days > 0
+            else current.plan
+        )
+    conn.execute(
+        "UPDATE users SET plan=?, paid_until=?, updated_at=? WHERE id=?",
+        (plan, paid_until, now, user_id),
+    )
+    conn.execute(
+        "INSERT INTO entitlement_changes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            operation_id,
+            user_id,
+            command,
+            actor,
+            reason,
+            current.plan,
+            current.paid_until,
+            plan,
+            paid_until,
+            now,
+        ),
+    )
+    return user_by_id(conn, user_id)
+
+
+def add_membership_days(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    plan: UserPlan,
+    days: int,
+    operation_id: str,
+    actor: str,
+    reason: str,
+    now: str,
+) -> User:
+    now = _accounts_timestamp(now)
+    if plan not in {"monthly", "yearly"} or type(days) is not int or not 1 <= days <= 3660:
+        raise ValueError("invalid membership command")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        user = _change_entitlement(
+            conn,
+            user_id,
+            plan=plan,
+            days=days,
+            operation_id=operation_id,
+            actor=actor,
+            reason=reason,
+            now=now,
+        )
+        conn.commit()
+        return user
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def grant_paid_until(
-    conn: sqlite3.Connection, user_id: int, *, plan: UserPlan, paid_until: str, now: str
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    plan: UserPlan,
+    paid_until: str,
+    now: str,
+    expected_paid_until: str | None = None,
+    check_expected: bool = False,
 ) -> User:
     paid_until = _accounts_timestamp(paid_until)
     now = _accounts_timestamp(now)
-    with conn:
-        cursor = conn.execute(
-            "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-            (plan, paid_until, now, user_id),
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = user_by_id(conn, user_id)
+        if check_expected and (current is None or current.paid_until != expected_paid_until):
+            raise RuntimeError("membership changed; reload before setting expiry")
+        user = _change_entitlement(
+            conn,
+            user_id,
+            plan=plan,
+            days=None,
+            paid_until=paid_until,
+            operation_id=f"set-{uuid.uuid4().hex}",
+            actor="system",
+            reason="set_expiry",
+            now=now,
         )
-    if cursor.rowcount != 1:
-        raise RuntimeError("user does not exist")
-    user = user_by_id(conn, user_id)
-    if user is None:
-        raise RuntimeError("user does not exist")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return user
 
 
-def clear_user_subscription(conn: sqlite3.Connection, user_id: int, *, now: str) -> User:
+def clear_user_subscription(
+    conn: sqlite3.Connection,
+    user_id: int,
+    *,
+    now: str,
+    actor: str = "system",
+    expected_paid_until: str | None = None,
+    check_expected: bool = False,
+    operation_id: str | None = None,
+) -> User:
     now = _accounts_timestamp(now)
-    with conn:
-        cursor = conn.execute(
-            "UPDATE users SET plan = NULL, paid_until = NULL, updated_at = ? WHERE id = ?",
-            (now, user_id),
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = user_by_id(conn, user_id)
+        repeated = (
+            operation_id
+            and conn.execute(
+                "SELECT 1 FROM entitlement_changes WHERE operation_id=?", (operation_id,)
+            ).fetchone()
         )
-    if cursor.rowcount != 1:
-        raise RuntimeError("user does not exist")
-    user = user_by_id(conn, user_id)
-    if user is None:
-        raise RuntimeError("user does not exist")
+        if (
+            check_expected
+            and not repeated
+            and (existing is None or existing.paid_until != expected_paid_until)
+        ):
+            raise RuntimeError("membership changed; reload before clearing")
+        user = _change_entitlement(
+            conn,
+            user_id,
+            plan=None,
+            days=None,
+            operation_id=operation_id or f"clear-{uuid.uuid4().hex}",
+            actor=actor,
+            reason="clear_membership",
+            now=now,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return user
 
 
@@ -6031,6 +6406,8 @@ def consume_email_code(
     code_digest: str,
     max_attempts: int = 5,
     now: str = "",
+    complete_user: bool = False,
+    password_hash: str | None = None,
 ) -> bool:
     """校验并消费验证码;错误码累计尝试次数,超限或过期一律失败。"""
     now = _accounts_timestamp(now or dt.datetime.now(dt.UTC).isoformat())
@@ -6056,6 +6433,29 @@ def consume_email_code(
         import hmac as _hmac
 
         if _hmac.compare_digest(row["code_digest"], code_digest):
+            if complete_user:
+                if purpose == "register":
+                    changed = conn.execute(
+                        "UPDATE users SET status='active', activated_at=?, updated_at=?"
+                        " WHERE email_key=? AND status='pending'",
+                        (now, now, email_key),
+                    )
+                elif purpose == "reset" and password_hash:
+                    changed = conn.execute(
+                        "UPDATE users SET password_hash=?, updated_at=?"
+                        " WHERE email_key=? AND status='active'",
+                        (password_hash, now, email_key),
+                    )
+                    conn.execute(
+                        "UPDATE user_sessions SET revoked_at=? WHERE user_id="
+                        " (SELECT id FROM users WHERE email_key=?) AND revoked_at IS NULL",
+                        (now, email_key),
+                    )
+                else:
+                    raise ValueError("invalid email confirmation command")
+                if changed.rowcount != 1:
+                    conn.rollback()
+                    return False
             conn.execute(
                 "UPDATE email_codes SET consumed_at = ? WHERE id = ?",
                 (now, row["id"]),
@@ -6429,21 +6829,22 @@ def cancel_user_payment_order(
     with conn:
         cursor = conn.execute(
             "UPDATE orders SET status = 'expired', last_error_code = 'USER_CANCELLED', "
-            "settlement_expires_at = ?, updated_at = ? "
+            "updated_at = ? "
             "WHERE id = ? AND user_id = ? AND status = 'pending'",
-            (now, now, int(order_id), int(user_id)),
+            (now, int(order_id), int(user_id)),
         )
     return cursor.rowcount > 0
 
 
 
 def unsettled_payment_config_ids(conn: sqlite3.Connection, *, now: str) -> set[str]:
-    now = _accounts_timestamp(now)
+    _accounts_timestamp(now)
     rows = conn.execute(
         "SELECT DISTINCT payment_config_id FROM orders "
         "WHERE merchant_order_no IS NOT NULL AND status IN ('pending', 'expired', 'failed') "
-        "AND COALESCE(settlement_expires_at, expires_at) > ?",
-        (now,),
+        "AND COALESCE(last_error_code,'') <> 'PAYMENT_CLOSED' AND NOT EXISTS"
+        " (SELECT 1 FROM payment_cases c WHERE c.order_id=orders.id"
+        " AND c.state IN ('closed','refunded'))",
     ).fetchall()
     return {
         str(row["payment_config_id"])
@@ -6453,13 +6854,14 @@ def unsettled_payment_config_ids(conn: sqlite3.Connection, *, now: str) -> set[s
 
 
 def has_unsettled_payment_orders(conn: sqlite3.Connection, *, now: str) -> bool:
-    now = _accounts_timestamp(now)
+    _accounts_timestamp(now)
     return (
         conn.execute(
             "SELECT 1 FROM orders WHERE merchant_order_no IS NOT NULL "
             "AND status IN ('pending', 'expired', 'failed') "
-            "AND COALESCE(settlement_expires_at, expires_at) > ? LIMIT 1",
-            (now,),
+            "AND COALESCE(last_error_code,'') <> 'PAYMENT_CLOSED' AND NOT EXISTS"
+            " (SELECT 1 FROM payment_cases c WHERE c.order_id=orders.id"
+            " AND c.state IN ('closed','refunded')) LIMIT 1",
         ).fetchone()
         is not None
     )
@@ -6588,6 +6990,8 @@ def record_payment_query_status(
             if existing is not None and existing.payment_url is None
             else "PAYMENT_WAITING"
         )
+        if existing is not None and existing.last_error_code == "USER_CANCELLED":
+            status, error_code = "expired", "USER_CANCELLED"
     elif trade_status == "TRADE_CLOSED":
         status = "expired"
         error_code = "PAYMENT_CLOSED"
@@ -6599,15 +7003,22 @@ def record_payment_query_status(
                 "UPDATE orders SET status = ?, last_error_code = ?, "
                 "settlement_expires_at = ?, updated_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'expired', 'failed')"
-                " AND updated_at = ?",
+                " AND paid_at IS NULL AND updated_at = ?",
                 (status, error_code, now, now, order_id, expected_updated_at),
             )
         else:
             cursor = conn.execute(
                 "UPDATE orders SET status = ?, last_error_code = ?, updated_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'expired', 'failed')"
-                " AND updated_at = ?",
+                " AND paid_at IS NULL AND updated_at = ?",
                 (status, error_code, now, order_id, expected_updated_at),
+            )
+        if cursor.rowcount == 1 and trade_status == "TRADE_CLOSED":
+            conn.execute(
+                "UPDATE payment_cases SET state='closed',"
+                " reference='gateway_closed',actor='gateway',"
+                " updated_at=? WHERE order_id=? AND state='unconfirmed'",
+                (now, order_id),
             )
     if cursor.rowcount != 1:
         existing = order_by_id(conn, order_id)
@@ -6618,6 +7029,224 @@ def record_payment_query_status(
     if order is None:
         raise RuntimeError("payment order does not exist")
     return order
+
+
+def list_payment_cases(
+    conn: sqlite3.Connection, *, limit: int = 200, order_ids: list[int] | None = None
+) -> list[dict]:
+    if order_ids is not None:
+        if not order_ids:
+            return []
+        placeholders = ",".join("?" for _ in order_ids)
+        return [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT * FROM payment_cases WHERE order_id IN ({placeholders})", order_ids
+            )
+        ]
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM payment_cases ORDER BY updated_at DESC LIMIT ?", (min(limit, 500),)
+        )
+    ]
+
+
+def list_entitlement_changes(conn: sqlite3.Connection, *, user_id: int) -> list[dict]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            "SELECT operation_id,actor,reason,before_plan,before_until,"
+            " after_plan,after_until,created_at"
+            " FROM entitlement_changes WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+            (user_id,),
+        )
+    ]
+
+
+def resolve_payment_case(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    action: str,
+    reference: str,
+    days: int,
+    operation_id: str,
+    actor: str,
+    now: str,
+) -> None:
+    """Record external refund/dispute evidence, or grant verified received funds once."""
+    now = _accounts_timestamp(now)
+    reference = _non_empty(reference, "reference", maximum=200)
+    operation_id = _non_empty(operation_id, "operation_id", maximum=160)
+    actor = _non_empty(actor, "actor", maximum=128)
+    if action not in {"grant", "refunded", "disputed", "closed"}:
+        raise ValueError("invalid settlement action")
+    if type(days) is not int or not 0 <= days <= 3660 or (action != "refunded" and days):
+        raise ValueError("days is only an explicit refund deduction")
+    command = json.dumps([order_id, action, reference, days])
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        previous = conn.execute(
+            "SELECT command_json FROM payment_case_actions WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        if previous:
+            if previous[0] != command:
+                raise RuntimeError("operation_id already used")
+            conn.commit()
+            return
+        order = order_by_id(conn, order_id)
+        case = conn.execute("SELECT * FROM payment_cases WHERE order_id=?", (order_id,)).fetchone()
+        if order is None or not order.merchant_order_no:
+            raise RuntimeError("payment order does not exist")
+        if case and case["state"] in {"refunded", "closed"}:
+            raise RuntimeError("settlement case is already closed")
+        if action == "grant":
+            if not case or case["state"] not in {"received", "disputed"} or not order.paid_at:
+                raise RuntimeError("verified received funds are required")
+            if order.status == "paid":
+                raise RuntimeError("payment membership was already granted")
+            from news_digest.accounts import PLAN_DAYS
+
+            _change_entitlement(
+                conn,
+                order.user_id,
+                plan=order.plan,
+                days=PLAN_DAYS[order.plan],
+                operation_id=f"payment-{order.id}",
+                actor=actor,
+                reason="late_payment",
+                now=now,
+            )
+            conn.execute(
+                "UPDATE orders SET status='paid',last_error_code=NULL,updated_at=? WHERE id=?",
+                (now, order_id),
+            )
+        elif action == "refunded":
+            if not order.paid_at or not reference:
+                raise RuntimeError("received funds and external refund reference are required")
+            if days:
+                if order.status != "paid":
+                    raise RuntimeError("cannot deduct membership for an ungranted payment")
+                _change_entitlement(
+                    conn,
+                    order.user_id,
+                    plan=order.plan,
+                    days=-days,
+                    operation_id=f"refund-{order_id}",
+                    actor=actor,
+                    reason="refund",
+                    now=now,
+                )
+        elif action == "closed" and (order.paid_at or not case):
+            raise RuntimeError("only an unconfirmed case can be closed without funds")
+        conn.execute(
+            "INSERT INTO payment_cases"
+            " (order_id,provider_trade_no,amount_cents,state,reference,actor,"
+            " observed_at,updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET"
+            " state=excluded.state,reference=excluded.reference,actor=excluded.actor,"
+            " updated_at=excluded.updated_at",
+            (
+                order.id,
+                order.provider_trade_no,
+                order.amount_cents,
+                action,
+                reference,
+                actor,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO payment_case_actions VALUES (?,?,?,?,?)",
+            (operation_id, order_id, command, actor, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def claim_payment_check(conn: sqlite3.Connection, *, now: str, owner: str) -> Order | None:
+    now = _accounts_timestamp(now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO payment_cases(order_id,state,observed_at,updated_at)"
+            " SELECT o.id,'unconfirmed',?,? FROM orders o JOIN payment_checks c ON c.order_id=o.id"
+            " WHERE c.attempts >= 8 AND c.lease_expires_at <= ? AND o.paid_at IS NULL"
+            " AND o.status IN ('pending','expired','failed')"
+            " AND COALESCE(o.last_error_code,'') <> 'PAYMENT_CLOSED'",
+            (now, now, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO payment_checks(order_id,next_check_at,updated_at)"
+            " SELECT id,updated_at,? FROM orders WHERE merchant_order_no IS NOT NULL"
+            " AND status IN ('pending','expired','failed') AND paid_at IS NULL"
+            " AND COALESCE(last_error_code,'') <> 'PAYMENT_CLOSED'",
+            (now,),
+        )
+        row = conn.execute(
+            "SELECT o.id FROM orders o JOIN payment_checks c ON c.order_id=o.id"
+            " WHERE o.status IN ('pending','expired','failed') AND o.paid_at IS NULL"
+            " AND COALESCE(o.last_error_code,'') <> 'PAYMENT_CLOSED'"
+            " AND c.attempts < 8 AND c.next_check_at <= ?"
+            " AND (c.lease_expires_at IS NULL OR c.lease_expires_at <= ?)"
+            " AND o.updated_at <= ? AND NOT EXISTS"
+            " (SELECT 1 FROM payment_cases p WHERE p.order_id=o.id AND p.state <> 'unconfirmed')"
+            " ORDER BY c.next_check_at,o.id LIMIT 1",
+            (now, now, _future_timestamp(now, -PAYMENT_CREATION_LEASE_SECONDS)),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        conn.execute(
+            "UPDATE payment_checks SET owner=?,lease_expires_at=?,attempts=attempts+1,"
+            " updated_at=? WHERE order_id=?",
+            (owner, _future_timestamp(now, 120), now, row[0]),
+        )
+        conn.commit()
+        return order_by_id(conn, row[0])
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def finish_payment_check(
+    conn: sqlite3.Connection,
+    *,
+    order_id: int,
+    owner: str,
+    now: str,
+    error: str | None,
+) -> None:
+    now = _accounts_timestamp(now)
+    with conn:
+        row = conn.execute(
+            "SELECT attempts FROM payment_checks WHERE order_id=? AND owner=?"
+            " AND lease_expires_at > ?",
+            (order_id, owner, now),
+        ).fetchone()
+        if row is None:
+            return
+        order = order_by_id(conn, order_id)
+        done = order.status == "paid" or order.paid_at or order.last_error_code == "PAYMENT_CLOSED"
+        exhausted = row[0] >= 8
+        next_check = (
+            None if done or exhausted else _future_timestamp(now, min(3600, 30 * 2 ** row[0]))
+        )
+        conn.execute(
+            "UPDATE payment_checks SET owner=NULL,lease_expires_at=NULL,next_check_at=?,"
+            " last_error=?,updated_at=? WHERE order_id=? AND owner=?",
+            (next_check, error, now, order_id, owner),
+        )
+        if not done and (exhausted or (order.settlement_expires_at or now) <= now):
+            conn.execute(
+                "INSERT OR IGNORE INTO payment_cases(order_id,state,observed_at,updated_at)"
+                " VALUES (?,'unconfirmed',?,?)",
+                (order_id, now, now),
+            )
 
 
 def _order(row: sqlite3.Row) -> Order:
@@ -6656,24 +7285,37 @@ def _order_select() -> str:
 
 
 def list_orders(
-    conn: sqlite3.Connection, *, status: str | None = None, limit: int = 200
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    limit: int = 200,
+    query: str = "",
+    offset: int = 0,
 ) -> list[Order]:
     sql = _order_select()
     parameters: list[object] = []
     if status:
         sql += " WHERE status = ?"
         parameters.append(status)
-    sql += " ORDER BY created_at DESC LIMIT ?"
-    parameters.append(max(1, min(int(limit), 500)))
+    if query:
+        sql += " AND" if status else " WHERE"
+        sql += " (merchant_order_no LIKE ? OR provider_trade_no LIKE ? OR CAST(user_id AS TEXT)=?)"
+        parameters.extend([f"%{query}%", f"%{query}%", query])
+    sql += " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+    parameters.extend([max(1, min(int(limit), 500)), max(0, offset)])
     return [_order(row) for row in conn.execute(sql, parameters).fetchall()]
 
 
 def list_user_orders(
-    conn: sqlite3.Connection, *, user_id: int, limit: int = 20
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    limit: int = 20,
+    offset: int = 0,
 ) -> list[Order]:
     rows = conn.execute(
-        _order_select() + " WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-        (user_id, max(1, min(int(limit), 100))),
+        _order_select() + " WHERE user_id = ? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+        (user_id, max(1, min(int(limit), 100)), max(0, offset)),
     ).fetchall()
     return [_order(row) for row in rows]
 
@@ -6744,14 +7386,6 @@ def confirm_payment_order(
                 or row["expires_at"] <= _future_timestamp(now, -amount_hold_seconds)
             )
         )
-        if settlement_expired or legacy_hold_expired:
-            conn.execute(
-                "UPDATE orders SET status = 'expired', last_error_code = 'PAYMENT_EXPIRED', "
-                "updated_at = ? WHERE id = ?",
-                (now, row["id"]),
-            )
-            conn.commit()
-            raise RuntimeError("payment order settlement expired")
         if row["amount_cents"] != amount_cents:
             conn.execute(
                 "UPDATE orders SET last_error_code = 'AMOUNT_MISMATCH', updated_at = ? "
@@ -6760,31 +7394,49 @@ def confirm_payment_order(
             )
             conn.commit()
             raise RuntimeError("payment amount does not match")
+        case = conn.execute(
+            "SELECT state FROM payment_cases WHERE order_id=?", (row["id"],)
+        ).fetchone()
+        if (
+            settlement_expired
+            or legacy_hold_expired
+            or row["last_error_code"] == "USER_CANCELLED"
+            or case is not None
+        ):
+            conn.execute(
+                "UPDATE orders SET status='expired',provider_trade_no=?,"
+                " paid_at=COALESCE(paid_at,?),"
+                " last_error_code='PAYMENT_REVIEW', updated_at=? WHERE id=?",
+                (provider_trade_no, now, now, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO payment_cases"
+                " (order_id,provider_trade_no,amount_cents,state,observed_at,updated_at)"
+                " VALUES (?,?,?,'received',?,?) ON CONFLICT(order_id) DO UPDATE SET"
+                " provider_trade_no=excluded.provider_trade_no, amount_cents=excluded.amount_cents,"
+                " state=CASE WHEN payment_cases.state IN ('unconfirmed','closed') THEN 'received'"
+                " ELSE payment_cases.state END, updated_at=excluded.updated_at",
+                (row["id"], provider_trade_no, amount_cents, now, now),
+            )
+            conn.commit()
+            return order_by_id(conn, row["id"])
         conn.execute(
             "UPDATE orders SET status = 'paid', provider_trade_no = ?, paid_at = ?, "
             "last_error_code = NULL, updated_at = ? WHERE id = ?",
             (provider_trade_no, now, now, row["id"]),
         )
-        current = conn.execute(
-            "SELECT plan, paid_until FROM users WHERE id = ?", (row["user_id"],)
-        ).fetchone()
-        if current is None:
-            raise RuntimeError("payment user does not exist")
-        base = (
-            current["paid_until"]
-            if current["paid_until"] and current["paid_until"] > now
-            else now
-        )
         days = plan_days.get(row["plan"])
         if type(days) is not int or days <= 0:
             raise RuntimeError("payment plan duration is invalid")
-        paid_until = _future_timestamp(base, days * 86400)
-        target_plan = _merge_user_plan(
-            current["plan"], current["paid_until"], row["plan"], now
-        )
-        conn.execute(
-            "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-            (target_plan, paid_until, now, row["user_id"]),
+        _change_entitlement(
+            conn,
+            row["user_id"],
+            plan=row["plan"],
+            days=days,
+            operation_id=f"payment-{row['id']}",
+            actor="gateway",
+            reason="payment",
+            now=now,
         )
         conn.commit()
     except Exception:
@@ -6829,22 +7481,15 @@ def decide_order(
         )
         if approve:
             days = (plan_days or {}).get(row["plan"], 30)
-            current = conn.execute(
-                "SELECT plan, paid_until FROM users WHERE id = ?", (row["user_id"],)
-            ).fetchone()
-            base = now
-            if current is not None and current["paid_until"] and current["paid_until"] > now:
-                base = current["paid_until"]
-            until = _future_timestamp(base, days * 86400)
-            target_plan = _merge_user_plan(
-                current["plan"] if current else None,
-                current["paid_until"] if current else None,
-                row["plan"],
-                now,
-            )
-            conn.execute(
-                "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-                (target_plan, until, now, row["user_id"]),
+            _change_entitlement(
+                conn,
+                row["user_id"],
+                plan=row["plan"],
+                days=days,
+                operation_id=f"order-{order_id}",
+                actor=admin_actor,
+                reason="order_approval",
+                now=now,
             )
         conn.commit()
     except Exception:
@@ -6970,22 +7615,21 @@ def redeem_code(
             (user_id, now, row["id"]),
         )
         days = (plan_days or {}).get(row["plan"], 30)
-        base = now
-        if current["paid_until"] and current["paid_until"] > now:
-            base = current["paid_until"]
-        until = _future_timestamp(base, days * 86400)
-        target_plan = _merge_user_plan(
-            current["plan"], current["paid_until"], row["plan"], now
-        )
-        conn.execute(
-            "UPDATE users SET plan = ?, paid_until = ?, updated_at = ? WHERE id = ?",
-            (target_plan, until, now, user_id),
+        user = _change_entitlement(
+            conn,
+            user_id,
+            plan=row["plan"],
+            days=days,
+            operation_id=f"code-{row['id']}",
+            actor=f"user-{user_id}",
+            reason="redemption",
+            now=now,
         )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return target_plan
+    return user.plan
 
 
 def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
@@ -6993,6 +7637,15 @@ def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
         "SELECT value FROM site_settings WHERE key = ?", (key,)
     ).fetchone()
     return row["value"] if row else None
+
+
+def record_configuration_applied(conn: sqlite3.Connection, *, revision: str, now: str) -> None:
+    conn.execute(
+        "INSERT INTO site_settings(key,value,updated_at)"
+        " VALUES ('configuration_applied_revision',?,?)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (revision, now),
+    )
 
 
 def set_settings(conn: sqlite3.Connection, entries: dict[str, str], *, now: str) -> None:

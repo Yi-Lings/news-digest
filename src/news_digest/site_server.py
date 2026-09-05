@@ -16,6 +16,7 @@ import html
 import io
 import ipaddress
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -832,12 +833,18 @@ class SiteHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
-        if path != "/healthz" and not self._trusted_host():
+        if path not in {"/healthz", "/readyz"} and not self._trusted_host():
             self._html(403, _page("拒绝", "<p>来源校验失败。</p>"))
             return
         try:
             if path == "/healthz":
                 self._html(200, _page("OK", "<p>ok</p>"))
+                return
+            if path == "/readyz":
+                from news_digest.operations import readiness
+
+                ready = readiness(self.server.db_path, self.server.site_dir)
+                self._text(200 if ready else 503, "ready" if ready else "not ready")
                 return
             if path == "/login":
                 self._render_login()
@@ -875,8 +882,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 self._html(404, _page("404", "<p>未找到</p>"))
                 return
             self._serve_static(path)
-        except Exception:  # noqa: BLE001 - 顶层兜底,不让线程栈泄漏给访客
-            self._html(500, _page("服务错误", "<p>请稍后再试。</p>"))
+        except Exception as error:  # do not include query strings or exception messages
+            self._server_error(error, "GET")
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
@@ -912,8 +919,15 @@ class SiteHandler(BaseHTTPRequestHandler):
             return
         try:
             handler(form)
-        except Exception:  # noqa: BLE001
-            self._html(500, _page("服务错误", "<p>请稍后再试。</p>"))
+        except Exception as error:
+            self._server_error(error, "POST")
+
+    def _server_error(self, error: Exception, stage: str) -> None:
+        request_id = secrets.token_hex(8)
+        logging.getLogger(__name__).error(
+            "request_failed id=%s stage=%s error=%s", request_id, stage, type(error).__name__
+        )
+        self._html(500, _page("服务错误", f"<p>请稍后再试。错误编号：{request_id}</p>"))
 
     # -- 静态 + 门控 ----------------------------------------------------------
 
@@ -1303,44 +1317,26 @@ class SiteHandler(BaseHTTPRequestHandler):
         if session is None:
             self._redirect("/login")
             return
+        try:
+            page = max(
+                1, min(int(parse_qs(urlsplit(self.path).query).get("page", ["1"])[0]), 100000)
+            )
+        except ValueError:
+            page = 1
         conn = db.connect(self.server.db_path)
         try:
             now = dt.datetime.now(dt.UTC)
             db.expire_payment_orders(conn, now=now.isoformat())
             user = db.user_by_id(conn, session.user_id)
-            orders = db.list_user_orders(conn, user_id=session.user_id, limit=20)
+            orders = db.list_user_orders(
+                conn, user_id=session.user_id, limit=20, offset=(page - 1) * 20
+            )
+            cases = {
+                case["order_id"]: case
+                for case in db.list_payment_cases(conn, order_ids=[order.id for order in orders])
+            }
         finally:
             conn.close()
-        candidate = next(
-            (
-                order
-                for order in orders
-                if order.status in {"pending", "expired", "failed"}
-                and order.last_error_code != "PAYMENT_CLOSED"
-                and order.settlement_expires_at
-                and order.settlement_expires_at > now.isoformat()
-                and (now - dt.datetime.fromisoformat(order.updated_at)).total_seconds() >= 15
-                and (
-                    order.last_error_code != "GATEWAY_CREATE_RUNNING"
-                    or (
-                        now - dt.datetime.fromisoformat(order.updated_at)
-                    ).total_seconds()
-                    >= db.PAYMENT_CREATION_LEASE_SECONDS
-                )
-            ),
-            None,
-        )
-        if candidate is not None:
-            try:
-                self._reconcile_payment_order(candidate)
-            except (payments.PaymentError, RuntimeError, ValueError):
-                self.log_message("automatic payment reconciliation failed")
-            conn = db.connect(self.server.db_path)
-            try:
-                user = db.user_by_id(conn, session.user_id)
-                orders = db.list_user_orders(conn, user_id=session.user_id, limit=20)
-            finally:
-                conn.close()
         paid = accounts.is_paid(user.paid_until, dt.datetime.now(dt.UTC))
         plan_labels = {"monthly": "月刊会员", "yearly": "年刊会员"}
         token, _cookie = self._csrf_pair()
@@ -1384,7 +1380,16 @@ class SiteHandler(BaseHTTPRequestHandler):
                 f"<input type=\"hidden\" name=\"order_id\" value=\"{order.id}\">"
                 "<button type=\"submit\" class=\"order-cancel-btn\">取消订单</button></form>"
             )
-            if order.status == "pending" and order.payment_url:
+            case_state = cases.get(order.id, {}).get("state")
+            case_labels = {
+                "refunded": "已登记退款", "disputed": "争议处理中",
+                "unconfirmed": "待核对付款", "closed": "已核实关闭",
+            }
+            if case_state in case_labels:
+                action = f'<span class="order-state">{case_labels[case_state]}</span>'
+            elif order.paid_at and order.status != "paid":
+                action = '<span class="order-state">已到账，待管理员处理</span>'
+            elif order.status == "pending" and order.payment_url:
                 pay_link = (
                     f"<a class=\"order-pay-btn\" href=\""
                     f"{html.escape(order.payment_url, quote=True)}\">继续支付</a>"
@@ -1424,15 +1429,21 @@ class SiteHandler(BaseHTTPRequestHandler):
                 f"</span>{action}</li>"
             )
         order_rows = "".join(order_items) or "<li class=\"muted\">暂无订单</li>"
+        pagination = f"<span>第 {page} 页</span>"
+        if page > 1:
+            pagination = f'<a href="/account?page={page - 1}">上一页</a> ' + pagination
+        if len(orders) == 20:
+            pagination += f' <a href="/account?page={page + 1}">下一页</a>'
         body = (
             f"{redemption_html}<p>{status_line}</p>"
-            f"<p class=\"muted\">登录邮箱：{html.escape(session.email)}</p>"
-            f"<h2>我的订单</h2><div class=\"order-list-wrap\">"
-            f"<ul class=\"order-list\">{order_rows}</ul></div>"
-            "<p><a href=\"/forgot\">使用邮箱验证码修改密码</a></p>"
-            "<p><form method=\"post\" action=\"/logout\">"
-            f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
-            "<button type=\"submit\">退出登录</button></form></p>"
+            f'<p class="muted">登录邮箱：{html.escape(session.email)}</p>'
+            f'<h2>我的订单</h2><div class="order-list-wrap">'
+            f'<ul class="order-list">{order_rows}</ul></div>'
+            f"<p>{pagination}</p>"
+            '<p><a href="/forgot">使用邮箱验证码修改密码</a></p>'
+            '<p><form method="post" action="/logout">'
+            f'<input type="hidden" name="csrf" value="{token}">'
+            '<button type="submit">退出登录</button></form></p>'
         )
         payment_config = self.server.current_payment_config()
         self._html(
@@ -1538,7 +1549,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 "<button type=\"submit\">兑换卡密</button></form>"
                 "<p class=\"muted\">输入有效卡密并点击兑换，会员时长将实时充值到当前登录账号。</p>"
             )
-            if not paid:
+            if not paid and not (newsletter is not None and newsletter.status == "active"):
                 newsletter_html = (
                     "<p>当前账号尚无有效付费会员。在线支付成功或兑换卡密开通后，"
                     "即可在此开启每日邮件简报。</p>"
@@ -1550,6 +1561,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 action = "disable" if active else "enable"
                 label = "停止每日简报" if active else "订阅每日简报"
                 state = "已开启，期刊会发送到你的注册邮箱。" if active else "尚未开启。"
+                if active and not paid:
+                    state = "订阅偏好已开启，会员到期期间暂停发送。"
                 newsletter_html = (
                     f"<p>{state}</p><form method=\"post\" action=\"/newsletter\">"
                     f"<input type=\"hidden\" name=\"csrf\" value=\"{token}\">"
@@ -1656,7 +1669,7 @@ class SiteHandler(BaseHTTPRequestHandler):
             paid = user is not None and user.status == "active" and accounts.is_paid(
                 user.paid_until, dt.datetime.now(dt.UTC)
             )
-            if not paid:
+            if action == "enable" and not paid:
                 self._render_subscribe("只有有效付费会员可以订阅每日简报。")
                 return
             db.set_member_newsletter_subscription(
@@ -1771,6 +1784,7 @@ class SiteHandler(BaseHTTPRequestHandler):
                 conn,
                 email_key=key,
                 purpose="register",
+                complete_user=True,
                 code_digest=accounts.code_digest(code, key),
                 max_attempts=accounts.code_max_attempts(),
                 now=dt.datetime.now(dt.UTC).isoformat(),
@@ -1778,7 +1792,6 @@ class SiteHandler(BaseHTTPRequestHandler):
             if not ok:
                 self._render_register("验证码错误或已过期。", email, verify_step=True)
                 return
-            db.activate_user(conn, email_key=key, now=dt.datetime.now(dt.UTC).isoformat())
         finally:
             conn.close()
         user = None
@@ -1906,6 +1919,8 @@ class SiteHandler(BaseHTTPRequestHandler):
                 email_key=key,
                 purpose="reset",
                 code_digest=accounts.code_digest(form.get("code", "").strip(), key),
+                complete_user=True,
+                password_hash=password_hash,
                 max_attempts=accounts.code_max_attempts(),
                 now=dt.datetime.now(dt.UTC).isoformat(),
             )
@@ -1913,12 +1928,6 @@ class SiteHandler(BaseHTTPRequestHandler):
             if not valid or user is None or user.status != "active":
                 self._render_reset("验证码错误或已过期。", email)
                 return
-            db.set_user_password_and_revoke_sessions(
-                conn,
-                user.id,
-                password_hash=password_hash,
-                now=dt.datetime.now(dt.UTC).isoformat(),
-            )
         finally:
             conn.close()
         self._html(
@@ -2257,34 +2266,14 @@ class SiteHandler(BaseHTTPRequestHandler):
         return self._settle_payment(notification, config)
 
     def _reconcile_payment_order(self, order: db.Order) -> db.Order:
-        if not order.merchant_order_no:
-            raise payments.PaymentError("payment order is not reconcilable")
-        config = self._settlement_config_for_order(order)
-        result = self.server.payment_query_callback(
-            config,
-            merchant_order_no=order.merchant_order_no,
-            expected_amount_cents=order.amount_cents,
+        from news_digest.payment_worker import reconcile
+
+        return reconcile(
+            self.server.db_path,
+            order,
+            self.server.settlement_payment_config(),
+            self.server.payment_query_callback,
         )
-        if result.trade_status == "TRADE_SUCCESS":
-            return self._settle_payment(
-                payments.PaymentNotification(
-                    merchant_order_no=result.merchant_order_no,
-                    provider_trade_no=result.provider_trade_no,
-                    amount_cents=result.amount_cents,
-                ),
-                config,
-            )
-        conn = db.connect(self.server.db_path)
-        try:
-            return db.record_payment_query_status(
-                conn,
-                order_id=order.id,
-                trade_status=result.trade_status,
-                expected_updated_at=order.updated_at,
-                now=dt.datetime.now(dt.UTC).isoformat(),
-            )
-        finally:
-            conn.close()
 
     def _handle_payment_notify(self, fields: dict[str, str]) -> None:
         try:
@@ -2311,9 +2300,14 @@ class SiteHandler(BaseHTTPRequestHandler):
         self._html(
             200,
             _page(
-                "支付成功",
-                f"<div class=\"msg\">订单 {html.escape(order.merchant_order_no or '')} "
-                "已支付，会员已自动开通。</div><p><a href=\"/account\">返回我的账户</a></p>",
+                "支付成功" if order.status == "paid" else "到账待处理",
+                f'<div class="msg">订单 {html.escape(order.merchant_order_no or "")} '
+                + (
+                    "已支付，会员已自动开通。"
+                    if order.status == "paid"
+                    else "已收到到账确认，需管理员处理权益或退款。"
+                )
+                + '</div><p><a href="/account">返回我的账户</a></p>',
             ),
         )
 
@@ -2410,6 +2404,12 @@ class SiteServer(ThreadingHTTPServer):
         self.account_mail_wakeup = threading.Event()
         self.account_mail_condition = threading.Condition()
         self.account_mail_workers: list[threading.Thread] = []
+        self.payment_worker = threading.Thread(
+            target=self._payment_loop,
+            name="payment-reconcile",
+            daemon=True,
+        )
+        self.payment_worker.start()
         if self.code_sender is not None:
             conn = db.connect(self.db_path)
             conn.close()
@@ -2421,6 +2421,22 @@ class SiteServer(ThreadingHTTPServer):
                 )
                 worker.start()
                 self.account_mail_workers.append(worker)
+
+    def _payment_loop(self) -> None:
+        from news_digest.payment_worker import run_once
+
+        owner = secrets.token_hex(16)
+        while not self.account_mail_stop.wait(15):
+            try:
+                run_once(
+                    self.db_path,
+                    self.settlement_payment_config,
+                    self.payment_query_callback,
+                    owner=owner,
+                )
+            except Exception as error:
+                if self.log_callback:
+                    self.log_callback(f"payment_worker error={type(error).__name__}")
 
     def _account_mail_connection(self) -> sqlite3.Connection | None:
         while not self.account_mail_stop.is_set():
@@ -2510,6 +2526,7 @@ class SiteServer(ThreadingHTTPServer):
         self.account_mail_stop.set()
         self.account_mail_wakeup.set()
         super().server_close()
+        self.payment_worker.join(timeout=0.2)
         for worker in self.account_mail_workers:
             worker.join(timeout=0.2)
 

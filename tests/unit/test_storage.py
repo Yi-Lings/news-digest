@@ -1102,14 +1102,16 @@ def test_absolute_settlement_deadline_does_not_follow_runtime_hold_setting(tmp_p
         ttl_seconds=300,
         amount_hold_seconds=3600,
     )
-    with pytest.raises(RuntimeError, match="settlement expired"):
-        db.confirm_payment_order(
-            conn,
-            merchant_order_no=order.merchant_order_no,
-            provider_trade_no="TRADE-LATE",
-            amount_cents=order.amount_cents,
-            now="2026-08-30T13:00:01+00:00",
-            amount_hold_seconds=86400,
-            plan_days={"monthly": 31, "yearly": 366},
-        )
+    received = db.confirm_payment_order(
+        conn,
+        merchant_order_no=order.merchant_order_no,
+        provider_trade_no="TRADE-LATE",
+        amount_cents=order.amount_cents,
+        now="2026-08-30T13:00:01+00:00",
+        amount_hold_seconds=86400,
+        plan_days={"monthly": 31, "yearly": 366},
+    )
+    assert received.last_error_code == "PAYMENT_REVIEW"
+    assert db.user_by_id(conn, user.id).paid_until is None
+    assert db.list_payment_cases(conn)[0]["state"] == "received"
     conn.close()

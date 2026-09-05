@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily news-digest recovery point
+
+[Timer]
+OnCalendar=*-*-* 10:30:00 Asia/Shanghai
+Persistent=true
+
+[Install]
+WantedBy=timers.target

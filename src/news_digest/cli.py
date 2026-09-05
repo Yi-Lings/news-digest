@@ -70,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "migrate-content", help="从发布快照恢复当前刊期（不处理往期、不调用模型或邮件）",
     )
+    backup = subparsers.add_parser("backup", help="一致性备份并隔离验证恢复包")
+    backup.add_argument("--destination", type=Path, required=True)
+    backup.add_argument("--config-dir", type=Path, default=Path("/config"))
+    backup.add_argument("--site-config-dir", type=Path, default=Path("/site-config"))
+    backup.add_argument("--secret-dir", type=Path, default=Path("/site-secret"))
+    verify = subparsers.add_parser("verify-backup", help="隔离验证恢复包，不覆盖生产")
+    verify.add_argument("archive", type=Path)
+    subparsers.add_parser("business-status", help="输出业务状态，不触发翻译或邮件")
 
     import_edition = subparsers.add_parser(
         "import-edition", help="把一期版次 JSON 併入数据库（翻译成果原样保留，幂等）"
@@ -157,6 +165,41 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command in {"backup", "verify-backup", "business-status"}:
+        import datetime as dt
+        import json
+
+        from news_digest import operations
+        from news_digest.config import build_config_from_env
+
+        if args.command == "verify-backup":
+            print(json.dumps(operations.verify_backup(args.archive)))
+            return 0
+        fetch_config = _fetch_config(None)
+        site_root = build_config_from_env().output_root
+        if args.command == "backup":
+            archive = operations.create_backup(
+                fetch_config.database,
+                fetch_config.data_dir,
+                site_root,
+                args.config_dir,
+                args.site_config_dir,
+                args.secret_dir,
+                args.destination,
+            )
+            print(json.dumps({"archive": str(archive), "verified": True}))
+        else:
+            print(
+                json.dumps(
+                    operations.business_status(
+                        fetch_config.database,
+                        site_root / "current",
+                        timezone=fetch_config.timezone,
+                        now=dt.datetime.now(dt.UTC),
+                    )
+                )
+            )
+        return 0
     if args.command == "fetch":
         return _run_fetch(args.window_hours)
     if args.command == "build":
@@ -1167,7 +1210,7 @@ def _run_admin(
     from news_digest.delivery import subscriptions
     from news_digest.delivery.mailer import MailError, validate_smtp
     from news_digest.preview_server import create_server
-    from news_digest.site_config import sync_site_environment
+    from news_digest.site_config import recover_environment
 
     if not config_dir.is_dir():
         print(f"配置目录不存在：{config_dir}")
@@ -1175,11 +1218,6 @@ def _run_admin(
     site_env_path = None
     if site_config_dir is not None:
         site_env_path = site_config_dir / ".env"
-        try:
-            sync_site_environment(config_dir / ".env", site_env_path)
-        except (OSError, ValueError) as error:
-            print(f"Site 配置投影失败：{error}")
-            return 1
     load_env_file(config_dir / ".env")
     site_url = os.environ.get("NEWS_SITE_URL", "").rstrip("/")
     if not site_url:
@@ -1202,6 +1240,11 @@ def _run_admin(
     else:
         output_root = Path("var/site")
     timezone = os.environ.get("NEWS_TIMEZONE", "Asia/Shanghai")
+    if site_env_path is not None:
+        try:
+            recover_environment(config_dir / ".env", site_env_path, database, site_url=site_url)
+        except (OSError, ValueError, RuntimeError):
+            print("Site 配置尚未生效；保留源配置，启动后继续恢复。")
     public_subscription_enabled = False
     try:
         requested = public_subscription_enabled_from_env()

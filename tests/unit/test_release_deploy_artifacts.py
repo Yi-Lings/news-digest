@@ -270,9 +270,9 @@ def test_public_site_does_not_mount_provider_configuration():
 
 def test_bootstrap_site_projection_excludes_worker_and_recipient_configuration():
     bootstrap = _read("deploy/bootstrap.sh")
-    projection = bootstrap.split(
-        "# Site 不得读取 providers.json 或整份管理配置。", 1
-    )[1].split("if ! awk", 1)[0]
+    from news_digest.site_config import SITE_ENV_KEYS
+
+    projection = SITE_ENV_KEYS
 
     assert 'SITE_CONFIG_DIR="${APP_DIR}/site-config"' in bootstrap
     assert "NEWS_SITE_URL" in projection
@@ -281,6 +281,9 @@ def test_bootstrap_site_projection_excludes_worker_and_recipient_configuration()
     assert "TRANSLATION_API_KEY" not in projection
     assert "SMTP_RECIPIENTS" not in projection
     assert "EMAIL_DELIVERY_ENABLED" not in projection
+    assert "from news_digest.site_config import recover_environment" in bootstrap
+    assert bootstrap.index("stop site admin") < bootstrap.index("recover_environment(source,")
+    assert 'read_env(source).get("NEWS_TIMEZONE") == "Asia/Shanghai"' in bootstrap
 
 
 def test_reverse_proxy_timeout_exceeds_side_effect_deadlines():
@@ -527,7 +530,10 @@ def test_manual_deploy_docs_cover_permissions_digests_and_database_recovery():
     assert 'sudo docker compose stop admin' in digest_section
     assert 'sudo systemctl start news-digest.timer' in readme
     assert 'SQLite online backup' in readme
-    assert 'tar 仅适用于 Admin 与 worker 停止写入后的整卷归档' in readme
+    assert (
+        'tar 仅适用于 Site、Admin、daily/resume/backup worker 及人工 CLI 全部停止写入后的整卷归档'
+        in readme
+    )
     assert '镜像回滚不会自动恢复数据库' in readme
     assert '人工选择指定的迁移前备份' in readme
 

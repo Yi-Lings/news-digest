@@ -112,9 +112,13 @@ def _image_url(entry) -> str:
     return ""
 
 
-def parse_feed(data: bytes, source: SourceConfig) -> list[Candidate]:
+def parse_feed(
+    data: bytes, source: SourceConfig, *, diagnostics: dict | None = None
+) -> list[Candidate]:
     """Normalise feed entries; entries without title/link/date are dropped."""
     parsed = feedparser.parse(data)
+    if diagnostics is not None:
+        diagnostics.update(raw=len(parsed.entries), parse_warning=bool(parsed.bozo))
     candidates: list[Candidate] = []
     for entry in parsed.entries:
         title = collapse_ws(html_to_text(entry.get("title", "")))
@@ -137,6 +141,11 @@ def parse_feed(data: bytes, source: SourceConfig) -> list[Candidate]:
                 published_at_utc=published,
                 author=collapse_ws(html_to_text(entry.get("author", ""))),
                 image_url=_image_url(entry),
+                updated_at_utc=_published_utc({"updated_parsed": dict(entry).get("updated_parsed")})
+                or None,
+                date_basis="published" if entry.get("published_parsed") else "updated",
             )
         )
+    if diagnostics is not None:
+        diagnostics.update(parsed=len(candidates), rejected=len(parsed.entries) - len(candidates))
     return candidates

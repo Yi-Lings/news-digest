@@ -54,7 +54,9 @@ check_deployment_unit_quiescence() {
     news-digest.timer \
     news-digest.service \
     news-digest-resume.service \
-    news-digest-wakeup.path
+    news-digest-wakeup.path \
+    news-digest-backup.timer \
+    news-digest-backup.service
   do
     if ! load_state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)"; then
       fail "无法读取 ${unit} 的 LoadState——拒绝在运行状态未知时部署"

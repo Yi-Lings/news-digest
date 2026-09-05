@@ -1,0 +1,10 @@
+[Unit]
+Description=news-digest online backup and isolated restore verification
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/flock /run/news-digest-backup.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm --no-deps --user 0:10001 --entrypoint news-digest -v /srv/news-digest/backups/daily:/backups -v /srv/news-digest/site-config:/site-config:ro -v news-digest_news-site-secret:/site-secret:ro worker backup --destination /backups
+TimeoutStartSec=30min

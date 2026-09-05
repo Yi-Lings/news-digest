@@ -5,14 +5,14 @@ import hashlib
 import json
 import shutil
 import zoneinfo
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import httpx
 
 from news_digest.config import BuildConfig, FetchConfig
 from news_digest.delivery.publisher import publish, write_release_manifest
-from news_digest.extractors.body import extract_body, reading_minutes
+from news_digest.extractors.body import EXTRACTOR_VERSION, extract_body, reading_minutes
 from news_digest.models import (
     Article,
     ArticleImage,
@@ -50,6 +50,7 @@ class FetchReport:
     articles: int = 0
     briefs: int = 0
     degraded: int = 0
+    diagnostics: dict[str, dict] = field(default_factory=dict)
 
     @property
     def failed_sources(self) -> list[str]:
@@ -71,21 +72,43 @@ def _collect_candidates(
 ) -> list[Candidate]:
     collected: list[Candidate] = []
     for source in sources:
+        details = {
+            "raw": 0,
+            "parsed": 0,
+            "window": 0,
+            "future": 0,
+            "full": 0,
+            "summary": 0,
+            "selected": 0,
+            "failures": {},
+        }
+        report.diagnostics[source.key] = details
         try:
             raw = safe_get(
                 client, source.feed_url, source.allowed_domains, skip_ip_check=skip_ip_check
             )
+            parsed = parse_feed(raw, source, diagnostics=details)
+            details["future"] = sum(
+                datetime.datetime.fromisoformat(c.published_at_utc)
+                > now + datetime.timedelta(minutes=5)
+                for c in parsed
+            )
             candidates = [
-                candidate
-                for candidate in parse_feed(raw, source)
-                if _within_window(candidate, now, window_hours)
+                candidate for candidate in parsed if _within_window(candidate, now, window_hours)
             ]
+            details["window"] = len(candidates)
             candidates.sort(key=lambda c: c.published_at_utc, reverse=True)
             candidates = candidates[: source.max_articles]
             collected.extend(candidates)
-            report.per_source[source.name] = f"正常，窗口内 {len(candidates)} 条"
+            if details.get("parse_warning") and not parsed:
+                report.per_source[source.name] = "失败：FEED_PARSE_EMPTY"
+            elif details["raw"] and not parsed:
+                report.per_source[source.name] = "失败：FEED_ENTRIES_REJECTED"
+            else:
+                report.per_source[source.name] = f"正常，窗口内 {len(candidates)} 条"
         except FetchError as error:
             report.per_source[source.name] = f"失败：{error}"
+            details["failures"]["FEED_FETCH"] = 1
     return collected
 
 
@@ -99,12 +122,20 @@ def _candidate_to_article(
     paragraphs: list[str] = []
     author = candidate.author
     image_url = candidate.image_url
+    diagnostic = {
+        "version": EXTRACTOR_VERSION,
+        "completeness": "unverified",
+        "date_basis": candidate.date_basis,
+    }
     try:
         page = safe_get(
             client, candidate.url, source.allowed_domains, skip_ip_check=skip_ip_check
         )
-        extracted = extract_body(page.decode("utf-8", errors="replace"), candidate.url)
+        extracted = extract_body(
+            page.decode("utf-8", errors="replace"), candidate.url, diagnostics=diagnostic
+        )
     except FetchError:
+        diagnostic["fallback_reason"] = "BODY_FETCH_FAILED"
         extracted = None
     if extracted is not None:
         paragraphs = extracted.paragraphs
@@ -120,6 +151,11 @@ def _candidate_to_article(
         report.degraded += 1
         body = [Paragraph(en=candidate.summary or candidate.title)]
         minutes = 1
+    details = report.diagnostics.setdefault(source.key, {"full": 0, "summary": 0, "failures": {}})
+    details[content_status] += 1
+    if diagnostic.get("fallback_reason"):
+        reason = diagnostic["fallback_reason"]
+        details["failures"][reason] = details["failures"].get(reason, 0) + 1
 
     image = None
     if image_url:
@@ -140,6 +176,9 @@ def _candidate_to_article(
         paragraphs=body,
         image=image,
         content_status=content_status,
+        source_key=candidate.source_key,
+        updated_at=candidate.updated_at_utc,
+        extraction=diagnostic,
     )
 
 
@@ -173,7 +212,14 @@ def fetch_daily(
             _collect_candidates(client, brief, now, config.window_hours, report, skip_ip)
         )
         briefs = [
-            BriefItem(title_en=c.title, source=c.source_name, url=c.url)
+            BriefItem(
+                title_en=c.title,
+                source=c.source_name,
+                url=c.url,
+                published_at=c.published_at_utc,
+                source_key=c.source_key,
+                selection_reason="brief_source",
+            )
             for c in brief_candidates
         ]
     finally:
@@ -182,10 +228,16 @@ def fetch_daily(
 
     report.articles = len(articles)
     report.briefs = len(briefs)
+    local_date = now.astimezone(zoneinfo.ZoneInfo(config.timezone)).date().isoformat()
+    conn = db.connect(config.database)
+    try:
+        db.save_fetch_report(conn, local_date, asdict(report), now=now.isoformat())
+    finally:
+        conn.close()
     if not articles and not briefs:
         return None, report
 
-    local_date = now.astimezone(zoneinfo.ZoneInfo(config.timezone)).date().isoformat()
+    articles = [replace(article, fetched_at=now.isoformat()) for article in articles]
     edition = DailyEdition(date=local_date, articles=articles, briefs=briefs)
 
     fetched_dir = config.data_dir / "fetched"
@@ -193,6 +245,7 @@ def fetch_daily(
     payload = {
         "generated_at": now.isoformat(),
         "report": report.per_source,
+        "diagnostics": report.diagnostics,
         "edition": edition_to_dict(edition),
     }
     (fetched_dir / f"{local_date}.json").write_text(
@@ -235,6 +288,9 @@ def _article_to_brief(article: Article) -> BriefItem:
         title_zh=article.title_zh,
         source=article.source,
         url=article.url,
+        published_at=article.published_at,
+        source_key=article.source_key,
+        selection_reason="main_overflow",
     )
 
 
@@ -250,6 +306,15 @@ def selected_edition(
         return None
     selection = select_daily(pool.articles, reference_time=now, main_count=main_count)
     briefs = pool.briefs + [_article_to_brief(article) for article in selection.overflow]
+    briefs.sort(
+        key=lambda brief: (
+            -(datetime.datetime.fromisoformat(brief.published_at).timestamp())
+            if brief.published_at
+            else float("inf"),
+            brief.url,
+        )
+    )
+    db.record_selection_report(conn, date, selection.reasons, now=now.isoformat())
     return DailyEdition(date=date, articles=selection.mains, briefs=briefs)
 
 

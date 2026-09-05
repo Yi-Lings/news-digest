@@ -232,6 +232,8 @@ def settlement_config_from_mapping(env: Mapping[str, str]) -> EpayConfig | None:
     raw_key = env.get("EPAY_PKEY", env.get("EPAY_MERCHANT_KEY", ""))
     if not raw_base and not raw_pid and not raw_key:
         return None
+    if not raw_key and env.get("EPAY_ENABLED", "false").strip().lower() == "false":
+        return None
     try:
         ttl = int(env.get("EPAY_ORDER_TTL_SECONDS", "300"))
         hold = int(env.get("EPAY_AMOUNT_HOLD_SECONDS", "3600"))

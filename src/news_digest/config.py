@@ -88,6 +88,22 @@ def parse_dotenv_value(raw_value: str) -> str:
     return value
 
 
+def parse_env_text(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        if key in values:
+            raise ValueError(f"duplicate configuration key: {key}")
+        values[key] = parse_dotenv_value(value)
+    return values
+
+
 def load_env_file(path: Path | None = None) -> None:
     """Merge KEY=VALUE lines from .env.local into os.environ; existing vars win.
 
@@ -96,15 +112,8 @@ def load_env_file(path: Path | None = None) -> None:
     path = path or Path(".env.local")
     if not path.is_file():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = parse_dotenv_value(value)
-        if key and key not in os.environ:
-            os.environ[key] = value
+    for key, value in parse_env_text(path.read_text(encoding="utf-8")).items():
+        os.environ.setdefault(key, value)
 
 
 @dataclass(frozen=True)

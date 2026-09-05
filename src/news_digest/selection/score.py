@@ -1,7 +1,7 @@
 """每日选题：按时效、全文与篇幅评分，贪心挑选首页文章与备选池。"""
 
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from news_digest.models import Article
@@ -21,6 +21,7 @@ _MODERATE_MAX_MINUTES = 8
 class Selection:
     mains: list[Article]
     overflow: list[Article]
+    reasons: dict[str, dict] = field(default_factory=dict)
 
 
 def _score(article: Article, published: datetime.datetime, reference: datetime.datetime) -> float:
@@ -60,21 +61,26 @@ def select_daily(
     mains: list[Article] = []
     picked: set[int] = set()
     per_source: dict[str, int] = {}
+    reasons = {}
     for i in ranked:
-        if len(mains) >= main_count:
-            break
         article = articles[i]
+        reasons[article.url] = {"score": round(scores[i], 4), "reason": "capacity"}
+        if len(mains) >= main_count:
+            continue
         # 单一来源配额：避免首页被同一来源刷屏。
         if per_source.get(article.source, 0) >= per_source_cap:
+            reasons[article.url]["reason"] = "source_cap"
             continue
         # 标题近似互斥：同题材只留最先选中的一篇。
         if any(_similar(article.title_en, m.title_en, similarity_threshold) for m in mains):
+            reasons[article.url]["reason"] = "similar_title"
             continue
         mains.append(article)
+        reasons[article.url]["reason"] = "selected"
         picked.add(i)
         per_source[article.source] = per_source.get(article.source, 0) + 1
     leftovers = sorted(
         (i for i in range(len(articles)) if i not in picked),
         key=lambda i: (-published[i].timestamp(), articles[i].slug),
     )
-    return Selection(mains=mains, overflow=[articles[i] for i in leftovers])
+    return Selection(mains=mains, overflow=[articles[i] for i in leftovers], reasons=reasons)

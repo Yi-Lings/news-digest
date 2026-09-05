@@ -15,6 +15,7 @@ import pytest
 from news_digest import accounts
 from news_digest.accounts import generate_redemption_code, redemption_digest, redemption_prefix
 from news_digest.cli import _run_site_admin
+from news_digest.payment_worker import run_once as reconcile_once
 from news_digest.payments import (
     EpayConfig,
     PaymentCreation,
@@ -519,6 +520,32 @@ class TestStaticAndPaywall:
 
 
 class TestMembership:
+    def test_expired_member_can_disable_but_not_enable_newsletter(self, site):
+        user, cookies = site.member_session("expired@example.com")
+        conn = db.connect(site.db_path)
+        db.grant_paid_until(
+            conn, user.id, plan="monthly",
+            paid_until=(NOW - dt.timedelta(days=1)).isoformat(), now=NOW.isoformat(),
+        )
+        db.set_member_newsletter_subscription(
+            conn, user.email, enabled=True, now=NOW.isoformat(),
+        )
+        status, headers, page = site.get("/subscribe", cookies=cookies)
+        assert status == 200 and "会员到期期间暂停发送" in page
+        token, csrf_cookie = site.csrf_pair(page, headers)
+        status, _, page = site.post(
+            "/newsletter", {"csrf": token, "action": "disable"},
+            cookies={**cookies, **csrf_cookie},
+        )
+        assert status == 200 and "每日简报订阅已更新" in page
+        assert db.subscription_by_email(conn, user.email).status == "unsubscribed"
+        site.post(
+            "/newsletter", {"csrf": token, "action": "enable"},
+            cookies={**cookies, **csrf_cookie},
+        )
+        assert db.subscription_by_email(conn, user.email).status == "unsubscribed"
+        conn.close()
+
     def test_newsletter_requires_paid_member_and_can_be_toggled(self, site):
         user, cookies = site.member_session("member@example.com")
         status, headers, page = site.get("/subscribe", cookies=cookies)
@@ -1573,6 +1600,12 @@ class TestOrders:
             conn.close()
             status, _headers, _page = harness.get("/account", cookies=cookies)
             assert status == 200
+            assert reconcile_once(
+                harness.db_path,
+                harness.server.settlement_payment_config,
+                harness.server.payment_query_callback,
+                owner="test-worker",
+            )
             conn = db.connect(harness.db_path)
             waiting = db.order_by_id(conn, order.id)
             conn.close()
@@ -1749,7 +1782,7 @@ class TestOrders:
         finally:
             harness.stop()
 
-    def test_account_reconciles_lost_callback_with_signed_query_result(self, tmp_path):
+    def test_background_reconciles_lost_callback_without_account_network_io(self, tmp_path):
         queries = []
 
         def paid_query(_config, **kwargs):
@@ -1777,6 +1810,14 @@ class TestOrders:
             )
             conn.commit()
             conn.close()
+            status, _headers, page = harness.get("/account", cookies=cookies)
+            assert status == 200 and queries == []
+            assert reconcile_once(
+                harness.db_path,
+                harness.server.settlement_payment_config,
+                harness.server.payment_query_callback,
+                owner="test-worker",
+            )
             status, _headers, page = harness.get("/account", cookies=cookies)
             assert status == 200 and "已支付" in page
             assert len(queries) == 1

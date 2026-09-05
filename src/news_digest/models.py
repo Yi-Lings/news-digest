@@ -53,6 +53,8 @@ class Candidate:
     published_at_utc: str  # ISO 8601, e.g. "2026-07-26T09:18:33+00:00"
     author: str = ""
     image_url: str = ""
+    updated_at_utc: str | None = None
+    date_basis: str = "published"
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,10 @@ class Article:
     image: ArticleImage | None = None
     content_status: str = "full"  # "full" | "summary"
     translated_by: str = ""  # 例如 "gpt-4o-mini@p1"；空表示未翻译
+    source_key: str = ""
+    fetched_at: str | None = None
+    updated_at: str | None = None
+    extraction: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,9 @@ class BriefItem:
     source: str
     url: str
     title_zh: str = ""
+    published_at: str | None = None
+    source_key: str = ""
+    selection_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,10 @@ def article_from_dict(data: dict[str, Any]) -> Article:
         reading_minutes=int(data["reading_minutes"]),
         content_status=data.get("content_status", "full"),
         translated_by=data.get("translated_by", ""),
+        source_key=data.get("source_key", ""),
+        fetched_at=data.get("fetched_at"),
+        updated_at=data.get("updated_at"),
+        extraction=data.get("extraction", {}),
         paragraphs=[Paragraph(en=p["en"], zh=p.get("zh", "")) for p in data["paragraphs"]],
         vocabulary=[
             VocabularyItem(
@@ -182,6 +195,9 @@ def article_to_dict(article: Article) -> dict[str, Any]:
     }
     if article.image:
         data["image"] = vars(article.image)
+    for key in ("source_key", "fetched_at", "updated_at", "extraction"):
+        if value := getattr(article, key):
+            data[key] = value
     return data
 
 
@@ -197,6 +213,9 @@ def edition_from_dict(data: dict[str, Any]) -> DailyEdition:
                 title_zh=b.get("title_zh", ""),
                 source=b["source"],
                 url=b["url"],
+                published_at=b.get("published_at"),
+                source_key=b.get("source_key", ""),
+                selection_reason=b.get("selection_reason", ""),
             )
             for b in data.get("briefs", [])
         ],
@@ -207,7 +226,14 @@ def edition_to_dict(edition: DailyEdition) -> dict[str, Any]:
     data = {
         "date": edition.date,
         "articles": [article_to_dict(a) for a in edition.articles],
-        "briefs": [vars(b) for b in edition.briefs],
+        "briefs": [
+            {
+                key: value
+                for key, value in vars(b).items()
+                if key not in {"published_at", "source_key", "selection_reason"} or value
+            }
+            for b in edition.briefs
+        ],
     }
     if edition.generation or edition.result_revisions:
         data["generation"] = edition.generation

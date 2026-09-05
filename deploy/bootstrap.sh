@@ -101,7 +101,9 @@ require_deployment_units_quiescent() {
     news-digest.timer \
     news-digest.service \
     news-digest-resume.service \
-    news-digest-wakeup.path
+    news-digest-wakeup.path \
+    news-digest-backup.timer \
+    news-digest-backup.service
   do
     load_state="$(systemctl show "$unit" --property=LoadState --value 2>/dev/null)" ||
       die "无法读取 ${unit} 的 LoadState——拒绝在运行状态未知时部署"
@@ -141,7 +143,7 @@ section "1/10 前置校验（root、Docker、上传工件）"
 [ "$(id -u)" -eq 0 ] || die "必须以 root 执行（当前 uid=$(id -u)）"
 docker info >/dev/null 2>&1 || die "Docker 守护进程不可用——先安装/启动 Docker 再重跑"
 docker compose version >/dev/null 2>&1 || die "缺少 Compose v2（docker compose 子命令）"
-for f in compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news.conf; do
+for f in compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf; do
   [ -f "${SRC_DIR}/${f}" ] || die "缺少上传工件：${SRC_DIR}/${f}（应由 server-push.ps1 一并上传）"
 done
 command -v flock >/dev/null 2>&1 || die "缺少 flock（util-linux）；无法保证每日与恢复 worker 串行"
@@ -279,30 +281,10 @@ fi
 chown root:root "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-# Site 不得读取 providers.json 或整份管理配置。按原始 dotenv 行投影固定白名单，
-# 后续 Admin 保存 SMTP/EasyPay 时会用同一白名单原子刷新此文件。
+# Site 不得读取 providers.json 或整份管理配置。迁移后使用应用内的统一解析器投影。
 mkdir -p "$SITE_CONFIG_DIR"
 chown root:10001 "$SITE_CONFIG_DIR"
 chmod 750 "$SITE_CONFIG_DIR"
-SITE_ENV_FILE="${SITE_CONFIG_DIR}/.env"
-SITE_ENV_TMP="${SITE_CONFIG_DIR}/.env.tmp.$$"
-awk -F= '
-  $1 ~ /^(NEWS_SITE_URL|NEWS_TIMEZONE|SMTP_HOST|SMTP_PORT|SMTP_USERNAME|SMTP_PASSWORD|SMTP_SECURITY|SMTP_FROM|EPAY_ENABLED|EPAY_API_BASE|EPAY_PID|EPAY_PKEY|EPAY_PAYMENT_TYPE|EPAY_ORDER_TTL_SECONDS|EPAY_AMOUNT_HOLD_SECONDS)$/ { print }
-' "$ENV_FILE" > "$SITE_ENV_TMP"
-chown root:root "$SITE_ENV_TMP"
-chmod 600 "$SITE_ENV_TMP"
-mv -f "$SITE_ENV_TMP" "$SITE_ENV_FILE"
-if ! awk '
-  /^[[:space:]]*NEWS_TIMEZONE=/ {
-    value=$0
-    sub(/^[[:space:]]*NEWS_TIMEZONE=/, "", value)
-    sub(/[[:space:]]+$/, "", value)
-    count++
-  }
-  END { exit !(count == 1 && value == "Asia/Shanghai") }
-' "$ENV_FILE"; then
-  die "生产 NEWS_TIMEZONE 必须且只能设置一次 Asia/Shanghai，与每日 08:00 systemd timer 保持一致"
-fi
 install_file "${SRC_DIR}/news-digest.timer" /etc/systemd/system/news-digest.timer 644
 echo ".env 就绪（权限已确认 600）；API、SMTP 与自动投递由 Admin 后续配置"
 
@@ -548,6 +530,13 @@ docker run --rm --network none --read-only --user 10001:10001 \
   --mount type=volume,src=news-digest_news-data,dst=/data \
   --mount type=volume,src=news-digest_news-site,dst=/site,readonly \
   "$WORKER_IMAGE" migrate-content || die "Content migration failed; Site/Admin remain stopped"
+docker run --rm --network none --read-only --user 0:10001 \
+  --tmpfs /tmp:size=64m,mode=1777 --entrypoint python \
+  --mount "type=bind,src=${CONFIG_DIR},dst=/config,readonly" \
+  --mount "type=bind,src=${SITE_CONFIG_DIR},dst=/site-config" \
+  --mount type=volume,src=news-digest_news-data,dst=/data \
+  "$WORKER_IMAGE" -c 'from pathlib import Path; from news_digest.admin_email import read_env; from news_digest.site_config import recover_environment; source = Path("/config/.env"); assert read_env(source).get("NEWS_TIMEZONE") == "Asia/Shanghai", "NEWS_TIMEZONE must match the Asia/Shanghai timer"; recover_environment(source, Path("/site-config/.env"), Path("/data/news.db"), site_url="")' \
+  || die "Configuration activation failed; Site/Admin remain stopped"
 # 记录本次实际部署的镜像 digest，供回滚溯源（回滚指引见收尾段与 README §10）。pull 后本地
 # 镜像已按 Release digest 固定；同时把运行时解析结果落盘台账供回滚核对。
 record_deployed() {
@@ -762,6 +751,11 @@ fi
 
 # ---------------------------------------------------------------
 section "10/10 systemd 调度恢复与收尾自检"
+install -d -m 700 "${APP_DIR}/backups/daily"
+for unit in news-digest-backup.service news-digest-backup.timer; do
+  sed "s|/srv/news-digest|${APP_DIR}|g" "${SRC_DIR}/${unit}" > "${TMP_DIR}/${unit}"
+  install_file "${TMP_DIR}/${unit}" "/etc/systemd/system/${unit}" 644
+done
 systemctl daemon-reload
 # 旧版本可能因 resume worker 连续失败留下 start-limit-hit；新单元和新超时
 # 安装后先清除该历史失败标记，避免健康的 wakeup path 仍无法再次唤醒恢复 worker。
@@ -770,13 +764,14 @@ systemctl reset-failed news-digest-resume.service >/dev/null 2>&1 || true
 # 防止只恢复一半或让未通过完整门禁的 worker 随 timer 运行。
 install -d -m 755 /var/lib/systemd/timers
 touch /var/lib/systemd/timers/stamp-news-digest.timer
-if ! systemctl enable --now news-digest.timer news-digest-wakeup.path; then
-  systemctl stop news-digest.timer news-digest-wakeup.path >/dev/null 2>&1 || true
+if ! systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-backup.timer; then
+  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 恢复失败，已保持调度停止"
 fi
 if ! systemctl is-active --quiet news-digest.timer ||
-   ! systemctl is-active --quiet news-digest-wakeup.path; then
-  systemctl stop news-digest.timer news-digest-wakeup.path >/dev/null 2>&1 || true
+   ! systemctl is-active --quiet news-digest-wakeup.path ||
+   ! systemctl is-active --quiet news-digest-backup.timer; then
+  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 活动态核验失败，已重新停止调度"
 fi
 echo "下次触发（NEXT 列）："

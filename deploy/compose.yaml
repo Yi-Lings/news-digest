@@ -114,6 +114,12 @@ services:
       - ALL
     mem_limit: 64m
     pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8620/readyz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     logging:
       driver: json-file
       options:
@@ -159,6 +165,12 @@ services:
       - ALL
     mem_limit: 32m
     pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8619/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     logging:
       driver: json-file
       options:

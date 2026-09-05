@@ -111,24 +111,38 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 ## 5. 数据备份
 
-需要备份的只有三样：
+从 t28 起，生产 `news-digest-backup.timer` 每天 10:30 Asia/Shanghai 执行 SQLite
+online backup，并在独立目录解包验证。备份不需要停站，不调用模型、网关或 SMTP。
+保留最近 14 个成功恢复包，目录 `/srv/news-digest/backups/daily/` 为 0700，文件为 0600。
+校验未通过的包不会替换已有恢复点，也不会推进 `backup_verified_at`。
 
-| 路径 | 理由 |
-|---|---|
-| `var/data/news.db` | 文章池 + 翻译成果（翻译随文章入库），丢了等于重新付费翻译 |
-| `var/data/translations/` | 请求级翻译缓存（内容哈希 + 模型 + prompt 版本为键），中断续接与防重复计费靠它 |
-| `.env.local`、`.env.providers.local` | 密钥。只手工复制到本机安全位置，绝不进 Git、云盘或对外压缩包 |
+恢复包包含数据库全部业务表、请求缓存、邮件归档、当前页面、保留的 releases 和
+`.published` 发布证据，以及源配置、Site 投影和 Site session secret。旧刊物不能假定
+随时可以重建，因此必须保留发布工件。恢复包含密钥与账号数据，禁止提交 Git 或公开上传。
+当前交付为本机恢复点，不宣称已具备异地灾备；RPO 24h、RTO 4h 是观察目标，不是保证。
 
-`var/site` 不备份——任何时候 `build` 可重建；`var/mail` 是预览产物，同理。
-
-备份命令（项目根目录，确认没有 fetch / translate / send-email 正在写库）：
-
-```powershell
-Compress-Archive -Path var\data\news.db, var\data\translations `
-  -DestinationPath "news-backup-$(Get-Date -Format yyyy-MM-dd).zip"
+```bash
+sudo systemctl start news-digest-backup.service
+sudo journalctl -u news-digest-backup.service --since today
+sudo systemctl list-timers news-digest-backup.timer
 ```
 
-密钥文件另行手工复制，不放入上述 zip。
+在隔离目录复核指定包：使用同版本镜像挂载备份目录到 `/backups`，执行
+`news-digest verify-backup /backups/daily-指定时间.tar.gz`。命令仅解包、逐文件 SHA-256
+校验、SQLite integrity/foreign key 校验、逐表事实对比以及当前 manifest/保留 release/
+数据库结果身份核对，**绝不覆盖生产库**。
+验证目录创建在备份包旁边，不占用容器的小容量 `/tmp` tmpfs。
+
+覆盖恢复必须先停止 `news-digest.timer`、`news-digest-wakeup.path`、
+`news-digest-backup.timer`，确认 daily/resume/backup service 全部退出，再停止 Site/Admin。
+检查项目所有 worker 一次性容器与人工 CLI 均不存在。保留故障现场的数据库和发布工件，
+不得直接复制仍有 WAL 写入的 `news.db` 或只停止 Admin。
+
+恢复前逐笔核对备份之后的网关到账、退款、权益变更、正式邮件 `sent/unknown`。
+若存在新增外部事实，禁止全库回退后直接 resume；应先在隔离副本合并事实、验证幂等，
+或使用兼容当前库的修复镜像前滚。恢复包中的 `site/current` 是目录快照，生产切换时应
+指向包内对应的 `site/releases/<release_name>`，保留 `current` 原子链接约定。
+恢复完成后先启动 Site/Admin 验证 `/readyz`、订单与投递状态，最后才恢复 timer/path。
 
 ## 6. 从零重建
 
