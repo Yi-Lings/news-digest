@@ -1,6 +1,7 @@
 # Cheapcoding News Digest - 本地开发与服务器部署计划
 
 > 2026-09-05：t26 之后以 [新版架构与迭代计划](docs/plans/v1.4-next/PLAN.md) 为实施依据。
+> 当前实施项已完成并部署 `v1.4.0t28` 测试候选，见 [发布记录](docs/plans/v1.4-next/RELEASE-t28.md)；正式版等待用户观察后决定。
 > 已按小规模网站需求精简；[系统架构审查](docs/plans/v1.4-next/SYSTEM_REVIEW.md) 保留发现和取舍，取消项不作为后续必做任务。
 > 本文件保留历史决策和既有草稿；其中旧阶段门禁及 12A/12B/12D 不再作为并行执行清单。
 
