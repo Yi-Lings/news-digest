@@ -123,16 +123,24 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 2026-09-05 转存已完成，本地保留：
 - `history-20260905.tar.gz`：历史备份归档，2,218 项与源文件清单逐项一致；同目录保留 JSON 清单和校验记录。
-- `daily-20260905T122213Z-e0ef4cae.tar.gz`：最新完整恢复包，本地隔离验证通过（2,105 个文件、29 张表）。
+- `daily-20260905T122213Z-e0ef4cae.tar.gz`：转存时的完整恢复包，本地隔离验证通过（2,105 个文件、29 张表）；现作为历史副本保留。
 
 两个归档的 SHA-256 均与服务器一致后，已清理服务器历史副本及临时传输归档；
 `/srv/news-digest/backups` 从约 717 MiB 降至 21 MiB，保留最新完整包和 `DEPLOYED.log`。
 转存清单另占约 568 KiB；生产数据库、用户权益及服务镜像未改。
 
 同日 t29 升级前另生成 `daily-20260905T132111Z-67a1a11e.tar.gz`，已下载至上述本地目录，
-SHA-256 和隔离恢复校验通过（2,105 个文件、29 张表）。服务器现仅保留此最新包；
+SHA-256 和隔离恢复校验通过（2,105 个文件、29 张表）。该包现作为本地历史副本保留；
 `daily-20260905T122213Z-e0ef4cae.tar.gz` 仍保留在本地。升级前 Compose 和核对指纹另存本地
 `compose-before.yaml`、`upgrade.json`，详见 [t29 发布记录](plans/v1.4-next/RELEASE-t29.md)。
+
+**最新恢复点为 t30 升级前备份**：本地
+`E:\backups\news-digest\t30\daily-20260905T140919Z-b67ffbd9.tar.gz`，
+SHA-256 为 `71905d0028893194aa621936011ea128d51df16b0e4e409519d81892c2b253b2`。
+本地独立恢复验证通过（2,105 个文件、29 张表）；同一受限子目录另存本次
+`compose-before.yaml` 和 `upgrade.json`，不覆盖 t29 恢复资料。
+服务器 `/srv/news-digest/backups/daily/` 仅留此最新完整包，旧包与本地 SHA-256 一致后已清理，
+整个备份目录仍约 21 MiB。详见 [t30 发布记录](plans/v1.4-next/RELEASE-t30.md)。
 
 恢复包包含数据库全部业务表、请求缓存、邮件归档、当前页面、保留的 releases 和
 `.published` 发布证据，以及源配置、Site 投影和 Site session secret。旧刊物不能假定
