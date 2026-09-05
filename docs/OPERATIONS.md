@@ -111,20 +111,34 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 ## 5. 数据备份
 
-从 t28 起，生产 `news-digest-backup.timer` 每天 10:30 Asia/Shanghai 执行 SQLite
-online backup，并在独立目录解包验证。备份不需要停站，不调用模型、网关或 SMTP。
-保留最近 14 个成功恢复包，目录 `/srv/news-digest/backups/daily/` 为 0700，文件为 0600。
+2026-09-05 用户调整：**不需要每日备份，改为按需或升级前备份，优先保存在本地电脑。**
+生产 `news-digest-backup.timer` 已停用，后续 bootstrap 默认保持停用；日报与恢复任务不变。
+手动 backup service 执行 SQLite online backup 并在独立目录解包验证，不调用模型、网关或 SMTP。
+日常恢复包不需要停站；升级前备份仍遵循下文全体写入者冻结要求。
+
+本地目录为 `E:\backups\news-digest`，包含配置与密钥，只允许当前账号和系统管理员访问。
+服务器 `/srv/news-digest/backups/daily/` 仅保留最近一份完整恢复包，目录 0700、文件 0600；
+`daily` 是 t28 沿用的目录名，不表示仍有每日任务。其余历史备份下载且逐文件校验后再移出服务器。
 校验未通过的包不会替换已有恢复点，也不会推进 `backup_verified_at`。
+
+2026-09-05 转存已完成，本地保留：
+- `history-20260905.tar.gz`：历史备份归档，2,218 项与源文件清单逐项一致；同目录保留 JSON 清单和校验记录。
+- `daily-20260905T122213Z-e0ef4cae.tar.gz`：最新完整恢复包，本地隔离验证通过（2,105 个文件、29 张表）。
+
+两个归档的 SHA-256 均与服务器一致后，已清理服务器历史副本及临时传输归档；
+`/srv/news-digest/backups` 从约 717 MiB 降至 21 MiB，保留最新完整包和 `DEPLOYED.log`。
+转存清单另占约 568 KiB；生产数据库、用户权益及服务镜像未改。
 
 恢复包包含数据库全部业务表、请求缓存、邮件归档、当前页面、保留的 releases 和
 `.published` 发布证据，以及源配置、Site 投影和 Site session secret。旧刊物不能假定
 随时可以重建，因此必须保留发布工件。恢复包含密钥与账号数据，禁止提交 Git 或公开上传。
-当前交付为本机恢复点，不宣称已具备异地灾备；RPO 24h、RTO 4h 是观察目标，不是保证。
+当前为人工触发的服务器及本地副本，不承诺每日恢复点，也未配置任何电脑端每日自动任务。
+两次手动备份之间的新数据可能无法从备份恢复；重要升级仍必须先做新备份。
 
 ```bash
 sudo systemctl start news-digest-backup.service
 sudo journalctl -u news-digest-backup.service --since today
-sudo systemctl list-timers news-digest-backup.timer
+systemctl is-enabled news-digest-backup.timer  # expected: disabled
 ```
 
 在隔离目录复核指定包：使用同版本镜像挂载备份目录到 `/backups`，执行
@@ -132,6 +146,9 @@ sudo systemctl list-timers news-digest-backup.timer
 校验、SQLite integrity/foreign key 校验、逐表事实对比以及当前 manifest/保留 release/
 数据库结果身份核对，**绝不覆盖生产库**。
 验证目录创建在备份包旁边，不占用容器的小容量 `/tmp` tmpfs。
+
+t28 仍按原 26 小时阈值显示备份过旧提示；它不会触发备份。按需策略下这只是恢复点年龄信息，
+不应据此重新启用每日任务。应用镜像仍为 t28，本次没有为策略调整发布新版本。
 
 覆盖恢复必须先停止 `news-digest.timer`、`news-digest-wakeup.path`、
 `news-digest-backup.timer`，确认 daily/resume/backup service 全部退出，再停止 Site/Admin。

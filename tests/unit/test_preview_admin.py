@@ -3674,6 +3674,27 @@ def test_manual_preview_ignores_legacy_recipient_changes_after_import(mail_admin
     assert len(calls) == 1 and calls[0][0] == "manual"
 
 
+def test_payment_actions_are_state_specific_and_fields_have_visible_labels():
+    actions = ADMIN_HTML.split("function paymentCaseAction(", 1)[1].split(
+        'field("users-refresh").addEventListener', 1
+    )[0]
+    assert '"结算处理"' not in actions
+    assert '"补发权益"' not in actions
+    assert 'paid: "已支付 / 已开通"' in actions
+    assert 'item.paid_at && item.status !== "paid"' in actions
+    assert '["received", "disputed"].indexOf(caseState) !== -1' in actions
+    assert '["refunded", "closed"].indexOf(caseState) === -1' in actions
+    assert 'if (action === "refunded" && item.status === "paid")' in actions
+    assert 'deduction ? Number(deduction.value) : 0' in actions
+    assert 'deduction.reportValidity()' in actions
+    assert '"支付平台退款流水号"' in actions
+    assert '"扣减会员天数（0 表示不扣减）"' in actions
+    assert 'addText(details, "label", referenceLabel).appendChild(reference)' in actions
+    assert '"已登记退款"' in actions
+    assert "本操作不会发起退款" in actions
+    assert 'JSON.stringify([action, reference.value.trim(), days])' in actions
+
+
 def test_admin_dom_never_uses_innerhtml_for_user_values_and_has_no_message_input():
     lowered = ADMIN_HTML.lower()
     assert ADMIN_HTML.startswith("<!DOCTYPE html>")

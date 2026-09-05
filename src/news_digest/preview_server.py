@@ -3810,6 +3810,9 @@ textarea { min-height: 6rem; resize: vertical; }
 .checks label { display: inline-flex; align-items: center; gap: .35rem; margin: 0; color: var(--ink); }
 .checks input { width: 1rem; min-height: 1rem; }
 .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr)); gap: .5rem; margin-top: 1rem; }
+.payment-actions { grid-template-columns: minmax(0, 1fr); width: 14rem; max-width: 100%; margin: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.payment-action summary { cursor: pointer; }
+.payment-action button { width: 100%; margin-top: .65rem; }
 .grant-controls { display: grid; grid-template-columns: minmax(5.5rem, .8fr) minmax(5rem, .65fr) minmax(7rem, 1fr); gap: .35rem; }
 .grant-controls input, .grant-controls select, .grant-controls button { min-width: 0; }
 .user-list-tools {
@@ -4978,6 +4981,42 @@ var allOrders = [];
 var ordersPage = 1;
 var ordersSearchTimer;
 
+function paymentCaseAction(item, action, title, referenceLabel) {
+  var details = document.createElement("details"); details.className = "payment-action";
+  addText(details, "summary", title);
+  var reference = document.createElement("input"); reference.maxLength = 200; reference.required = true;
+  addText(details, "label", referenceLabel).appendChild(reference);
+  var deduction = null;
+  if (action === "refunded" && item.status === "paid") {
+    deduction = document.createElement("input"); deduction.type = "number";
+    deduction.min = "0"; deduction.max = "3660"; deduction.step = "1";
+    deduction.value = "0"; deduction.required = true;
+    addText(details, "label", "扣减会员天数（0 表示不扣减）").appendChild(deduction);
+  }
+  var submit = button("确认" + title, function () {
+    if (!reference.value.trim()) { say("请填写" + referenceLabel + "。", false); reference.focus(); return; }
+    if (!reference.reportValidity() || (deduction && !deduction.reportValidity())) { return; }
+    var days = deduction ? Number(deduction.value) : 0;
+    var message = action === "refunded"
+      ? "确认已在支付平台完成退款并登记？本操作不会发起退款，将扣减会员 " + days + " 天。"
+      : action === "grant" ? "确认按原订单套餐补开通会员？"
+      : action === "closed" ? "确认已核实未到账并关闭异常记录？" : "确认登记争议？会员权益保持不变。";
+    if (!confirm(message)) { return; }
+    var command = JSON.stringify([action, reference.value.trim(), days]);
+    if (submit.dataset.command !== command) {
+      submit.dataset.command = command; submit.dataset.operation = crypto.randomUUID();
+    }
+    setBusy(submit, true);
+    api("/admin/api/site/payment-case", {order_id: item.id, action: action,
+      reference: reference.value.trim(), days: days, operation_id: submit.dataset.operation})
+      .then(function () { say(action === "grant" ? "会员已按原订单套餐开通。" : "处理记录已保存。", true); return loadPayments(); })
+      .catch(function (error) { say(error.message, false); })
+      .finally(function () { setBusy(submit, false); });
+  });
+  details.appendChild(submit);
+  return details;
+}
+
 function renderOrders() {
   var search = (field("orders-search").value || "").trim().toLowerCase();
   var statusFilter = field("orders-status-filter").value || "";
@@ -4999,12 +5038,12 @@ function renderOrders() {
   field("orders-count").textContent = "共 " + allOrders.length + " 条订单" + (filtered.length !== allOrders.length ? "（显示 " + filtered.length + " 条）" : "");
   var orderRows = filtered.map(function (item) {
     var labels = {
-      pending: "等待支付", paid: "已支付", expired: "已过期 / 已取消", failed: "支付异常",
+      pending: "等待支付", paid: "已支付 / 已开通", expired: "已过期 / 已取消", failed: "支付异常",
       approved: "历史人工开通", rejected: "历史已拒绝"
     };
     var offset = Number(item.amount_offset_cents || 0);
     var offsetLabel = offset === 0 ? "¥0.00" : (offset > 0 ? "+" : "-") + "¥" + (Math.abs(offset) / 100).toFixed(2);
-    var actions = document.createElement("div"); actions.className = "actions";
+    var actions = document.createElement("div"); actions.className = "actions payment-actions";
     var reconcilable = ["pending", "expired", "failed"].indexOf(item.status) !== -1 &&
       item.merchant_order_no && !item.paid_at;
     if (reconcilable) {
@@ -5021,41 +5060,32 @@ function renderOrders() {
       actions.appendChild(reconcileAction);
     }
     var settlement = item.settlement_case;
-    if (item.paid_at || settlement) {
-      var caseDetails = document.createElement("details");
-      var caseTitle = document.createElement("summary");
-      caseTitle.textContent = settlement ? "结算: " + settlement.state : "结算处理";
-      caseDetails.appendChild(caseTitle);
-      if (settlement && settlement.reference) {
-        var caseRef = document.createElement("p"); caseRef.textContent = settlement.reference;
-        caseDetails.appendChild(caseRef);
+    var caseState = settlement ? settlement.state : "";
+    var statusLabel = labels[item.status] || "状态未知";
+    if (caseState === "refunded") { statusLabel = "已登记退款"; }
+    else if (caseState === "closed") { statusLabel = "已核实未到账"; }
+    else if (caseState === "disputed") { statusLabel += " / 存在争议"; }
+    else if (item.paid_at && item.status !== "paid") { statusLabel = "已到账 / 待开通"; }
+    else if (caseState === "unconfirmed") { statusLabel = "到账状态待核实"; }
+    if (settlement && settlement.reference) {
+      var record = document.createElement("details");
+      addText(record, "summary", "处理记录");
+      addText(record, "p", settlement.reference);
+      actions.appendChild(record);
+    }
+    if (item.merchant_order_no && ["refunded", "closed"].indexOf(caseState) === -1) {
+      if (item.paid_at && item.status !== "paid" && ["received", "disputed"].indexOf(caseState) !== -1) {
+        actions.appendChild(paymentCaseAction(item, "grant", "补开通会员", "到账凭证 / 核实依据"));
       }
-      if (!settlement || ["refunded", "closed"].indexOf(settlement.state) === -1) {
-        var caseAction = document.createElement("select"); caseAction.setAttribute("aria-label", "结算处理");
-        [["grant", "补发权益"], ["refunded", "登记外部退款"], ["disputed", "登记争议"], ["closed", "核实未到账关闭"]].forEach(function (entry) {
-          var option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1]; caseAction.appendChild(option);
-        });
-        var reference = document.createElement("input"); reference.placeholder = "凭证编号 / 处理依据";
-        reference.setAttribute("aria-label", "处理凭证"); reference.maxLength = 200;
-        var deduction = document.createElement("input"); deduction.type = "number";
-        deduction.min = "0"; deduction.max = "3660"; deduction.value = "0";
-        deduction.setAttribute("aria-label", "退款扣减天数");
-        var caseSubmit = button("确认处理", function () {
-          if (!reference.value.trim() || !confirm("确认登记结算处理？此操作不会调用网关退款。")) { return; }
-          var command = caseAction.value + ":" + reference.value + ":" + deduction.value;
-          if (caseSubmit.dataset.command !== command) {
-            caseSubmit.dataset.command = command; caseSubmit.dataset.operation = crypto.randomUUID();
-          }
-          setBusy(caseSubmit, true);
-          api("/admin/api/site/payment-case", {order_id: item.id, action: caseAction.value,
-            reference: reference.value, days: Number(deduction.value), operation_id: caseSubmit.dataset.operation})
-            .then(function () { say("结算记录已保存。", true); return loadPayments(); })
-            .catch(function (error) { say(error.message, false); })
-            .finally(function () { setBusy(caseSubmit, false); });
-        });
-        caseDetails.append(caseAction, reference, deduction, caseSubmit);
+      if (item.paid_at) {
+        actions.appendChild(paymentCaseAction(item, "refunded", "登记退款", "支付平台退款流水号"));
       }
-      actions.appendChild(caseDetails);
+      if ((item.paid_at || settlement) && caseState !== "disputed") {
+        actions.appendChild(paymentCaseAction(item, "disputed", "登记争议", "争议原因 / 凭证编号"));
+      }
+      if (settlement && !item.paid_at) {
+        actions.appendChild(paymentCaseAction(item, "closed", "关闭未到账记录", "未到账核实依据"));
+      }
     }
     return [
       item.merchant_order_no || "历史 #" + item.id,
@@ -5064,7 +5094,7 @@ function renderOrders() {
       "¥" + (item.base_amount_cents / 100).toFixed(2),
       "¥" + (item.amount_cents / 100).toFixed(2),
       offsetLabel,
-      labels[item.status] || "状态未知",
+      statusLabel,
       item.provider_trade_no || "-",
       item.expires_at || "-",
       item.last_error_code || "-",

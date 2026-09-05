@@ -512,6 +512,17 @@ def test_bootstrap_inline_python_creates_a_consistent_wal_snapshot(tmp_path):
         ]
 
 
+def test_backup_schedule_stays_disabled_by_default():
+    bootstrap = _read("deploy/bootstrap.sh")
+    assert "systemctl disable --now news-digest-backup.timer" in bootstrap
+    for line in bootstrap.splitlines():
+        if "systemctl enable --now" in line:
+            assert "news-digest-backup.timer" not in line
+    deploy_all = _read("deploy/deploy-all.ps1")
+    assert "systemctl is-enabled --quiet news-digest-backup.timer" not in deploy_all
+    assert "systemctl is-active --quiet news-digest-backup.timer" not in deploy_all
+
+
 def test_manual_deploy_docs_cover_permissions_digests_and_database_recovery():
     readme = _read('deploy/README.md')
     digest_section = readme.split('## 4. 固定镜像 digest', 1)[1].split(

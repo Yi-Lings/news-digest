@@ -757,6 +757,7 @@ for unit in news-digest-backup.service news-digest-backup.timer; do
   install_file "${TMP_DIR}/${unit}" "/etc/systemd/system/${unit}" 644
 done
 systemctl daemon-reload
+systemctl disable --now news-digest-backup.timer
 # 旧版本可能因 resume worker 连续失败留下 start-limit-hit；新单元和新超时
 # 安装后先清除该历史失败标记，避免健康的 wakeup path 仍无法再次唤醒恢复 worker。
 systemctl reset-failed news-digest-resume.service >/dev/null 2>&1 || true
@@ -764,13 +765,12 @@ systemctl reset-failed news-digest-resume.service >/dev/null 2>&1 || true
 # 防止只恢复一半或让未通过完整门禁的 worker 随 timer 运行。
 install -d -m 755 /var/lib/systemd/timers
 touch /var/lib/systemd/timers/stamp-news-digest.timer
-if ! systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-backup.timer; then
+if ! systemctl enable --now news-digest.timer news-digest-wakeup.path; then
   systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 恢复失败，已保持调度停止"
 fi
 if ! systemctl is-active --quiet news-digest.timer ||
-   ! systemctl is-active --quiet news-digest-wakeup.path ||
-   ! systemctl is-active --quiet news-digest-backup.timer; then
+   ! systemctl is-active --quiet news-digest-wakeup.path; then
   systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 活动态核验失败，已重新停止调度"
 fi

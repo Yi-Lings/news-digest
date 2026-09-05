@@ -298,7 +298,7 @@ curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8620/healthz        # 公开读者站点，期望输出 ok
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web healthy，site/admin running
-sudo systemctl start news-digest.timer news-digest-wakeup.path news-digest-backup.timer
+sudo systemctl start news-digest.timer news-digest-wakeup.path
 ```
 
 v1.4.0 首次启用账号与付费阅读时，先在服务器
@@ -361,7 +361,8 @@ sudo docker inspect --format '{{index .Config.Labels "org.opencontainers.image.r
 sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer /etc/systemd/system/
 command -v docker    # 若不是 /usr/bin/docker，同步修改 service 中 ExecStart 的绝对路径
 sudo systemctl daemon-reload
-sudo systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-backup.timer
+sudo systemctl disable --now news-digest-backup.timer
+sudo systemctl enable --now news-digest.timer news-digest-wakeup.path
 systemctl list-timers news-digest.timer        # 核对下次触发时间为 08:00（Asia/Shanghai）
 sudo systemctl start news-digest.service       # 手动触发一次，验证 timer→service→容器链路
 journalctl -u news-digest.service -n 50        # 查看运行日志
@@ -475,10 +476,10 @@ schema 11 的 t27 镜像不兼容 schema 12。恢复备份前必须保留升级�
 
 ## 11. 日常观察
 
-t28 新增 `news-digest-backup.timer`：每天 10:30 创建一致性恢复包并隔离解包核对，成功后
-有限清理 30 天前的验证码、过期 session 和已结束 account outbox，每表最多 500 条。
-订单、权益变更、正式邮件和 `unknown` 审计不清理。恢复包保留 14 份，包含有效配置与
-发布证据。完整范围及停写/外部事实核对要求见 [运维手册](../docs/OPERATIONS.md#5-数据备份)。
+备份按需执行，不启用每日任务；bootstrap 默认停用 `news-digest-backup.timer`，仅保留
+可手动启动的 backup service。恢复包优先转存本地，确认下载与 SHA-256 校验通过后，
+服务器只保留最近一个完整恢复包。完整范围及停写/外部事实核对要求见
+[运维手册](../docs/OPERATIONS.md#5-数据备份)。
 
 Site `/healthz` 表示存活，`/readyz` 核对 schema 和已发布首页；Compose 为 Site/Admin/Web
 分别执行健康检查。Admin 顶部“运行状态”显示刊期覆盖率、任务、投递、outbox、异常结算、
