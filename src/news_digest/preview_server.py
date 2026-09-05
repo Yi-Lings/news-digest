@@ -592,6 +592,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 parse_qs(urlsplit(self.path).query, keep_blank_values=True)
             )
             return
+        if path == "/admin/api/users/detail":
+            self._handle_user_detail(parse_qs(urlsplit(self.path).query, keep_blank_values=True))
+            return
         if path in {"/admin/api/payments/overview", "/admin/api/site/overview"}:
             self._handle_payments_overview()
             return
@@ -1462,6 +1465,46 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return None
         return db.connect(self.server.db_path)
 
+    def _user_payload(self, conn, user) -> dict[str, Any]:
+        newsletter = db.subscription_by_email(conn, user.email)
+        return {
+            "id": user.id,
+            "email": user.email,
+            "status": user.status,
+            "is_admin": user.is_admin,
+            "plan": user.plan,
+            "paid_until": user.paid_until,
+            "newsletter_subscription_id": newsletter.id if newsletter is not None else None,
+            "newsletter_status": newsletter.status if newsletter is not None else None,
+            "created_at": user.created_at,
+        }
+
+    def _handle_user_detail(self, parameters: dict[str, list[str]]) -> None:
+        if not self._authed():
+            self._json(401, {"error": "未登录"})
+            return
+        values = parameters.get("user_id", [])
+        try:
+            user_id = int(values[0]) if len(values) == 1 else 0
+            if not 0 < user_id <= 2**63 - 1:
+                raise ValueError
+        except ValueError:
+            self._json(400, {"error": "user_id 必须是单个有效账号 ID"})
+            return
+        conn = self._site_db()
+        if conn is None:
+            return
+        try:
+            user = db.user_by_id(conn, user_id)
+            if user is None:
+                self._json(404, {"error": "账号不存在"})
+                return
+            payload = self._user_payload(conn, user)
+            payload["entitlement_changes"] = db.list_entitlement_changes(conn, user_id=user_id)
+        finally:
+            conn.close()
+        self._json(200, {"user": payload, "csrf_token": self._csrf_for_response()})
+
     def _handle_users_overview(self, parameters: dict[str, list[str]]) -> None:
         if not self._authed():
             self._json(401, {"error": "未登录"})
@@ -1504,40 +1547,13 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 limit=page_size,
                 offset=(page - 1) * page_size,
             )
-            newsletter_states = {
-                user.id: db.subscription_by_email(conn, user.email) for user in users
-            }
-            changes = {
-                user.id: db.list_entitlement_changes(conn, user_id=user.id) for user in users
-            }
+            user_payloads = [self._user_payload(conn, user) for user in users]
         finally:
             conn.close()
         self._json(
             200,
             {
-                "users": [
-                    {
-                        "id": user.id,
-                        "email": user.email,
-                        "status": user.status,
-                        "is_admin": user.is_admin,
-                        "plan": user.plan,
-                        "paid_until": user.paid_until,
-                        "entitlement_changes": changes[user.id],
-                        "newsletter_subscription_id": (
-                            newsletter_states[user.id].id
-                            if newsletter_states[user.id] is not None
-                            else None
-                        ),
-                        "newsletter_status": (
-                            newsletter_states[user.id].status
-                            if newsletter_states[user.id] is not None
-                            else None
-                        ),
-                        "created_at": user.created_at,
-                    }
-                    for user in users
-                ],
+                "users": user_payloads,
                 "total": total,
                 "page": page,
                 "page_size": page_size,
@@ -3813,6 +3829,17 @@ textarea { min-height: 6rem; resize: vertical; }
 .payment-actions { grid-template-columns: minmax(0, 1fr); width: 14rem; max-width: 100%; margin: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .payment-action summary { cursor: pointer; }
 .payment-action button { width: 100%; margin-top: .65rem; }
+.user-actions { grid-template-columns: minmax(0, 1fr); width: 22rem; max-width: 100%; align-items: start; }
+.user-actions > * { min-width: 0; }
+.user-detail-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: 1rem; }
+.user-detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem 1.5rem; margin: 1rem 0 1.5rem; }
+.user-detail-facts dt { color: var(--muted); font-size: .78rem; }
+.user-detail-facts dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
+#user-detail-view { scroll-margin-top: 5rem; }
+#user-detail-email { overflow-wrap: anywhere; }
+#user-detail-status:empty { display: none; }
+#user-detail-history .data-table { table-layout: fixed; }
+#user-detail-history .data-table td { white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
 .grant-controls { display: grid; grid-template-columns: minmax(5.5rem, .8fr) minmax(5rem, .65fr) minmax(7rem, 1fr); gap: .35rem; }
 .grant-controls input, .grant-controls select, .grant-controls button { min-width: 0; }
 .user-list-tools {
@@ -3924,6 +3951,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .data-table td > button { justify-self: end; min-height: 2.2rem; }
 }
 @media (max-width: 640px) {
+  .user-detail-facts { grid-template-columns: minmax(0, 1fr); }
   .fields { grid-template-columns: 1fr; }
   .span2 { grid-column: auto; }
   .stats { grid-template-columns: repeat(2, 1fr); }
@@ -4111,7 +4139,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   <section class="workspace" id="users" role="tabpanel" aria-labelledby="tab-users" hidden>
     <h2 id="users-heading">用户管理</h2>
     <p class="note">统一管理账号状态、管理员权限、会员计划、有效期和每日简报。正式邮件仅投递已开启简报且会员有效的账号。</p>
-    <section class="panel">
+    <section class="panel" id="users-list-view">
       <h3>用户账号</h3>
       <div class="user-list-tools">
         <label for="users-search">搜索用户邮箱
@@ -4126,6 +4154,19 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       </div>
       <p id="users-summary" class="note" aria-live="polite">正在读取用户列表。</p>
       <div id="site-users" aria-live="polite"></div>
+    </section>
+    <section id="user-detail-view" aria-labelledby="user-detail-email" hidden>
+      <div class="user-detail-head">
+        <button id="user-detail-back" title="返回用户列表" aria-label="返回用户列表">&larr;</button>
+        <button id="user-detail-refresh">刷新详情</button>
+      </div>
+      <h3 id="user-detail-email" tabindex="-1">账户详情</h3>
+      <p id="user-detail-status" role="status"></p>
+      <div id="user-detail-content" hidden>
+        <dl id="user-detail-facts" class="user-detail-facts"></dl>
+        <h3>权益记录（最近 100 条）</h3>
+        <div id="user-detail-history"></div>
+      </div>
     </section>
   </section>
 
@@ -4264,6 +4305,10 @@ var usersPageSize = 20;
 var usersTotal = 0;
 var usersRequestSerial = 0;
 var usersSearchTimer = null;
+var selectedUserId = null;
+var userDetailSerial = 0;
+var userDetailReturnButton = null;
+var userListScrollY = 0;
 var statusEl = document.getElementById("status");
 var listEl = document.getElementById("providers");
 var resultEl = document.getElementById("test-result");
@@ -4724,11 +4769,85 @@ function remainingSubscriptionDays(paidUntil) {
   if (!Number.isFinite(expiresAt)) { return null; }
   return Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000));
 }
+function accountTime(value) {
+  if (!value) { return "-"; }
+  var date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", {hour12: false});
+}
+function accountPlan(value) {
+  return value === "monthly" ? "月刊会员" : value === "yearly" ? "年刊会员" : "无订阅";
+}
+function loadUserDetail() {
+  var serial = ++userDetailSerial;
+  field("user-detail-content").hidden = true;
+  field("user-detail-facts").replaceChildren();
+  field("user-detail-history").replaceChildren();
+  field("user-detail-status").textContent = "正在读取账户详情。";
+  field("user-detail-refresh").disabled = true;
+  api("/admin/api/users/detail?user_id=" + selectedUserId).then(function (data) {
+    if (serial !== userDetailSerial) { return; }
+    csrf = data.csrf_token || csrf;
+    var item = data.user;
+    field("user-detail-email").textContent = item.email;
+    var remaining = remainingSubscriptionDays(item.paid_until);
+    var statuses = {active: "正常", pending: "待激活", disabled: "已停用"};
+    var newsletters = {active: "已开启", pending: "待确认", disabled: "管理员停用", unsubscribed: "用户已退订"};
+    var newsletter = newsletters[item.newsletter_status] || "未开启";
+    if (item.newsletter_status === "active" && (item.status !== "active" || !remaining)) {
+      newsletter += "（会员失效暂停）";
+    }
+    [["账号 ID", item.id], ["账号状态", statuses[item.status] || item.status],
+      ["角色", item.is_admin ? "管理员" : "普通用户"], ["注册时间", accountTime(item.created_at)],
+      ["会员计划", accountPlan(item.plan)], ["剩余时长", remaining === null ? "无订阅" : "剩余 " + remaining + " 天"],
+      ["到期时间", accountTime(item.paid_until)], ["每日简报", newsletter]].forEach(function (entry) {
+        var group = document.createElement("div");
+        addText(group, "dt", entry[0]); addText(group, "dd", String(entry[1]));
+        field("user-detail-facts").appendChild(group);
+      });
+    var reasons = {payment: "在线支付", late_payment: "异常到账补开通", refund: "退款扣减",
+      redemption: "卡密兑换", order_approval: "历史订单开通", admin_grant: "管理员增加时长",
+      clear_membership: "清除订阅", set_expiry: "调整到期时间"};
+    var rows = (item.entitlement_changes || []).map(function (entry) {
+      return [accountTime(entry.created_at), entry.actor, reasons[entry.reason] || entry.reason,
+        accountPlan(entry.before_plan) + " / " + accountTime(entry.before_until),
+        accountPlan(entry.after_plan) + " / " + accountTime(entry.after_until)];
+    });
+    if (rows.length) {
+      field("user-detail-history").replaceChildren(table(["变更时间", "操作人", "变更原因", "变更前权益", "变更后权益"], rows));
+    } else { addText(field("user-detail-history"), "p", "暂无权益变更记录。", "note"); }
+    field("user-detail-status").textContent = "";
+    field("user-detail-content").hidden = false;
+  }).catch(function (error) {
+    if (serial === userDetailSerial) { field("user-detail-status").textContent = error.message; }
+  }).finally(function () {
+    if (serial === userDetailSerial) { field("user-detail-refresh").disabled = false; }
+  });
+}
+function openUserDetail(item, action) {
+  selectedUserId = item.id; userDetailReturnButton = action; userListScrollY = window.scrollY;
+  ++usersRequestSerial;
+  field("users-list-view").hidden = true;
+  field("user-detail-view").hidden = false;
+  field("user-detail-email").textContent = item.email;
+  field("user-detail-email").focus({preventScroll: true});
+  field("user-detail-view").scrollIntoView({block: "start"});
+  loadUserDetail();
+}
+field("user-detail-back").addEventListener("click", function () {
+  ++userDetailSerial; selectedUserId = null;
+  field("user-detail-view").hidden = true;
+  field("users-list-view").hidden = false;
+  if (userDetailReturnButton && userDetailReturnButton.isConnected) {
+    userDetailReturnButton.focus({preventScroll: true});
+  }
+  window.scrollTo(0, userListScrollY);
+});
+field("user-detail-refresh").addEventListener("click", loadUserDetail);
 function renderUsers() {
     var query = field("users-search").value.trim();
     var pageCount = Math.max(1, Math.ceil(usersTotal / usersPageSize));
     var userRows = loadedUsers.map(function (item) {
-      var actions = document.createElement("div"); actions.className = "actions";
+      var actions = document.createElement("div"); actions.className = "actions user-actions";
       var newsletterActions = document.createElement("div"); newsletterActions.className = "actions";
       var remainingDays = remainingSubscriptionDays(item.paid_until);
       var memberActive = item.status === "active" && remainingDays !== null && remainingDays > 0;
@@ -4802,16 +4921,7 @@ function renderUsers() {
       });
       grantControls.append(grantPlan, grantDays, grantAction);
       actions.appendChild(grantControls);
-      var history = document.createElement("details");
-      var historyTitle = document.createElement("summary"); historyTitle.textContent = "权益记录";
-      history.appendChild(historyTitle);
-      (item.entitlement_changes || []).forEach(function (entry) {
-        var line = document.createElement("p");
-        line.textContent = entry.created_at + " " + entry.actor + " " + entry.reason + " "
-          + (entry.before_until || "-") + " -> " + (entry.after_until || "-");
-        history.appendChild(line);
-      });
-      actions.appendChild(history);
+      actions.appendChild(button("账户详情", function (event) { openUserDetail(item, event.currentTarget); }));
       if (item.plan || item.paid_until) {
         var clearAction = button("清除订阅", function () {
           if (!confirm("确认清除该账号的订阅计划与剩余时长？账号状态和管理员权限不会改变。")) { return; }
@@ -4894,6 +5004,7 @@ field("operations-status").addEventListener("toggle", function () {
 });
 
 function loadUsers() {
+  if (selectedUserId !== null) { loadUserDetail(); return; }
   var requestSerial = ++usersRequestSerial;
   var query = encodeURIComponent(field("users-search").value.trim());
   var url = "/admin/api/users/overview?query=" + query

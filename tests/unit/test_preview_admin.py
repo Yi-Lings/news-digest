@@ -2374,6 +2374,82 @@ def test_users_overview_is_isolated_from_payment_failures(prod_server, monkeypat
     assert payment_calls == ["expire", "orders", "codes", "settings"]
 
 
+def test_user_detail_is_authenticated_scoped_and_read_only(prod_server, monkeypatch):
+    root, port, _, _ = prod_server
+    status, _, _ = _request(
+        port, "GET", "/admin/api/users/detail?user_id=1", content_type=None
+    )
+    assert status == 401
+    auth = _login(port)
+    conn = db.connect(root / "news.db")
+    try:
+        users = []
+        for index in range(2):
+            email = f"detail-{index}@example.com"
+            user = db.upsert_pending_user(
+                conn, email=email, email_key=db.delivery_recipient_key(email),
+                password_hash="private-hash", now="2026-09-05T00:00:00+00:00",
+            )
+            db.activate_user(conn, email_key=user.email_key, now="2026-09-05T00:00:00+00:00")
+            db.add_membership_days(
+                conn, user.id, plan="monthly", days=index + 1,
+                operation_id=f"detail-{index}", actor="admin", reason="admin_grant",
+                now="2026-09-05T00:00:00+00:00",
+            )
+            users.append(db.user_by_id(conn, user.id))
+        expected = db.list_entitlement_changes(conn, user_id=users[0].id)
+    finally:
+        conn.close()
+    for _ in range(2):
+        status, detail, _ = _request(
+            port, "GET", f"/admin/api/users/detail?user_id={users[0].id}",
+            cookie=auth[0], content_type=None,
+        )
+        assert status == 200
+        item = detail["user"]
+        assert item["id"] == users[0].id and item["email"] == users[0].email
+        assert item["paid_until"] == users[0].paid_until
+        assert item["entitlement_changes"] == expected
+        assert set(item) == {
+            "id", "email", "status", "is_admin", "plan", "paid_until", "created_at",
+            "newsletter_subscription_id", "newsletter_status", "entitlement_changes",
+        }
+        assert detail["csrf_token"] == auth[1]
+    status, _, _ = _request(
+        port, "GET", "/admin/api/users/detail?user_id=999999", cookie=auth[0], content_type=None
+    )
+    assert status == 404
+    conn = db.connect(root / "news.db")
+    try:
+        assert db.list_entitlement_changes(conn, user_id=users[0].id) == expected
+        assert db.user_by_id(conn, users[0].id) == users[0]
+    finally:
+        conn.close()
+
+    def unexpected_history_read(*args, **kwargs):
+        raise AssertionError("user list must not load entitlement history")
+
+    monkeypatch.setattr(db, "list_entitlement_changes", unexpected_history_read)
+    status, overview, _ = _request(
+        port, "GET", "/admin/api/users/overview", cookie=auth[0], content_type=None
+    )
+    assert status == 200
+    assert all("entitlement_changes" not in user for user in overview["users"])
+
+
+@pytest.mark.parametrize("query", (
+    "", "user_id=", "user_id=0", "user_id=-1", "user_id=abc", "user_id=1.5",
+    "user_id=1&user_id=2", "user_id=9223372036854775808",
+))
+def test_user_detail_rejects_invalid_account_ids(prod_server, query):
+    _, port, _, _ = prod_server
+    auth = _login(port)
+    status, _, _ = _request(
+        port, "GET", f"/admin/api/users/detail?{query}", cookie=auth[0], content_type=None
+    )
+    assert status == 400
+
+
 def test_users_overview_paginates_and_searches_all_users(prod_server):
     root, port, _, _ = prod_server
     auth = _login(port)
@@ -3672,6 +3748,35 @@ def test_manual_preview_ignores_legacy_recipient_changes_after_import(mail_admin
     )
     assert status == 200 and data["ok"] is True
     assert len(calls) == 1 and calls[0][0] == "manual"
+
+
+def test_user_history_is_only_rendered_in_a_separate_account_detail_view():
+    rendering = ADMIN_HTML.split("function renderUsers()", 1)[1].split(
+        'field("operations-status").addEventListener', 1
+    )[0]
+    assert 'actions.className = "actions user-actions"' in rendering
+    assert 'field("site-users").replaceChildren(' in rendering
+    assert 'button("账户详情"' in rendering
+    assert 'entitlement_changes' not in rendering
+    assert 'document.createElement("details")' not in rendering
+    actions_css = ADMIN_HTML.split('.user-actions {', 1)[1].split('}', 1)[0]
+    for rule in (
+        'grid-template-columns: minmax(0, 1fr)',
+        'width: 22rem',
+        'max-width: 100%',
+        'align-items: start',
+    ):
+        assert rule in actions_css
+    assert '.user-actions > * { min-width: 0; }' in ADMIN_HTML
+    history_css = ADMIN_HTML.split('#user-detail-history .data-table td {', 1)[1].split('}', 1)[0]
+    for rule in ('white-space: normal', 'overflow-wrap: anywhere', 'vertical-align: top'):
+        assert rule in history_css
+    assert 'api("/admin/api/users/detail?user_id=" + selectedUserId)' in ADMIN_HTML
+    assert 'if (serial !== userDetailSerial) { return; }' in ADMIN_HTML
+    assert 'field("user-detail-history").replaceChildren();' in ADMIN_HTML
+    assert 'field("users-list-view").hidden = true;' in ADMIN_HTML
+    assert 'field("users-list-view").hidden = false;' in ADMIN_HTML
+    assert 'window.scrollTo(0, userListScrollY)' in ADMIN_HTML
 
 
 def test_payment_actions_are_state_specific_and_fields_have_visible_labels():
