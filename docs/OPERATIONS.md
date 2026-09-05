@@ -129,6 +129,11 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 `/srv/news-digest/backups` 从约 717 MiB 降至 21 MiB，保留最新完整包和 `DEPLOYED.log`。
 转存清单另占约 568 KiB；生产数据库、用户权益及服务镜像未改。
 
+同日 t29 升级前另生成 `daily-20260905T132111Z-67a1a11e.tar.gz`，已下载至上述本地目录，
+SHA-256 和隔离恢复校验通过（2,105 个文件、29 张表）。服务器现仅保留此最新包；
+`daily-20260905T122213Z-e0ef4cae.tar.gz` 仍保留在本地。升级前 Compose 和核对指纹另存本地
+`compose-before.yaml`、`upgrade.json`，详见 [t29 发布记录](plans/v1.4-next/RELEASE-t29.md)。
+
 恢复包包含数据库全部业务表、请求缓存、邮件归档、当前页面、保留的 releases 和
 `.published` 发布证据，以及源配置、Site 投影和 Site session secret。旧刊物不能假定
 随时可以重建，因此必须保留发布工件。恢复包含密钥与账号数据，禁止提交 Git 或公开上传。
@@ -147,8 +152,8 @@ systemctl is-enabled news-digest-backup.timer  # expected: disabled
 数据库结果身份核对，**绝不覆盖生产库**。
 验证目录创建在备份包旁边，不占用容器的小容量 `/tmp` tmpfs。
 
-t28 仍按原 26 小时阈值显示备份过旧提示；它不会触发备份。按需策略下这只是恢复点年龄信息，
-不应据此重新启用每日任务。应用镜像仍为 t28，本次没有为策略调整发布新版本。
+t28 引入的备份过旧提示在 t29 仍采用 26 小时阈值；它不会触发备份。按需策略下这只是恢复点年龄信息，
+不应据此重新启用每日任务。停用每日备份的部署脚本修改已随 t29 支付界面修正发布，没有单独迭代镜像。
 
 覆盖恢复必须先停止 `news-digest.timer`、`news-digest-wakeup.path`、
 `news-digest-backup.timer`，确认 daily/resume/backup service 全部退出，再停止 Site/Admin。
