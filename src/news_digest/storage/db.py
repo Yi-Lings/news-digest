@@ -3074,6 +3074,73 @@ def unfinished_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
     return [row["edition_date"] for row in rows]
 
 
+def next_automation_wakeup_at(
+    conn: sqlite3.Connection,
+    edition_date: str,
+    *,
+    provider_id: str | None = None,
+    now: str,
+) -> str | None:
+    """Return the earliest persisted retry/probe deadline for an edition.
+
+    A worker must sleep until this deadline instead of exiting when all currently
+    runnable work is blocked by backoff or a provider circuit cooldown.  ``now``
+    is retained in the signature so callers can use the result directly for a
+    bounded sleep without duplicating timestamp normalization.
+    """
+    _validate_test_attempt_date(edition_date)
+    now = _automation_timestamp(now)
+    if provider_id is not None:
+        provider_id = _non_empty(provider_id, "provider_id", maximum=128)
+    deadlines: list[str] = []
+    provider_states = {
+        row["provider_id"]: row["state"]
+        for row in conn.execute("SELECT provider_id, state FROM provider_circuits")
+    }
+    task_parameters: list[object] = [edition_date]
+    task_where = (
+        "SELECT provider_id, status, auto_retry, next_retry_at,"
+        " manual_retry_requested_at, manual_probe_requested_at FROM translation_tasks"
+        " WHERE edition_date = ? AND " + _CURRENT_TRANSLATION_TASK_SQL
+    )
+    if provider_id is not None:
+        task_where += " AND provider_id = ?"
+        task_parameters.append(provider_id)
+    for row in conn.execute(task_where, task_parameters):
+        state = provider_states.get(row["provider_id"])
+        manual = (
+            row["manual_retry_requested_at"] is not None
+            or row["manual_probe_requested_at"] is not None
+        )
+        if manual or (row["status"] == "pending" and state in {None, "closed"}):
+            deadlines.append(now)
+        elif (
+            row["status"] in {"failed", "retry_wait"}
+            and row["auto_retry"]
+            and row["next_retry_at"] is not None
+            and state in {None, "closed"}
+        ):
+            deadlines.append(row["next_retry_at"])
+
+    circuit_parameters: list[object] = [edition_date]
+    circuit_where = (
+        "SELECT DISTINCT provider_circuits.next_probe_at FROM provider_circuits"
+        " JOIN translation_tasks ON translation_tasks.provider_id = provider_circuits.provider_id"
+        " WHERE translation_tasks.edition_date = ? AND " + _CURRENT_TRANSLATION_TASK_SQL
+        + " AND provider_circuits.state = 'open'"
+        " AND provider_circuits.next_probe_at IS NOT NULL"
+    )
+    if provider_id is not None:
+        circuit_where += " AND provider_circuits.provider_id = ?"
+        circuit_parameters.append(provider_id)
+    deadlines.extend(
+        row["next_probe_at"]
+        for row in conn.execute(circuit_where, circuit_parameters)
+        if row["next_probe_at"] is not None
+    )
+    return min(deadlines) if deadlines else None
+
+
 def pending_automation_build_dates(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         "SELECT edition_date FROM automation_editions"

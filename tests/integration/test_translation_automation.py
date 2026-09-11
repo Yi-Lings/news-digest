@@ -323,6 +323,60 @@ def test_provider_circuit_uses_one_real_task_for_automatic_half_open(tmp_path):
     assert recovered.recovery_mode
 
 
+def test_next_automation_wakeup_includes_retry_and_provider_probe_deadlines(tmp_path):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(
+        DailyEdition(date="2026-07-28", articles=[_article(1), _article(2)]), now=_at()
+    )
+    conn = db.connect(database)
+    try:
+        first = db.list_translation_tasks(conn, "2026-07-28")[0]
+        assert db.claim_translation_task(
+            conn,
+            first.task_id,
+            owner="worker-a",
+            now=_at(0).isoformat(),
+            lease_seconds=900,
+        )
+        db.finish_translation_task_failure(
+            conn,
+            first.task_id,
+            owner="worker-a",
+            now=_at(1).isoformat(),
+            error_code="PROVIDER_5XX",
+            error_category="provider_infrastructure",
+            failure_stage="waiting_model",
+            diagnostic_id="failure",
+            auto_retry=True,
+        )
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="provider_failure", now=_at(1).isoformat()
+        )
+        second = db.list_translation_tasks(conn, "2026-07-28")[1]
+        conn.execute(
+            "UPDATE translation_tasks SET status = 'failed', auto_retry = 0 WHERE task_id = ?",
+            (second.task_id,),
+        )
+        conn.commit()
+        wake_at = db.next_automation_wakeup_at(
+            conn,
+            "2026-07-28",
+            provider_id="provider-default",
+            now=_at(2).isoformat(),
+        )
+    finally:
+        conn.close()
+    assert wake_at == _at(16).isoformat()
+
+
 def test_retry_delay_uses_request_completion_time(tmp_path):
     database = tmp_path / "data" / "news.db"
     current = [_at(1)]

@@ -1000,7 +1000,28 @@ def _run_automation_daily(
                         print("当前接口无可执行待办；请在 Admin 检查或重绑定剩余任务。")
                         return _AUTOMATION_ACTION_REQUIRED
                     return 0
-                sleep(1.0)
+                wake_conn = db.connect(fetch_config.database)
+                try:
+                    wake_at = db.next_automation_wakeup_at(
+                        wake_conn,
+                        date,
+                        provider_id=runner.provider_id,
+                        now=clock().astimezone(dt.UTC).isoformat(),
+                    )
+                finally:
+                    wake_conn.close()
+                if wake_at is None:
+                    sleep(1.0)
+                    continue
+                wake_now = clock().astimezone(dt.UTC)
+                delay = max(
+                    0.1,
+                    (dt.datetime.fromisoformat(wake_at) - wake_now).total_seconds(),
+                )
+                # Do not hold the worker in a long uninterruptible sleep; this
+                # keeps manual Admin wakeups responsive while preserving the
+                # persisted deadline as the source of truth.
+                sleep(min(delay, 60.0))
     except (DeliveryServiceError, KeyboardInterrupt, ValueError) as error:
         print(f"自动化已停止：{error}")
         return 130 if isinstance(error, KeyboardInterrupt) else _AUTOMATION_ACTION_REQUIRED
@@ -1033,10 +1054,15 @@ def _run_automation_resume(yes: bool) -> int:
     if not unfinished:
         print("没有未完成的自动化刊期；无需恢复。")
         return 0
-    return _run_automation_daily(
-        fetch_config,
-        types.SimpleNamespace(date=unfinished[0], resume=True),
-    )
+    result = 0
+    for date in unfinished:
+        code = _run_automation_daily(
+            fetch_config,
+            types.SimpleNamespace(date=date, resume=True),
+        )
+        if code != 0:
+            result = code
+    return result
 
 
 def _signal_translation_worker(path: Path) -> None:
