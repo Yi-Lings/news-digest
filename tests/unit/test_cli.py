@@ -854,6 +854,28 @@ def test_resume_automation_selects_latest_unfinished_edition(tmp_path, monkeypat
     assert captured == {"config": fetch_config, "date": "2026-08-01"}
 
 
+def test_resume_automation_drains_all_unfinished_editions(tmp_path, monkeypatch):
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        for date in ("2026-08-01", "2026-08-02"):
+            db.ensure_automation_edition(conn, date, target_count=1, now=f"{date}T00:00:00+00:00")
+    finally:
+        conn.close()
+    fetch_config = types.SimpleNamespace(database=database)
+    monkeypatch.setattr("news_digest.cli._fetch_config", lambda _window: fetch_config)
+    processed = []
+
+    def run_daily(_config, edition):
+        processed.append(edition.date)
+        return 10 if edition.date == "2026-08-02" else 0
+
+    monkeypatch.setattr("news_digest.cli._run_automation_daily", run_daily)
+
+    assert _run_automation_resume(True) == 10
+    assert processed == ["2026-08-02", "2026-08-01"]
+
+
 def test_preview_automation_demo_uses_isolated_database_and_fake_wakeup(
     tmp_path, monkeypatch
 ):
