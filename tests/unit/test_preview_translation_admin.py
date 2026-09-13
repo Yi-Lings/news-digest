@@ -4,9 +4,10 @@ import json
 import threading
 import time
 
-from news_digest.admin_providers import provider_fingerprint, save_test_state
+from news_digest.admin_providers import provider_fingerprint, save_profiles, save_test_state
 from news_digest.preview_server import ADMIN_HTML, create_server
 from news_digest.storage import db
+from news_digest.translation.client import translation_cache_identity
 
 
 def _at(seconds: int = 0) -> str:
@@ -30,6 +31,44 @@ def _request(port: int, method: str, path: str, body=None):
     if "application/json" in content_type:
         return response.status, json.loads(raw.decode())
     return response.status, raw.decode()
+
+
+
+
+def _validated_default_provider(root):
+    provider = {
+        "name": "manual-default",
+        "base_url": "https://api.example.test/v1",
+        "api_key": "sk-test-provider",
+        "model": "test-model",
+        "api_type": "openai_chat",
+        "stream": True,
+        "reasoning_effort": "",
+        "enabled": True,
+        "is_default": True,
+    }
+    save_profiles(root, {"providers": {provider["name"]: provider}})
+    save_test_state(
+        root,
+        provider["name"],
+        {
+            "status": "success",
+            "category": "success",
+            "protocol": provider["api_type"],
+            "model": provider["model"],
+            "tested_at_epoch": time.time(),
+            "elapsed_ms": 1,
+            "fingerprint": provider_fingerprint(root, provider),
+            "connection_auth": {"status": "success", "message": "ok"},
+            "model_return": {"status": "success", "message": "ok"},
+            "upstream_status": 200,
+            "output": "ok",
+        },
+    )
+    identity = translation_cache_identity(
+        provider["api_type"], provider["base_url"], provider["model"], provider["reasoning_effort"]
+    )
+    return "default-" + identity[:64]
 
 
 def _seed(database):
@@ -82,7 +121,16 @@ def _seed(database):
 
 def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
     database = tmp_path / "news.db"
+    provider_id = _validated_default_provider(tmp_path)
     failed, running = _seed(database)
+    conn = db.connect(database)
+    try:
+        with conn:
+            conn.execute("UPDATE translation_tasks SET provider_id = ?", (provider_id,))
+    finally:
+        conn.close()
+    failed = db.TranslationTask(**{**failed.__dict__, "provider_id": provider_id})
+    running = db.TranslationTask(**{**running.__dict__, "provider_id": provider_id})
     wakeups = []
     server = create_server(
         tmp_path,
@@ -117,7 +165,7 @@ def test_translation_admin_http_queues_actions_without_provider_calls(tmp_path):
         states = {item["task_id"]: item for item in payload["items"]}
         assert states[failed.task_id]["queue_state"] == "waiting_backoff"
         assert states[failed.task_id]["next_executable_at"] == _at(16)
-        assert states[failed.task_id]["available_actions"] == ["retry"]
+        assert states[failed.task_id]["available_actions"] == ["retry", "probe"]
         assert states[running.task_id]["queue_state"] == "executing"
         assert states[running.task_id]["available_actions"] == ["cancel"]
         encoded = json.dumps(payload, ensure_ascii=False)
@@ -375,13 +423,17 @@ def test_translation_admin_shows_latest_completed_edition_when_no_problems(tmp_p
 
 def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
     database = tmp_path / "news.db"
+    provider_id = _validated_default_provider(tmp_path)
     failed, _ = _seed(database)
     conn = db.connect(database)
     try:
+        with conn:
+            conn.execute("UPDATE translation_tasks SET provider_id = ?", (provider_id,))
+        failed = db.translation_task(conn, failed.task_id)
         for second in range(2, 7):
             db.record_provider_outcome(
                 conn,
-                "provider-default",
+                provider_id,
                 outcome="provider_failure",
                 now=_at(second),
             )
@@ -414,9 +466,9 @@ def test_translation_admin_manual_probe_is_single_and_sse_is_redacted(tmp_path):
             port, "POST", "/admin/api/translations/probe", body
         )
         assert first_status == second_status == 202
-        assert first["already_queued"] is False
-        assert second["already_queued"] is True
         assert first["action_id"] == second["action_id"]
+        assert first["target_provider_id"] == provider_id
+        assert second["target_provider_id"] == provider_id
         assert wakeups == ["wake", "wake"]
         conn = db.connect(database)
         try:
@@ -599,9 +651,9 @@ def test_translation_admin_dom_contract_and_reduced_motion():
         'item.available_actions || []',
         "queueTranslationProbe(item, event.currentTarget)",
         "立即调度",
-        "解除阻断并重试",
+        "使用当前默认接口恢复",
         'item.action.status',
-        "探测已在队列，已重新唤醒 worker。",
+        "已使用当前默认 Provider 提交受控探测。",
         'new EventSource("/admin/api/translations/events")',
         "translationPoll = setInterval(loadTranslations, 3000)",
         "prefers-reduced-motion: reduce",

@@ -17,6 +17,7 @@ import io
 import ipaddress
 import json
 import logging
+import os
 import secrets
 import sqlite3
 import threading
@@ -2403,7 +2404,16 @@ class SiteServer(ThreadingHTTPServer):
         self.account_mail_stop = threading.Event()
         self.account_mail_wakeup = threading.Event()
         self.account_mail_condition = threading.Condition()
-        self.account_mail_workers: list[threading.Thread] = []
+        self.runtime_instance_id = secrets.token_hex(8)
+        self.account_mail_workers: list[threading.Thread | None] = [
+            None for _ in range(_ACCOUNT_MAIL_WORKER_COUNT)
+        ]
+        self.account_mail_supervisor: threading.Thread | None = None
+        # Initialize/migrate SQLite before any background thread can open a second
+        # connection.  Starting payment/mail workers first creates a schema-migration
+        # race on a fresh database (two connections both trying the same ALTER/INSERT).
+        conn = db.connect(self.db_path)
+        conn.close()
         self.payment_worker = threading.Thread(
             target=self._payment_loop,
             name="payment-reconcile",
@@ -2411,23 +2421,64 @@ class SiteServer(ThreadingHTTPServer):
         )
         self.payment_worker.start()
         if self.code_sender is not None:
-            conn = db.connect(self.db_path)
-            conn.close()
             for index in range(_ACCOUNT_MAIL_WORKER_COUNT):
-                worker = threading.Thread(
-                    target=self._account_mail_loop,
-                    name=f"account-mail-{index + 1}",
-                    daemon=True,
+                self._start_account_mail_worker(index)
+            self.account_mail_supervisor = threading.Thread(
+                target=self._account_mail_supervisor_loop,
+                name="account-mail-supervisor",
+                daemon=True,
+            )
+            self.account_mail_supervisor.start()
+
+    def _record_worker_status(
+        self,
+        worker_key: str,
+        worker_type: str,
+        state: str,
+        *,
+        last_error_code: str | None = None,
+        task_id: str | None = None,
+        action_id: str | None = None,
+        provider_id: str | None = None,
+        next_wakeup_at: str | None = None,
+    ) -> None:
+        thread = threading.current_thread()
+        now = dt.datetime.now(dt.UTC).isoformat()
+        try:
+            conn = db.connect(self.db_path)
+            try:
+                db.upsert_worker_runtime_status(
+                    conn,
+                    worker_key=worker_key,
+                    instance_id=f"{self.runtime_instance_id}:{thread.ident or 0}",
+                    worker_type=worker_type,
+                    execution_kind="thread",
+                    pid=os.getpid(),
+                    thread_name=thread.name,
+                    state=state,
+                    now=now,
+                    task_id=task_id,
+                    action_id=action_id,
+                    provider_id=provider_id,
+                    next_wakeup_at=next_wakeup_at,
+                    last_error_code=last_error_code,
+                    revision=os.environ.get("NEWS_DEPLOY_REVISION") or None,
                 )
-                worker.start()
-                self.account_mail_workers.append(worker)
+            finally:
+                conn.close()
+        except sqlite3.Error as error:
+            if self.log_callback:
+                name = getattr(error, "sqlite_errorname", type(error).__name__)
+                self.log_callback(f"worker_status error={name}")
 
     def _payment_loop(self) -> None:
         from news_digest.payment_worker import run_once
 
         owner = secrets.token_hex(16)
+        self._record_worker_status("payment-reconcile", "payment-reconcile", "idle")
         while not self.account_mail_stop.wait(15):
             try:
+                self._record_worker_status("payment-reconcile", "payment-reconcile", "running")
                 run_once(
                     self.db_path,
                     self.settlement_payment_config,
@@ -2435,71 +2486,152 @@ class SiteServer(ThreadingHTTPServer):
                     owner=owner,
                 )
             except Exception as error:
+                self._record_worker_status(
+                    "payment-reconcile",
+                    "payment-reconcile",
+                    "error",
+                    last_error_code=type(error).__name__,
+                )
                 if self.log_callback:
                     self.log_callback(f"payment_worker error={type(error).__name__}")
+            else:
+                self._record_worker_status("payment-reconcile", "payment-reconcile", "idle")
+        self._record_worker_status("payment-reconcile", "payment-reconcile", "stopped")
+
+    def _start_account_mail_worker(self, index: int) -> None:
+        worker = threading.Thread(
+            target=self._account_mail_loop,
+            name=f"account-mail-{index + 1}",
+            daemon=True,
+        )
+        self.account_mail_workers[index] = worker
+        worker.start()
+
+    def _account_mail_supervisor_loop(self) -> None:
+        while not self.account_mail_stop.wait(5):
+            for index, worker in enumerate(tuple(self.account_mail_workers)):
+                if worker is None or not worker.is_alive():
+                    key = f"account-mail-{index + 1}"
+                    self._record_worker_status(
+                        key,
+                        "account-mail",
+                        "error",
+                        last_error_code="WORKER_EXITED",
+                    )
+                    self._start_account_mail_worker(index)
 
     def _account_mail_connection(self) -> sqlite3.Connection | None:
+        delay = 0.05
         while not self.account_mail_stop.is_set():
             try:
                 return db.connect(self.db_path)
-            except sqlite3.OperationalError:
-                self.account_mail_stop.wait(0.05)
+            except sqlite3.OperationalError as error:
+                if self.log_callback:
+                    name = getattr(error, "sqlite_errorname", type(error).__name__)
+                    self.log_callback(f"account_mail_db_connect error={name}")
+                self.account_mail_stop.wait(delay)
+                delay = min(delay * 2, 0.5)
         return None
 
-    def _account_mail_loop(self) -> None:
+    def _account_mail_db_operation(self, operation, *, label: str):
+        delay = 0.05
         while not self.account_mail_stop.is_set():
             conn = self._account_mail_connection()
             if conn is None:
-                return
+                return None
             try:
-                mail = db.claim_account_mail(
-                    conn,
-                    now=dt.datetime.now(dt.UTC).isoformat(),
-                    lease_seconds=_ACCOUNT_MAIL_LEASE_SECONDS,
+                return operation(conn)
+            except sqlite3.OperationalError as error:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                name = getattr(error, "sqlite_errorname", type(error).__name__)
+                self._record_worker_status(
+                    threading.current_thread().name,
+                    "account-mail",
+                    "db_retry",
+                    last_error_code=str(name),
                 )
+                if self.log_callback:
+                    self.log_callback(f"account_mail_{label} error={name}")
+                self.account_mail_stop.wait(delay)
+                delay = min(delay * 2, 0.5)
             finally:
                 conn.close()
-            if mail is None:
-                self.account_mail_wakeup.wait(0.5)
-                self.account_mail_wakeup.clear()
-                continue
-            code = _account_verification_code(
-                self.session_secret,
-                mail.delivery_token,
-                mail.email_key,
-                mail.purpose,
+        return None
+
+    def _account_mail_loop(self) -> None:
+        key = threading.current_thread().name
+        last_heartbeat = 0.0
+        self._record_worker_status(key, "account-mail", "idle")
+        try:
+            while not self.account_mail_stop.is_set():
+                mail = self._account_mail_db_operation(
+                    lambda conn: db.claim_account_mail(
+                        conn,
+                        now=dt.datetime.now(dt.UTC).isoformat(),
+                        lease_seconds=_ACCOUNT_MAIL_LEASE_SECONDS,
+                    ),
+                    label="claim",
+                )
+                if self.account_mail_stop.is_set():
+                    break
+                if mail is None:
+                    if time.monotonic() - last_heartbeat >= 15:
+                        self._record_worker_status(key, "account-mail", "idle")
+                        last_heartbeat = time.monotonic()
+                    self.account_mail_wakeup.wait(0.5)
+                    self.account_mail_wakeup.clear()
+                    continue
+                self._record_worker_status(key, "account-mail", "running")
+                code = _account_verification_code(
+                    self.session_secret,
+                    mail.delivery_token,
+                    mail.email_key,
+                    mail.purpose,
+                )
+                try:
+                    self.code_sender(mail.email, code, mail.purpose)
+                except Exception:  # noqa: BLE001 - durable outbox controls bounded retries
+                    outbox_id = mail.id
+                    self._account_mail_db_operation(
+                        lambda conn, outbox_id=outbox_id: db.release_account_mail(
+                            conn,
+                            outbox_id=outbox_id,
+                            now=dt.datetime.now(dt.UTC).isoformat(),
+                            retry_seconds=_ACCOUNT_MAIL_RETRY_SECONDS,
+                            max_attempts=_ACCOUNT_MAIL_MAX_ATTEMPTS,
+                            error_code="DELIVERY_FAILED",
+                        ),
+                        label="release",
+                    )
+                else:
+                    outbox_id = mail.id
+                    self._account_mail_db_operation(
+                        lambda conn, outbox_id=outbox_id: db.complete_account_mail(
+                            conn,
+                            outbox_id=outbox_id,
+                            now=dt.datetime.now(dt.UTC).isoformat(),
+                        ),
+                        label="complete",
+                    )
+                self._record_worker_status(key, "account-mail", "idle")
+                last_heartbeat = time.monotonic()
+                with self.account_mail_condition:
+                    self.account_mail_condition.notify_all()
+        except Exception as error:  # noqa: BLE001 - supervisor restarts unexpected exits
+            self._record_worker_status(
+                key,
+                "account-mail",
+                "error",
+                last_error_code=type(error).__name__,
             )
-            try:
-                self.code_sender(mail.email, code, mail.purpose)
-            except Exception:  # noqa: BLE001 - durable outbox controls bounded retries
-                conn = self._account_mail_connection()
-                if conn is None:
-                    return
-                try:
-                    db.release_account_mail(
-                        conn,
-                        outbox_id=mail.id,
-                        now=dt.datetime.now(dt.UTC).isoformat(),
-                        retry_seconds=_ACCOUNT_MAIL_RETRY_SECONDS,
-                        max_attempts=_ACCOUNT_MAIL_MAX_ATTEMPTS,
-                        error_code="DELIVERY_FAILED",
-                    )
-                finally:
-                    conn.close()
-            else:
-                conn = self._account_mail_connection()
-                if conn is None:
-                    return
-                try:
-                    db.complete_account_mail(
-                        conn,
-                        outbox_id=mail.id,
-                        now=dt.datetime.now(dt.UTC).isoformat(),
-                    )
-                finally:
-                    conn.close()
-            with self.account_mail_condition:
-                self.account_mail_condition.notify_all()
+            if self.log_callback:
+                self.log_callback(f"account_mail_worker error={type(error).__name__}")
+        finally:
+            if self.account_mail_stop.is_set():
+                self._record_worker_status(key, "account-mail", "stopped")
 
     def wake_account_mail(self) -> None:
         self.account_mail_wakeup.set()
@@ -2527,8 +2659,11 @@ class SiteServer(ThreadingHTTPServer):
         self.account_mail_wakeup.set()
         super().server_close()
         self.payment_worker.join(timeout=0.2)
+        if self.account_mail_supervisor is not None:
+            self.account_mail_supervisor.join(timeout=0.2)
         for worker in self.account_mail_workers:
-            worker.join(timeout=0.2)
+            if worker is not None:
+                worker.join(timeout=0.2)
 
     def current_payment_config(self) -> EpayConfig | None:
         if self.payment_config_loader is None:

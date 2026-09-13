@@ -223,6 +223,27 @@ class TestEditionRetry:
         conn, tasks = _seed(tmp_path, article_count=1)
         old_task = tasks[0]
         with conn:
+            # T32 rebinding is defined only for frozen edition items; legacy tasks
+            # without an active-task pointer are deliberately never mutated in place.
+            conn.execute(
+                "UPDATE automation_editions SET briefs_json = '[]' WHERE edition_date = ?",
+                ("2026-08-30",),
+            )
+            conn.execute(
+                "INSERT INTO edition_items"
+                " (edition_date, article_id, position, source_json, payload, source_hash,"
+                " segmentation_json, active_task_id) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "2026-08-30",
+                    old_task.article_id,
+                    0,
+                    "{}",
+                    "{}",
+                    "source-hash",
+                    json.dumps([1]),
+                    old_task.task_id,
+                ),
+            )
             conn.execute(
                 "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
                 " error_code = 'PROVIDER_5XX', error_category = 'provider_infrastructure'"
@@ -237,12 +258,19 @@ class TestEditionRetry:
             provider_id="provider-terra",
         )
         assert counts == {"queued": 1, "skipped": 0}
-        rebound = db.translation_task(conn, old_task.task_id)
-        assert rebound is not None
+        historical = db.translation_task(conn, old_task.task_id)
+        assert historical is not None
+        assert historical.provider_id == old_task.provider_id
+        active = db.active_translation_tasks(conn, "2026-08-30")
+        assert len(active) == 1
+        rebound = active[0]
+        assert rebound.task_id != old_task.task_id
         assert rebound.provider_id == "provider-terra"
         assert rebound.status == "retry_wait"
         assert rebound.next_retry_at == _at(2)
         assert rebound.error_code is None
+        assert rebound.rebind_from_task_id == old_task.task_id
+        assert rebound.rebind_reason == "EDITION_RECOVERY"
         conn.close()
 
 

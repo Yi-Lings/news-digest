@@ -20,7 +20,7 @@ from news_digest.models import (
     article_to_dict,
 )
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 PAYMENT_CREATION_LEASE_SECONDS = 30
 _MAX_TRANSLATION_LEASE_SECONDS = MAX_TRANSLATION_TIMEOUT_SECONDS + 60
 
@@ -61,6 +61,14 @@ TranslationAdminActionType = Literal[
 ]
 TranslationAdminActionStatus = Literal[
     "requested", "running", "completed", "rejected", "timed_out", "recovered"
+]
+TranslationRebindReason = Literal[
+    "PROVIDER_REPLACED",
+    "PROVIDER_DISABLED",
+    "PROVIDER_CONFIGURATION_CHANGED",
+    "PROVIDER_LONG_TERM_OPEN",
+    "MANUAL_REBIND",
+    "EDITION_RECOVERY",
 ]
 ProviderCircuitState = Literal["closed", "open", "half_open", "configuration_blocked"]
 ProviderOutcome = Literal[
@@ -277,6 +285,8 @@ class TranslationTask:
     received_chunks: int
     last_activity_at: str | None
     segmentation_json: str | None
+    rebind_from_task_id: str | None
+    rebind_reason: str | None
     created_at: str
     updated_at: str
 
@@ -311,6 +321,29 @@ class TranslationAdminAction:
     started_at: str | None
     finished_at: str | None
     result_code: str | None
+    target_provider_id: str | None = None
+    wake_sent_at: str | None = None
+    claimed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkerRuntimeStatus:
+    worker_key: str
+    instance_id: str
+    worker_type: str
+    execution_kind: str
+    pid: int
+    thread_name: str | None
+    state: str
+    edition_date: str | None
+    task_id: str | None
+    action_id: str | None
+    provider_id: str | None
+    started_at: str
+    heartbeat_at: str
+    next_wakeup_at: str | None
+    last_error_code: str | None
+    revision: str | None
 
 
 @dataclass(frozen=True)
@@ -427,6 +460,8 @@ CREATE TABLE IF NOT EXISTS translation_tasks (
     received_chunks INTEGER NOT NULL DEFAULT 0 CHECK(received_chunks >= 0),
     last_activity_at TEXT,
     segmentation_json TEXT,
+    rebind_from_task_id TEXT REFERENCES translation_tasks(task_id),
+    rebind_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (edition_date, article_id, provider_id),
@@ -473,7 +508,10 @@ CREATE TABLE IF NOT EXISTS translation_admin_actions (
     requested_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
-    result_code TEXT
+    result_code TEXT,
+    target_provider_id TEXT,
+    wake_sent_at TEXT,
+    claimed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_translation_admin_actions_requested
     ON translation_admin_actions(requested_at DESC);
@@ -972,6 +1010,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         _apply_v8_schema(conn)
         _apply_v11_schema(conn)
         _apply_v12_schema(conn)
+        _apply_v13_schema(conn)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -983,7 +1022,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         return conn
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         found = row["value"]
         raise RuntimeError(f"schema 版本不匹配:库中为 {found},代码期望 {SCHEMA_VERSION},需迁移")
     if version in {1, 2}:
@@ -1010,7 +1049,10 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         _set_schema_version(conn, 10)
     if version <= 10:
         _migrate_to_v11(conn, path)
-    _migrate_to_v12(conn, path)
+    if version <= 11:
+        _migrate_to_v12(conn, path)
+        _set_schema_version(conn, 12)
+    _migrate_to_v13(conn, path)
     _set_schema_version(conn, SCHEMA_VERSION)
     return conn
 
@@ -1063,6 +1105,60 @@ def _migrate_to_v12(conn: sqlite3.Connection, path: Path) -> None:
         conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise RuntimeError("schema v12 foreign key validation failed")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _apply_v13_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS worker_runtime_status ("
+        "worker_key TEXT PRIMARY KEY, instance_id TEXT NOT NULL, worker_type TEXT NOT NULL,"
+        " execution_kind TEXT NOT NULL CHECK(execution_kind IN ('process','thread')),"
+        " pid INTEGER NOT NULL, thread_name TEXT, state TEXT NOT NULL,"
+        " edition_date TEXT, task_id TEXT, action_id TEXT, provider_id TEXT,"
+        " started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, next_wakeup_at TEXT,"
+        " last_error_code TEXT, revision TEXT)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_worker_runtime_heartbeat"
+        " ON worker_runtime_status(heartbeat_at)"
+    )
+
+
+def _migrate_to_v13(conn: sqlite3.Connection, path: Path) -> None:
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if row is not None and int(row[0]) >= 13:
+        _apply_v13_schema(conn)
+        return
+    backup_path = path.with_name(f"{path.name}.pre-v13.bak")
+    if path.is_file() and not backup_path.exists():
+        with closing(sqlite3.connect(backup_path)) as backup:
+            conn.backup(backup)
+            if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise RuntimeError("schema v13 backup integrity failed")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(translation_tasks)")}
+        if "rebind_from_task_id" not in task_columns:
+            conn.execute("ALTER TABLE translation_tasks ADD COLUMN rebind_from_task_id TEXT")
+        if "rebind_reason" not in task_columns:
+            conn.execute("ALTER TABLE translation_tasks ADD COLUMN rebind_reason TEXT")
+        action_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(translation_admin_actions)")
+        }
+        for name in ("target_provider_id", "wake_sent_at", "claimed_at"):
+            if name not in action_columns:
+                conn.execute(f"ALTER TABLE translation_admin_actions ADD COLUMN {name} TEXT")
+        _apply_v13_schema(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_translation_tasks_rebind_from"
+            " ON translation_tasks(rebind_from_task_id)"
+        )
+        conn.execute("UPDATE meta SET value='13' WHERE key='schema_version'")
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("schema v13 foreign key validation failed")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1886,6 +1982,10 @@ def _translation_task(row: sqlite3.Row) -> TranslationTask:
         received_chunks=row["received_chunks"],
         last_activity_at=row["last_activity_at"],
         segmentation_json=row["segmentation_json"] if "segmentation_json" in row.keys() else None,
+        rebind_from_task_id=(
+            row["rebind_from_task_id"] if "rebind_from_task_id" in row.keys() else None
+        ),
+        rebind_reason=(row["rebind_reason"] if "rebind_reason" in row.keys() else None),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1899,7 +1999,8 @@ def _translation_task_select() -> str:
         " auto_retry, diagnostic_id, failed_at, next_retry_at, started_at, finished_at,"
         " lease_owner, lease_expires_at, hard_timeout_at, cancel_requested_at,"
         " manual_retry_requested_at, manual_probe_requested_at, manual_action_id,"
-        " received_chunks, last_activity_at, segmentation_json, created_at, updated_at"
+        " received_chunks, last_activity_at, segmentation_json, rebind_from_task_id,"
+        " rebind_reason, created_at, updated_at"
         " FROM translation_tasks"
     )
 
@@ -1907,6 +2008,18 @@ def _translation_task_select() -> str:
 def translation_task(conn: sqlite3.Connection, task_id: str) -> TranslationTask | None:
     _validate_test_attempt_digest(task_id, "task_id")
     row = conn.execute(_translation_task_select() + " WHERE task_id = ?", (task_id,)).fetchone()
+    return _translation_task(row) if row else None
+
+
+def translation_task_for_lease_owner(
+    conn: sqlite3.Connection, owner: str
+) -> TranslationTask | None:
+    owner = _non_empty(owner, "owner", maximum=128)
+    row = conn.execute(
+        _translation_task_select()
+        + " WHERE status = 'running' AND lease_owner = ? ORDER BY started_at, task_id LIMIT 1",
+        (owner,),
+    ).fetchone()
     return _translation_task(row) if row else None
 
 
@@ -2018,7 +2131,8 @@ def latest_translation_admin_action(
     _validate_test_attempt_digest(task_id, "task_id")
     row = conn.execute(
         "SELECT action_id, task_id, provider_id, action, actor, status, requested_at,"
-        " started_at, finished_at, result_code FROM translation_admin_actions"
+        " started_at, finished_at, result_code, target_provider_id, wake_sent_at, claimed_at"
+        " FROM translation_admin_actions"
         " WHERE task_id = ? ORDER BY requested_at DESC LIMIT 1",
         (task_id,),
     ).fetchone()
@@ -2035,7 +2149,163 @@ def latest_translation_admin_action(
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         result_code=row["result_code"],
+        target_provider_id=row["target_provider_id"],
+        wake_sent_at=row["wake_sent_at"],
+        claimed_at=row["claimed_at"],
     )
+
+
+
+def translation_admin_action(
+    conn: sqlite3.Connection, action_id: str
+) -> TranslationAdminAction | None:
+    action_id = _non_empty(action_id, "action_id", maximum=64)
+    row = conn.execute(
+        "SELECT action_id, task_id, provider_id, action, actor, status, requested_at,"
+        " started_at, finished_at, result_code, target_provider_id, wake_sent_at, claimed_at"
+        " FROM translation_admin_actions WHERE action_id = ?",
+        (action_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return TranslationAdminAction(
+        action_id=row["action_id"],
+        task_id=row["task_id"],
+        provider_id=row["provider_id"],
+        action=row["action"],
+        actor=row["actor"],
+        status=row["status"],
+        requested_at=row["requested_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        result_code=row["result_code"],
+        target_provider_id=row["target_provider_id"],
+        wake_sent_at=row["wake_sent_at"],
+        claimed_at=row["claimed_at"],
+    )
+
+
+def mark_translation_admin_action_wake(
+    conn: sqlite3.Connection, action_ids: list[str], *, now: str
+) -> int:
+    """Record that the fast wake signal was emitted for durable actions.
+
+    The wake file is an acceleration path only.  Actions remain durable in SQLite and
+    the fallback timer may consume them even when this timestamp is absent.
+    """
+    now = _automation_timestamp(now)
+    normalized = [
+        _non_empty(action_id, "action_id", maximum=64) for action_id in dict.fromkeys(action_ids)
+    ]
+    if not normalized:
+        return 0
+    with conn:
+        cursor = conn.executemany(
+            "UPDATE translation_admin_actions SET wake_sent_at = COALESCE(wake_sent_at, ?)"
+            " WHERE action_id = ? AND status IN ('requested','running')",
+            ((now, action_id) for action_id in normalized),
+        )
+    return cursor.rowcount
+
+
+def _worker_runtime(row: sqlite3.Row) -> WorkerRuntimeStatus:
+    return WorkerRuntimeStatus(
+        worker_key=row["worker_key"],
+        instance_id=row["instance_id"],
+        worker_type=row["worker_type"],
+        execution_kind=row["execution_kind"],
+        pid=row["pid"],
+        thread_name=row["thread_name"],
+        state=row["state"],
+        edition_date=row["edition_date"],
+        task_id=row["task_id"],
+        action_id=row["action_id"],
+        provider_id=row["provider_id"],
+        started_at=row["started_at"],
+        heartbeat_at=row["heartbeat_at"],
+        next_wakeup_at=row["next_wakeup_at"],
+        last_error_code=row["last_error_code"],
+        revision=row["revision"],
+    )
+
+
+def upsert_worker_runtime_status(
+    conn: sqlite3.Connection,
+    *,
+    worker_key: str,
+    instance_id: str,
+    worker_type: str,
+    execution_kind: Literal["process", "thread"],
+    pid: int,
+    state: str,
+    now: str,
+    thread_name: str | None = None,
+    edition_date: str | None = None,
+    task_id: str | None = None,
+    action_id: str | None = None,
+    provider_id: str | None = None,
+    next_wakeup_at: str | None = None,
+    last_error_code: str | None = None,
+    revision: str | None = None,
+) -> WorkerRuntimeStatus:
+    worker_key = _non_empty(worker_key, "worker_key", maximum=128)
+    instance_id = _non_empty(instance_id, "instance_id", maximum=128)
+    worker_type = _non_empty(worker_type, "worker_type", maximum=128)
+    state = _non_empty(state, "state", maximum=64)
+    if execution_kind not in {"process", "thread"}:
+        raise ValueError("execution_kind must be process or thread")
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("pid must be a positive integer")
+    now = _automation_timestamp(now)
+    with conn:
+        conn.execute(
+            "INSERT INTO worker_runtime_status"
+            " (worker_key, instance_id, worker_type, execution_kind, pid, thread_name, state,"
+            " edition_date, task_id, action_id, provider_id, started_at, heartbeat_at,"
+            " next_wakeup_at, last_error_code, revision)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(worker_key) DO UPDATE SET"
+            " instance_id=excluded.instance_id, worker_type=excluded.worker_type,"
+            " execution_kind=excluded.execution_kind, pid=excluded.pid,"
+            " thread_name=excluded.thread_name, state=excluded.state,"
+            " edition_date=excluded.edition_date, task_id=excluded.task_id,"
+            " action_id=excluded.action_id, provider_id=excluded.provider_id,"
+            " started_at=CASE WHEN worker_runtime_status.instance_id=excluded.instance_id"
+            " THEN worker_runtime_status.started_at ELSE excluded.started_at END,"
+            " heartbeat_at=excluded.heartbeat_at, next_wakeup_at=excluded.next_wakeup_at,"
+            " last_error_code=excluded.last_error_code, revision=excluded.revision",
+            (
+                worker_key,
+                instance_id,
+                worker_type,
+                execution_kind,
+                pid,
+                thread_name,
+                state,
+                edition_date,
+                task_id,
+                action_id,
+                provider_id,
+                now,
+                now,
+                next_wakeup_at,
+                last_error_code,
+                revision,
+            ),
+        )
+    row = conn.execute(
+        "SELECT * FROM worker_runtime_status WHERE worker_key = ?", (worker_key,)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("worker runtime status was not persisted")
+    return _worker_runtime(row)
+
+
+def list_worker_runtime_status(conn: sqlite3.Connection) -> list[WorkerRuntimeStatus]:
+    rows = conn.execute(
+        "SELECT * FROM worker_runtime_status ORDER BY worker_type, worker_key"
+    ).fetchall()
+    return [_worker_runtime(row) for row in rows]
 
 
 def _automatic_translation_attempts(conn: sqlite3.Connection, task_id: str) -> int:
@@ -2164,9 +2434,10 @@ def claim_translation_task(
         )
         if row["manual_action_id"] is not None:
             conn.execute(
-                "UPDATE translation_admin_actions SET status = 'running', started_at = ?"
+                "UPDATE translation_admin_actions SET status = 'running', started_at = ?,"
+                " claimed_at = COALESCE(claimed_at, ?)"
                 " WHERE action_id = ? AND status = 'requested'",
-                (now, row["manual_action_id"]),
+                (now, now, row["manual_action_id"]),
             )
         conn.commit()
     except Exception:
@@ -2394,6 +2665,76 @@ def queue_translation_task_retry(
     return task
 
 
+
+def queue_translation_task_probe(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: str,
+    actor: str,
+) -> TranslationTask:
+    """Queue one explicit Admin probe even when the provider circuit is closed."""
+    _validate_test_attempt_digest(task_id, "task_id")
+    actor = _non_empty(actor, "actor", maximum=128)
+    now = _automation_timestamp(now)
+    task = translation_task(conn, task_id)
+    if task is None:
+        raise RuntimeError("translation task does not exist")
+    if not _is_current_translation_task(conn, task_id):
+        raise RuntimeError("Historical task cannot be used as a probe")
+    circuit = get_provider_circuit(conn, task.provider_id)
+    if circuit is not None and circuit.state in {"open", "configuration_blocked", "half_open"}:
+        if circuit.state == "half_open":
+            existing = queued_provider_probe(conn, task.provider_id)
+            if existing is not None:
+                return existing
+        return queue_provider_probe(
+            conn,
+            task.provider_id,
+            task_id,
+            now=now,
+            actor=actor,
+        )
+    if task.status not in {"pending", "failed", "retry_wait", "cancelled"}:
+        raise RuntimeError("translation task cannot be used as a probe")
+    action_id = uuid.uuid4().hex
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, manual_probe_requested_at FROM translation_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("translation task does not exist")
+        if row["manual_probe_requested_at"] is not None:
+            conn.commit()
+            queued = queued_provider_probe(conn, task.provider_id)
+            if queued is None:
+                raise RuntimeError("provider probe is already queued")
+            return queued
+        conn.execute(
+            "INSERT INTO translation_admin_actions"
+            " (action_id, task_id, provider_id, target_provider_id, action, actor, status,"
+            " requested_at) VALUES (?, ?, ?, ?, 'probe', ?, 'requested', ?)",
+            (action_id, task_id, task.provider_id, task.provider_id, actor, now),
+        )
+        conn.execute(
+            "UPDATE translation_tasks SET status = CASE WHEN status='pending' THEN 'pending'"
+            " ELSE 'retry_wait' END, auto_retry=1, next_retry_at=?,"
+            " manual_retry_requested_at=?, manual_probe_requested_at=?, manual_action_id=?,"
+            " updated_at=? WHERE task_id=?",
+            (now, now, now, action_id, now, task_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    queued = translation_task(conn, task_id)
+    if queued is None:
+        raise RuntimeError("translation task does not exist")
+    return queued
+
+
 def queue_provider_probe(
     conn: sqlite3.Connection,
     provider_id: str,
@@ -2439,11 +2780,15 @@ def queue_provider_probe(
         if circuit["state"] not in {"open", "configuration_blocked"}:
             raise RuntimeError("provider circuit is not probeable")
         queued_probe = conn.execute(
-            "SELECT 1 FROM translation_tasks WHERE provider_id = ?"
-            " AND manual_probe_requested_at IS NOT NULL LIMIT 1",
+            _translation_task_select()
+            + " WHERE provider_id = ? AND manual_probe_requested_at IS NOT NULL"
+            " ORDER BY manual_probe_requested_at LIMIT 1",
             (provider_id,),
         ).fetchone()
         if queued_probe is not None:
+            if queued_probe["task_id"] == task_id:
+                conn.commit()
+                return _translation_task(queued_probe)
             raise RuntimeError("provider probe is already queued")
         task_row = conn.execute(
             "SELECT status, manual_probe_requested_at FROM translation_tasks"
@@ -2462,9 +2807,10 @@ def queue_provider_probe(
             raise RuntimeError("provider probe is already queued")
         conn.execute(
             "INSERT INTO translation_admin_actions"
-            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
-            " VALUES (?, ?, ?, 'probe', ?, 'requested', ?)",
-            (action_id, task_id, provider_id, actor, now),
+            " (action_id, task_id, provider_id, target_provider_id, action, actor, status,"
+            " requested_at)"
+            " VALUES (?, ?, ?, ?, 'probe', ?, 'requested', ?)",
+            (action_id, task_id, provider_id, provider_id, actor, now),
         )
         conn.execute(
             "UPDATE translation_tasks SET status = CASE WHEN status = 'pending'"
@@ -3444,14 +3790,9 @@ def reap_stale_admin_actions(
     conn: sqlite3.Connection,
     *,
     now: str,
-    timeout_seconds: int = 900,
+    timeout_seconds: int = 90,
 ) -> int:
-    """把长时间无人消费的 requested 管理动作置为 timed_out,并释放任务上的手动标志。
-
-    cancel/recover 与租约生命周期耦合,由租约恢复路径处理,这里不触碰;
-    dispatch/retry/probe/unblock 正常在下一轮 worker 被消费,超过超时仍滞留即视为
-    唤醒链断裂,置为 timed_out(启用此前从未被写入的死状态),任务回自然态。
-    """
+    """Close orphaned durable Admin actions without disturbing live leases."""
     now = _automation_timestamp(now)
     if type(timeout_seconds) is not int or not 60 <= timeout_seconds <= 86400:
         raise ValueError("timeout_seconds must be between 60 and 86400")
@@ -3459,12 +3800,27 @@ def reap_stale_admin_actions(
     try:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
-            "SELECT action_id, task_id FROM translation_admin_actions"
-            " WHERE status = 'requested' AND action IN ('dispatch', 'retry', 'probe',"
-            " 'unblock') AND requested_at <= ?",
+            "SELECT a.action_id, a.task_id, a.action, t.status AS task_status,"
+            " t.lease_expires_at, t.cancel_requested_at, t.manual_action_id"
+            " FROM translation_admin_actions a"
+            " LEFT JOIN translation_tasks t ON t.task_id = a.task_id"
+            " WHERE a.status = 'requested' AND a.requested_at <= ?",
             (horizon,),
         ).fetchall()
+        reaped = 0
         for row in rows:
+            action = row["action"]
+            detached = (
+                row["task_id"] is None
+                or row["task_status"] is None
+                or (
+                    row["task_status"] != "running"
+                    and row["lease_expires_at"] is None
+                    and row["cancel_requested_at"] is None
+                )
+            )
+            if action in {"cancel", "recover"} and not detached:
+                continue
             conn.execute(
                 "UPDATE translation_admin_actions SET status = 'timed_out',"
                 " finished_at = ?, result_code = 'ACTION_TIMEOUT' WHERE action_id = ?",
@@ -3474,14 +3830,17 @@ def reap_stale_admin_actions(
                 conn.execute(
                     "UPDATE translation_tasks SET manual_retry_requested_at = NULL,"
                     " manual_probe_requested_at = NULL, manual_action_id = NULL,"
-                    " updated_at = ? WHERE task_id = ? AND manual_action_id = ?",
-                    (now, row["task_id"], row["action_id"]),
+                    " cancel_requested_at = CASE WHEN ? = 'cancel' THEN NULL"
+                    " ELSE cancel_requested_at END, updated_at = ?"
+                    " WHERE task_id = ? AND manual_action_id = ?",
+                    (action, now, row["task_id"], row["action_id"]),
                 )
+            reaped += 1
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return len(rows)
+    return reaped
 
 
 def finish_automation_delivery(
@@ -3998,33 +4357,17 @@ def retry_edition_failed_tasks(
                         provider_id=provider_id,
                         now=now,
                         actor=actor,
+                        reason="EDITION_RECOVERY",
                     )
                 except (ValueError, RuntimeError):
                     skipped += 1
                 else:
                     queued += 1
                 continue
-            existing = conn.execute(
-                "SELECT task_id, status FROM translation_tasks"
-                " WHERE edition_date = ? AND article_id = ? AND provider_id = ?",
-                (edition_date, task.article_id, provider_id),
-            ).fetchone()
-            if existing is not None:
-                skipped += 1
-                continue
-            with conn:
-                conn.execute(
-                    "UPDATE translation_tasks SET provider_id = ?, status = 'retry_wait',"
-                    " auto_retry = 1, error_code = NULL, error_category = NULL,"
-                    " http_status = NULL, current_stage = 'waiting', failure_stage = NULL,"
-                    " diagnostic_id = NULL, failed_at = NULL, next_retry_at = ?,"
-                    " finished_at = NULL, manual_retry_requested_at = NULL,"
-                    " manual_probe_requested_at = NULL, manual_action_id = NULL,"
-                    " updated_at = ? WHERE task_id = ? AND status IN"
-                    " ('failed', 'retry_wait', 'cancelled', 'configuration_blocked')",
-                    (provider_id, now, now, task.task_id),
-                )
-            queued += 1
+            # Legacy tasks without a frozen edition item have no active-task pointer that can
+            # be atomically rebound. Preserve their provider identity and require explicit
+            # migration rather than mutating historical audit facts in place.
+            skipped += 1
             continue
         circuit = get_provider_circuit(conn, task.provider_id)
         if circuit is not None and circuit.state != "closed":
@@ -4412,11 +4755,20 @@ def rebind_translation_item(
     now: str,
     actor: str,
     force: bool = False,
+    action: Literal["retry", "probe"] = "retry",
+    reason: TranslationRebindReason = "MANUAL_REBIND",
 ) -> str:
     """Switch the active failed task, preserving every historical provider attempt."""
     provider_id = _non_empty(provider_id, "provider_id", maximum=128)
     actor = _non_empty(actor, "actor", maximum=128)
     now = _automation_timestamp(now)
+    if action not in {"retry", "probe"}:
+        raise ValueError("rebind action is invalid")
+    if reason not in {
+        "PROVIDER_REPLACED", "PROVIDER_DISABLED", "PROVIDER_CONFIGURATION_CHANGED",
+        "PROVIDER_LONG_TERM_OPEN", "MANUAL_REBIND", "EDITION_RECOVERY"
+    }:
+        raise ValueError("rebind reason is invalid")
     try:
         conn.execute("BEGIN IMMEDIATE")
         task = translation_task(conn, task_id)
@@ -4438,7 +4790,7 @@ def rebind_translation_item(
         ):
             raise RuntimeError("Active task is not available for rebinding")
         circuit = get_provider_circuit(conn, provider_id)
-        if circuit is not None and circuit.state != "closed":
+        if circuit is not None and circuit.state != "closed" and action != "probe":
             raise RuntimeError("Provider requires a controlled probe")
         new_id = _translation_task_id(task.edition_date, task.article_id, provider_id)
         previous = translation_task(conn, new_id)
@@ -4450,8 +4802,8 @@ def rebind_translation_item(
         conn.execute(
             "INSERT INTO translation_tasks"
             " (task_id, edition_date, article_id, article_title, provider_id, status,"
-            " segmentation_json, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, 'retry_wait', ?, ?, ?)"
+            " segmentation_json, rebind_from_task_id, rebind_reason, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, 'retry_wait', ?, ?, ?, ?, ?)"
             " ON CONFLICT(task_id) DO NOTHING",
             (
                 new_id,
@@ -4460,27 +4812,45 @@ def rebind_translation_item(
                 task.article_title,
                 provider_id,
                 item["segmentation_json"],
+                task_id,
+                reason,
                 now,
                 now,
             ),
         )
+        manual_probe = now if action == "probe" else None
         conn.execute(
             "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
-            " next_retry_at = ?, manual_retry_requested_at = ?, manual_action_id = ?,"
-            " segmentation_json = ?, updated_at = ? WHERE task_id = ?",
-            (now, now, action_id, item["segmentation_json"], now, new_id),
+            " next_retry_at = ?, manual_retry_requested_at = ?, manual_probe_requested_at = ?,"
+            " manual_action_id = ?, segmentation_json = ?,"
+            " rebind_from_task_id = COALESCE(rebind_from_task_id, ?),"
+            " rebind_reason = COALESCE(rebind_reason, ?), updated_at = ? WHERE task_id = ?",
+            (
+                now,
+                now,
+                manual_probe,
+                action_id,
+                item["segmentation_json"],
+                task_id,
+                reason,
+                now,
+                new_id,
+            ),
         )
         conn.execute(
             "INSERT INTO translation_admin_actions"
-            " (action_id, task_id, provider_id, action, actor, status, requested_at)"
-            " VALUES (?, ?, ?, 'retry', ?, 'requested', ?)",
-            (action_id, new_id, provider_id, actor, now),
+            " (action_id, task_id, provider_id, target_provider_id, action, actor, status,"
+            " requested_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'requested', ?)",
+            (action_id, new_id, provider_id, provider_id, action, actor, now),
         )
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE edition_items SET active_task_id = ?,"
             " force_refresh = MAX(force_refresh, ?) WHERE active_task_id = ?",
             (new_id, int(force), task_id),
         )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Active task changed during rebinding")
         conn.commit()
     except Exception:
         conn.rollback()

@@ -102,6 +102,7 @@ require_deployment_units_quiescent() {
     news-digest.service \
     news-digest-resume.service \
     news-digest-wakeup.path \
+    news-digest-wakeup.timer \
     news-digest-backup.timer \
     news-digest-backup.service
   do
@@ -143,7 +144,7 @@ section "1/10 前置校验（root、Docker、上传工件）"
 [ "$(id -u)" -eq 0 ] || die "必须以 root 执行（当前 uid=$(id -u)）"
 docker info >/dev/null 2>&1 || die "Docker 守护进程不可用——先安装/启动 Docker 再重跑"
 docker compose version >/dev/null 2>&1 || die "缺少 Compose v2（docker compose 子命令）"
-for f in compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf; do
+for f in compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest-wakeup.timer news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf; do
   [ -f "${SRC_DIR}/${f}" ] || die "缺少上传工件：${SRC_DIR}/${f}（应由 server-push.ps1 一并上传）"
 done
 command -v flock >/dev/null 2>&1 || die "缺少 flock（util-linux）；无法保证每日与恢复 worker 串行"
@@ -183,6 +184,9 @@ install_file "${TMP_DIR}/news-digest-resume.service" /etc/systemd/system/news-di
 sed -e "s|/srv/news-digest|${APP_DIR}|g" \
     "${SRC_DIR}/news-digest-wakeup.path" > "${TMP_DIR}/news-digest-wakeup.path"
 install_file "${TMP_DIR}/news-digest-wakeup.path" /etc/systemd/system/news-digest-wakeup.path 644
+sed -e "s|/srv/news-digest|${APP_DIR}|g" \
+    "${SRC_DIR}/news-digest-wakeup.timer" > "${TMP_DIR}/news-digest-wakeup.timer"
+install_file "${TMP_DIR}/news-digest-wakeup.timer" /etc/systemd/system/news-digest-wakeup.timer 644
 # nginx 的 news.conf 留到第 9 步按证书状态选版本就位：证书未签发时提前放完整版
 # 会让全局 nginx -t 失败，殃及主站与 SUB2API 的后续 reload。
 
@@ -765,13 +769,14 @@ systemctl reset-failed news-digest-resume.service >/dev/null 2>&1 || true
 # 防止只恢复一半或让未通过完整门禁的 worker 随 timer 运行。
 install -d -m 755 /var/lib/systemd/timers
 touch /var/lib/systemd/timers/stamp-news-digest.timer
-if ! systemctl enable --now news-digest.timer news-digest-wakeup.path; then
-  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
+if ! systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer; then
+  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 恢复失败，已保持调度停止"
 fi
 if ! systemctl is-active --quiet news-digest.timer ||
-   ! systemctl is-active --quiet news-digest-wakeup.path; then
-  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-backup.timer >/dev/null 2>&1 || true
+   ! systemctl is-active --quiet news-digest-wakeup.path ||
+   ! systemctl is-active --quiet news-digest-wakeup.timer; then
+  systemctl stop news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer news-digest-backup.timer >/dev/null 2>&1 || true
   die "timer/path 活动态核验失败，已重新停止调度"
 fi
 echo "下次触发（NEXT 列）："

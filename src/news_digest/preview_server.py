@@ -1239,7 +1239,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
     def _handle_test_message(self, body: dict[str, Any]) -> None:
         if not self._admin_ready():
             return
-        if not self.server.smtp_lock.acquire(blocking=False):
+        if not self.server.smtp_lock.acquire(timeout=0.1):
             self._json(409, {"error": "已有 SMTP 测试正在运行", "category": "busy"})
             return
         try:
@@ -2282,6 +2282,43 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         conn = db.connect(self.server.translation_db_path)
         try:
             problem_dates = db.automation_problem_dates(conn)
+            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
+            default_provider_id = ""
+            default_provider_ready = False
+            try:
+                _, default_provider_id = self._default_translation_target()
+                default_provider_ready = True
+            except (AdminConfigError, RuntimeError, ValueError):
+                pass
+            workers = []
+            for worker in db.list_worker_runtime_status(conn):
+                heartbeat = dt.datetime.fromisoformat(worker.heartbeat_at)
+                age_seconds = max(0, int((now - heartbeat).total_seconds()))
+                state = worker.state
+                if worker.worker_type in {"account-mail", "payment-reconcile"}:
+                    if age_seconds > 60:
+                        state = "offline"
+                    elif age_seconds > 30 and state not in {"stopped", "error"}:
+                        state = "stale"
+                workers.append(
+                    {
+                        "worker_key": worker.worker_key,
+                        "worker_type": worker.worker_type,
+                        "execution_kind": worker.execution_kind,
+                        "pid": worker.pid,
+                        "thread_name": worker.thread_name,
+                        "state": state,
+                        "edition_date": worker.edition_date,
+                        "task_id": worker.task_id,
+                        "action_id": worker.action_id,
+                        "provider_id": worker.provider_id,
+                        "heartbeat_at": worker.heartbeat_at,
+                        "heartbeat_age_seconds": age_seconds,
+                        "next_wakeup_at": worker.next_wakeup_at,
+                        "last_error_code": worker.last_error_code,
+                        "revision": worker.revision,
+                    }
+                )
             selected = db.automation_edition(conn, edition_date) if edition_date else None
             edition_dates = list(problem_dates)
             if selected is not None and selected.edition_date not in edition_dates:
@@ -2317,6 +2354,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         "recovery_mode": False,
                     },
                     "items": [],
+                    "workers": workers,
+                    "default_provider_id": default_provider_id,
+                    "default_provider_ready": default_provider_ready,
                     "probe_task_id": None,
                     "csrf_token": self._csrf_for_response(),
                 }
@@ -2328,7 +2368,10 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             }
             circuit = provider_circuits.get(provider_id)
             circuit_state = circuit.state if circuit else "closed"
-            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC)
+            if default_provider_id:
+                provider_id = default_provider_id
+                circuit = db.get_provider_circuit(conn, default_provider_id)
+                circuit_state = circuit.state if circuit else "closed"
 
             def parsed(value: str | None) -> dt.datetime | None:
                 return dt.datetime.fromisoformat(value) if value else None
@@ -2427,8 +2470,26 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     circuit_state=task_circuit_state,
                     now=now.isoformat(),
                 )
-                return list(capabilities.actions)
+                actions = list(capabilities.actions)
+                if default_provider_ready and task.status in {
+                    "pending", "failed", "retry_wait", "cancelled", "configuration_blocked"
+                }:
+                    for action_name in ("retry", "probe"):
+                        if action_name not in actions:
+                            actions.append(action_name)
+                return actions
 
+            stage_progress = {
+                "waiting": 5,
+                "connect_provider": 25,
+                "waiting_model": 40,
+                "receiving_response": 60,
+                "schema_validation": 75,
+                "saving_translation": 85,
+                "waiting_build": 92,
+                "building": 96,
+                "online": 100,
+            }
             summary = {
                 "total": len(tasks),
                 "online": sum(task.build_status == "online" for task in tasks),
@@ -2458,6 +2519,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 "edition": {
                     "date": edition.edition_date,
                     "status": edition.status,
+                    "target_count": edition.target_count,
+                    "succeeded_count": edition.succeeded_count,
+                    "online_count": edition.online_count,
                     "delivery_status": (
                         "skipped" if edition.last_error_code == "NO_ELIGIBLE_RECIPIENTS"
                         else "sent" if edition.status == "delivered" else None
@@ -2499,8 +2563,19 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     {
                         "task_id": task.task_id,
                         "title": task.article_title,
+                        "provider_id": task.provider_id,
+                        "provider_state": (
+                            task_circuit(task).state if task_circuit(task) else "closed"
+                        ),
+                        "rebind_from_task_id": task.rebind_from_task_id,
+                        "rebind_reason": task.rebind_reason,
+                        "lease_owner": task.lease_owner,
                         "status": task.status,
                         "stage": task.current_stage,
+                        "progress_percent": (
+                            100 if task.build_status == "online"
+                            else stage_progress.get(task.current_stage, 5)
+                        ),
                         "build_status": task.build_status,
                         "attempt_count": task.attempt_count,
                         "error_code": task.error_code,
@@ -2527,7 +2602,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                                 "type": action.action,
                                 "status": action.status,
                                 "result_code": action.result_code,
+                                "target_provider_id": action.target_provider_id,
                                 "requested_at": action.requested_at,
+                                "wake_sent_at": action.wake_sent_at,
+                                "claimed_at": action.claimed_at,
+                                "started_at": action.started_at,
                                 "finished_at": action.finished_at,
                             }
                             if (action := db.latest_translation_admin_action(conn, task.task_id))
@@ -2540,6 +2619,9 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     }
                     for task in tasks
                 ],
+                "workers": workers,
+                "default_provider_id": default_provider_id,
+                "default_provider_ready": default_provider_ready,
                 "probe_task_id": (
                     circuit.probe_task_id
                     if circuit_state == "half_open" and circuit is not None
@@ -2589,6 +2671,46 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(503, {"error": str(error), "category": "configuration"})
 
     @staticmethod
+    def _translation_provider_id(provider: dict[str, Any]) -> str:
+        identity = translation_cache_identity(
+            provider["api_type"],
+            provider["base_url"],
+            provider["model"],
+            provider.get("reasoning_effort", ""),
+        )
+        return "default-" + identity[:64]
+
+    def _default_translation_target(self) -> tuple[dict[str, Any], str]:
+        provider = default_provider(
+            load_profiles(self.server.project_root, self.server.profiles_file)
+        )
+        if not assert_recent_success(
+            self.server.project_root,
+            provider,
+            max_age_seconds=_TEST_MAX_AGE_SECONDS,
+        ):
+            raise RuntimeError("当前默认 Provider 没有有效的 SUCCESS 测试；请先测试接口")
+        return provider, self._translation_provider_id(provider)
+
+    def _wake_translation_actions(self, action_ids: list[str]) -> dict[str, Any]:
+        action_ids = list(dict.fromkeys(action_id for action_id in action_ids if action_id))
+        try:
+            self.server.translation_wakeup_callback()
+        except OSError:
+            return {"wake_sent": False, "wake_degraded": True}
+        if action_ids and self.server.translation_db_path is not None:
+            conn = db.connect(self.server.translation_db_path)
+            try:
+                db.mark_translation_admin_action_wake(
+                    conn,
+                    action_ids,
+                    now=dt.datetime.fromtimestamp(self.server.clock(), dt.UTC).isoformat(),
+                )
+            finally:
+                conn.close()
+        return {"wake_sent": True, "wake_degraded": False}
+
+    @staticmethod
     def _translation_task_body(body: dict[str, Any], *, confirm: bool = False) -> str:
         expected = {"task_id", "confirm"} if confirm else {"task_id"}
         if set(body) != expected or (confirm and body.get("confirm") is not True):
@@ -2608,31 +2730,66 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             task_id = self._translation_task_body(body)
+            _, target_provider_id = self._default_translation_target()
+            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC).isoformat()
             conn = db.connect(self.server.translation_db_path)
             try:
-                task = db.queue_translation_task_retry(
-                    conn,
-                    task_id,
-                    now=dt.datetime.now(dt.UTC).isoformat(),
-                    actor=self._admin_actor(),
-                )
+                task = db.translation_task(conn, task_id)
+                if task is None:
+                    raise RuntimeError("translation task does not exist")
+                rebound = task.provider_id != target_provider_id
+                if rebound:
+                    target_circuit = db.get_provider_circuit(conn, target_provider_id)
+                    use_probe = target_circuit is not None and target_circuit.state != "closed"
+                    new_id = db.rebind_translation_item(
+                        conn,
+                        task_id,
+                        provider_id=target_provider_id,
+                        now=now,
+                        actor=self._admin_actor(),
+                        action="probe" if use_probe else "retry",
+                        reason="MANUAL_REBIND",
+                    )
+                    task = db.translation_task(conn, new_id)
+                else:
+                    circuit = db.get_provider_circuit(conn, task.provider_id)
+                    if circuit is not None and circuit.state != "closed":
+                        task = db.queue_translation_task_probe(
+                            conn,
+                            task.task_id,
+                            now=now,
+                            actor=self._admin_actor(),
+                        )
+                    else:
+                        task = db.queue_translation_task_retry(
+                            conn,
+                            task.task_id,
+                            now=now,
+                            actor=self._admin_actor(),
+                        )
+                if task is None or task.manual_action_id is None:
+                    raise RuntimeError("translation recovery action was not created")
+                action_id = task.manual_action_id
             finally:
                 conn.close()
-        except (RuntimeError, ValueError) as error:
+        except (AdminConfigError, RuntimeError, ValueError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
-        self.server.translation_wakeup_callback()
+        wake = self._wake_translation_actions([action_id])
         self._json(
             202,
             {
                 "ok": True,
                 "status": task.status,
-                "action_id": task.manual_action_id,
+                "action_id": action_id,
+                "target_provider_id": target_provider_id,
+                "rebound": rebound,
+                **wake,
             },
         )
 
     def _handle_translation_retry_edition(self, body: dict[str, Any]) -> None:
-        """刊期级一键恢复:把该刊期全部终态任务批量重新入队(消灭 partial 死端)。"""
+        """Recover every failed item using the manually validated default Provider."""
         if self.server.translation_db_path is None:
             self._json(503, {"error": "翻译任务数据库未配置", "category": "configuration"})
             return
@@ -2644,36 +2801,47 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             self._json(400, {"error": "edition_date 缺失", "category": "lifecycle"})
             return
         try:
+            _, target_provider_id = self._default_translation_target()
+            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC).isoformat()
             conn = db.connect(self.server.translation_db_path)
             try:
-                provider = default_provider(
-                    load_profiles(
-                        self.server.providers_path.parent,
-                        self.server.providers_path.name,
-                    )
-                )
                 counts = db.retry_edition_failed_tasks(
                     conn,
                     edition_date,
-                    now=dt.datetime.now(dt.UTC).isoformat(),
+                    now=now,
                     actor=self._admin_actor(),
-                    provider_id=(
-                        "default-"
-                        + translation_cache_identity(
-                            provider["api_type"],
-                            provider["base_url"],
-                            provider["model"],
-                            provider.get("reasoning_effort", ""),
-                        )[:64]
-                    ),
+                    provider_id=target_provider_id,
                 )
+                action_ids = [
+                    row["action_id"]
+                    for row in conn.execute(
+                        "SELECT a.action_id FROM translation_admin_actions a"
+                        " JOIN translation_tasks t ON t.task_id=a.task_id"
+                        " WHERE t.edition_date=? AND a.status='requested'"
+                        " AND a.requested_at>=? ORDER BY a.requested_at",
+                        (edition_date, now),
+                    )
+                ]
             finally:
                 conn.close()
-        except (RuntimeError, ValueError) as error:
+        except (AdminConfigError, RuntimeError, ValueError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
-        self.server.translation_wakeup_callback()
-        self._json(202, {"ok": True, "queued": counts["queued"], "skipped": counts["skipped"]})
+        wake = self._wake_translation_actions(action_ids) if action_ids else {
+            "wake_sent": False,
+            "wake_degraded": False,
+        }
+        self._json(
+            202,
+            {
+                "ok": True,
+                "queued": counts["queued"],
+                "skipped": counts["skipped"],
+                "target_provider_id": target_provider_id,
+                "action_ids": action_ids,
+                **wake,
+            },
+        )
 
     def _handle_translation_dispatch(self, body: dict[str, Any]) -> None:
         if self.server.translation_db_path is None:
@@ -2749,51 +2917,50 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             return
         try:
             task_id = self._translation_task_body(body, confirm=True)
+            _, target_provider_id = self._default_translation_target()
+            now = dt.datetime.fromtimestamp(self.server.clock(), dt.UTC).isoformat()
             conn = db.connect(self.server.translation_db_path)
             try:
                 task = db.translation_task(conn, task_id)
                 if task is None:
                     raise RuntimeError("translation task does not exist")
-                already_queued = False
-                circuit = db.get_provider_circuit(conn, task.provider_id)
-                if circuit is not None and circuit.state == "half_open":
-                    queued = db.queue_provider_probe(
+                rebound = task.provider_id != target_provider_id
+                if rebound:
+                    new_id = db.rebind_translation_item(
                         conn,
-                        task.provider_id,
                         task_id,
-                        now=dt.datetime.now(dt.UTC).isoformat(),
+                        provider_id=target_provider_id,
+                        now=now,
+                        actor=self._admin_actor(),
+                        action="probe",
+                        reason="MANUAL_REBIND",
+                    )
+                    queued = db.translation_task(conn, new_id)
+                else:
+                    queued = db.queue_translation_task_probe(
+                        conn,
+                        task.task_id,
+                        now=now,
                         actor=self._admin_actor(),
                     )
-                    already_queued = True
-                else:
-                    try:
-                        queued = db.queue_provider_probe(
-                            conn,
-                            task.provider_id,
-                            task_id,
-                            now=dt.datetime.now(dt.UTC).isoformat(),
-                            actor=self._admin_actor(),
-                        )
-                    except RuntimeError as error:
-                        if str(error) != "provider probe is already queued":
-                            raise
-                        queued = db.queued_provider_probe(conn, task.provider_id)
-                        if queued is None:
-                            raise
-                        already_queued = True
+                if queued is None or queued.manual_action_id is None:
+                    raise RuntimeError("provider probe action was not created")
+                action_id = queued.manual_action_id
             finally:
                 conn.close()
-        except (RuntimeError, ValueError) as error:
+        except (AdminConfigError, RuntimeError, ValueError) as error:
             self._json(409, {"error": str(error), "category": "lifecycle"})
             return
-        self.server.translation_wakeup_callback()
+        wake = self._wake_translation_actions([action_id])
         self._json(
             202,
             {
                 "ok": True,
                 "status": queued.status,
-                "already_queued": already_queued,
-                "action_id": queued.manual_action_id,
+                "action_id": action_id,
+                "target_provider_id": target_provider_id,
+                "rebound": rebound,
+                **wake,
             },
         )
 
@@ -3406,11 +3573,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             }
 
     def _handle_default(self, body: dict[str, Any]) -> None:
-        allowed = {"name", "expected_fingerprint", "confirm_untested"}
-        if set(body) - allowed or set(body) - {"confirm_untested"} != {
-            "name",
-            "expected_fingerprint",
-        }:
+        if set(body) != {"name", "expected_fingerprint"}:
             self._json(400, {"error": "设为默认字段无效"})
             return
         name = str(body.get("name", "")).strip()
@@ -3420,7 +3583,6 @@ class PreviewHandler(SimpleHTTPRequestHandler):
         ):
             self._json(400, {"error": "档案配置指纹无效"})
             return
-        confirmation_required = False
         configuration_changed = False
         try:
             data = load_profiles(self.server.project_root, self.server.profiles_file)
@@ -3430,19 +3592,24 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                 return
             if not provider["enabled"]:
                 raise AdminConfigError("只有已启用档案才能设为默认")
-            if not hmac.compare_digest(
-                expected_fingerprint,
-                provider_fingerprint(self.server.project_root, provider),
-            ):
+            fingerprint = provider_fingerprint(self.server.project_root, provider)
+            if not hmac.compare_digest(expected_fingerprint, fingerprint):
                 self._json(409, {"error": "档案已被修改；请刷新后重新确认"})
                 return
             if self._login_required:
                 provider["base_url"] = validate_public_https_target(
                     provider["base_url"], self.server.resolver
                 )
+            if not assert_recent_success(
+                self.server.project_root,
+                provider,
+                max_age_seconds=_TEST_MAX_AGE_SECONDS,
+            ):
+                self._json(409, {"error": "只有最近测试 SUCCESS 的当前配置才能设为默认"})
+                return
 
             def select(item: dict[str, Any]) -> None:
-                nonlocal confirmation_required, configuration_changed
+                nonlocal configuration_changed
                 latest = item["providers"].get(name)
                 if latest is None or not hmac.compare_digest(
                     expected_fingerprint,
@@ -3452,14 +3619,12 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                     raise AdminConfigError("档案已被修改或删除；请刷新后重新确认")
                 if not latest["enabled"]:
                     raise AdminConfigError("只有已启用档案才能设为默认")
-                tested = assert_recent_success(
+                if not assert_recent_success(
                     self.server.project_root,
                     latest,
                     max_age_seconds=_TEST_MAX_AGE_SECONDS,
-                )
-                if not tested and body.get("confirm_untested") is not True:
-                    confirmation_required = True
-                    raise AdminConfigError("该档案尚无未过期的成功测试；确认风险后重试")
+                ):
+                    raise AdminConfigError("当前配置的成功测试已失效；请重新测试")
                 for candidate in item["providers"].values():
                     candidate["is_default"] = candidate["name"] == name
 
@@ -3471,15 +3636,7 @@ class PreviewHandler(SimpleHTTPRequestHandler):
             selected = default_provider(updated)
             write_env_local(self.server.project_root, selected, self.server.env_file)
         except AdminConfigError as error:
-            if confirmation_required:
-                self._json(
-                    409,
-                    {"error": str(error), "confirmation_required": True},
-                )
-            elif configuration_changed:
-                self._json(409, {"error": str(error)})
-            else:
-                self._json(400, {"error": str(error)})
+            self._json(409 if configuration_changed else 400, {"error": str(error)})
             return
         self._json(200, {"ok": True, "active": name})
 
@@ -3891,6 +4048,16 @@ button[aria-busy="true"]::after {
 .translation-provider strong, .translation-provider .meta { display: block; overflow-wrap: anywhere; }
 .translation-provider button { align-self: center; min-width: 7.5rem; }
 .translation-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: .8rem; }
+.translation-worker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .55rem; margin: .75rem 0; }
+.translation-worker-card { border: 1px solid var(--line); background: var(--sheet); padding: .65rem; min-width: 0; }
+.translation-worker-card strong, .translation-worker-card small { display: block; overflow-wrap: anywhere; }
+.translation-worker-card small { color: var(--muted); }
+.translation-progress-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .55rem; margin: .7rem 0; }
+.translation-progress-block { border: 1px solid var(--line); background: var(--sheet); padding: .6rem; }
+.progress-track { width: 100%; height: .62rem; background: #e7e2d7; overflow: hidden; margin-top: .28rem; }
+.progress-fill { height: 100%; background: var(--cinnabar); min-width: 0; transition: width .2s ease; }
+.task-progress { min-width: 9rem; }
+.task-progress small { display: block; color: var(--muted); margin-top: .15rem; }
 .segmented { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .7rem; }
 .segmented button { min-height: 2.15rem; padding: .35rem .65rem; background: transparent; }
 .segmented button[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
@@ -3956,6 +4123,7 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
   .span2 { grid-column: auto; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .translation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .translation-progress-grid { grid-template-columns: 1fr; }
   .translation-head { align-items: start; }
   .translation-provider { grid-template-columns: 1fr; }
   .translation-provider button { width: 100%; }
@@ -4252,6 +4420,11 @@ th { color: var(--muted); font-size: .72rem; font-weight: 600; white-space: nowr
       </div>
     </div>
     <div id="translation-provider" class="translation-provider"></div>
+    <section class="panel" aria-labelledby="translation-workers-heading">
+      <h3 id="translation-workers-heading">Worker 运行状态</h3>
+      <div id="translation-workers" class="translation-worker-grid" aria-live="polite"></div>
+    </section>
+    <div id="translation-edition-progress" class="translation-progress-grid"></div>
     <div id="translation-stats" class="stats translation-stats"></div>
     <div class="segmented" role="group" aria-label="翻译任务筛选">
       <button type="button" data-translation-filter="all" aria-pressed="true">全部</button>
@@ -4536,23 +4709,9 @@ field("default").addEventListener("click", function () {
   var name = field("f-name").value;
   var expected = providers[name] && providers[name].configuration_fingerprint;
   api("/admin/api/providers/default", {name: name, expected_fingerprint: expected}).then(function () {
-    say("已设为唯一默认档案。", true);
+    say("已设为唯一默认档案；后续人工恢复将使用该 Provider。", true);
     load();
-  }).catch(function (error) {
-    var confirmation = error.data && error.data.confirmation_required;
-    if (confirmation && confirm("测试未成功或已过期。仍要设为默认吗？")) {
-      api("/admin/api/providers/default", {
-        name: name,
-        expected_fingerprint: expected,
-        confirm_untested: true
-      }).then(function () {
-        say("已确认风险并设为默认。", true);
-        load();
-      }).catch(function (second) { say(second.message, false); });
-    } else {
-      say(error.message, false);
-    }
-  });
+  }).catch(function (error) { say(error.message, false); });
 });
 field("delete").addEventListener("click", function () {
   var name = field("f-name").value;
@@ -5377,6 +5536,56 @@ function secondsUntil(value) {
   if (!value) { return 0; }
   return Math.max(0, Math.ceil((new Date(value).getTime() - Date.now()) / 1000));
 }
+function progressNode(percent, label) {
+  var node = document.createElement("div"); node.className = "task-progress";
+  var track = document.createElement("div"); track.className = "progress-track";
+  track.setAttribute("role", "progressbar"); track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", "100"); track.setAttribute("aria-valuenow", String(percent));
+  var fill = document.createElement("div"); fill.className = "progress-fill";
+  fill.style.width = Math.max(0, Math.min(100, percent)) + "%";
+  track.appendChild(fill); node.appendChild(track);
+  addText(node, "small", label || (percent + "%"));
+  return node;
+}
+function renderWorkerCards(workers) {
+  var box = field("translation-workers"); box.replaceChildren();
+  if (!workers || !workers.length) {
+    addText(box, "p", "暂无 Worker 心跳；部署 T32 后运行中的 Worker 会自动登记。", "meta");
+    return;
+  }
+  workers.forEach(function (worker) {
+    var card = document.createElement("article"); card.className = "translation-worker-card";
+    addText(card, "strong", worker.worker_key + " · " + worker.state);
+    addText(card, "small", worker.execution_kind + " · PID " + worker.pid +
+      (worker.thread_name ? " · " + worker.thread_name : ""));
+    if (worker.task_id) { addText(card, "small", "Task " + worker.task_id.slice(0, 12)); }
+    if (worker.provider_id) { addText(card, "small", "Provider " + worker.provider_id); }
+    addText(card, "small", "心跳 " + worker.heartbeat_age_seconds + " 秒前");
+    if (worker.next_wakeup_at) { addText(card, "small", "下次唤醒 " + timeText(worker.next_wakeup_at)); }
+    if (worker.last_error_code) { addText(card, "small", "错误 " + worker.last_error_code); }
+    box.appendChild(card);
+  });
+}
+function renderEditionProgress(edition) {
+  var box = field("translation-edition-progress"); box.replaceChildren();
+  if (!edition || !edition.target_count) { return; }
+  [["翻译完成度", edition.succeeded_count], ["上线完成度", edition.online_count]].forEach(function (entry) {
+    var block = document.createElement("div"); block.className = "translation-progress-block";
+    var percent = Math.round(100 * entry[1] / edition.target_count);
+    addText(block, "strong", entry[0] + " · " + entry[1] + "/" + edition.target_count);
+    block.appendChild(progressNode(percent, percent + "%")); box.appendChild(block);
+  });
+}
+function translationActionNode(item) {
+  var node = document.createElement("div"); node.className = "translation-stage";
+  if (!item.action) { addText(node, "span", "—"); return node; }
+  var action = item.action;
+  addText(node, "strong", action.type + " · " + action.status);
+  addText(node, "small", action.wake_sent_at ? "唤醒已发送" : "等待唤醒记录");
+  addText(node, "small", action.claimed_at ? "Worker 已领取" : "Worker 尚未领取");
+  if (action.result_code) { addText(node, "small", action.result_code); }
+  return node;
+}
 function translationStageNode(item) {
   var node = document.createElement("div"); node.className = "translation-stage";
   addText(node, "strong", translationStageLabels[item.stage] || item.stage);
@@ -5436,7 +5645,11 @@ function translationMatches(item) {
 function queueTranslationRetry(item, action) {
   setBusy(action, true);
   api("/admin/api/translations/retry", {task_id: item.task_id})
-    .then(function () { say("单篇重试已排队，等待 worker 调度。", true); return loadTranslations(); })
+    .then(function (result) {
+      say(result.wake_degraded ? "重试已持久化；即时唤醒失败，fallback 将自动接管。" :
+        "已使用当前默认 Provider 排队重试。", true);
+      return loadTranslations();
+    })
     .catch(function (error) {
       if (error.message === "translation task is not retryable") {
         say("任务状态已变化，正在刷新翻译列表。", true);
@@ -5451,7 +5664,8 @@ function queueTranslationRetryEdition(item, action) {
   setBusy(action, true);
   api("/admin/api/translations/retry-edition", {edition_date: item.date, confirm: true})
     .then(function (result) {
-      say("已重新入队 " + result.queued + " 篇（跳过 " + result.skipped + " 篇），等待 worker 调度。", true);
+      say("已使用当前默认 Provider 恢复 " + result.queued + " 篇（跳过 " + result.skipped + " 篇）。" +
+        (result.wake_degraded ? " 即时唤醒失败，fallback 将自动接管。" : ""), true);
       return loadTranslations();
     })
     .catch(function (error) { say(error.message, false); })
@@ -5488,7 +5702,8 @@ function queueTranslationProbe(item, action) {
   setBusy(action, true);
   api("/admin/api/translations/probe", {task_id: item.task_id, confirm: true})
     .then(function (result) {
-      say(result.already_queued ? "探测已在队列，已重新唤醒 worker。" : "受控探测已排队。", true);
+      say(result.wake_degraded ? "探测已持久化；即时唤醒失败，fallback 将自动接管。" :
+        "已使用当前默认 Provider 提交受控探测。", true);
       return loadTranslations();
     })
     .catch(function (error) { say(error.message, false); })
@@ -5529,13 +5744,16 @@ function renderTranslations(data) {
       " · 更新 " + timeText(edition.last_updated) +
       (!dates.length ? " · 当前无待处理任务，显示最近一期结果" : "") :
     "暂无自动化刊期";
+  renderWorkerCards(data.workers || []);
+  renderEditionProgress(edition);
   var provider = field("translation-provider"); provider.replaceChildren();
   var providerCopy = document.createElement("div");
   addText(providerCopy, "strong", data.provider.id ? data.provider.id + " · " + data.provider.state : "provider 未建立任务");
   addText(
     providerCopy,
     "span",
-    "执行 " + data.provider.current_concurrency +
+    "当前默认 " + (data.default_provider_id || "未验证") +
+      " · 执行 " + data.provider.current_concurrency +
       " · 待调度 " + data.provider.waiting_dispatch_count +
       " · 退避 " + data.provider.waiting_backoff_count +
       " · 待终止 " + data.provider.waiting_cancel_count +
@@ -5548,7 +5766,7 @@ function renderTranslations(data) {
     "meta"
   );
   provider.appendChild(providerCopy);
-  var probeButton = button("立即探测", function (event) {
+  var probeButton = button("立即探测当前默认", function (event) {
     queueTranslationProbe(
       data.probe_task_id ? {task_id: data.probe_task_id} : null,
       event.currentTarget
@@ -5558,7 +5776,7 @@ function renderTranslations(data) {
   probeButton.title = data.probe_task_id ? "执行一次正式单篇探测" : "当前无需探测";
   provider.appendChild(probeButton);
   if (edition && edition.retry_edition_available) {
-    var retryEditionButton = button("重试全部失败篇", function (event) {
+    var retryEditionButton = button("使用当前默认接口恢复本期", function (event) {
       queueTranslationRetryEdition(edition, event.currentTarget);
     });
     retryEditionButton.title = "批量恢复该刊期的终态任务,消除 partial 停滞";
@@ -5585,7 +5803,7 @@ function renderTranslations(data) {
     }
     if ((item.available_actions || []).includes("retry")) {
       actions.appendChild(button(
-        item.status === "configuration_blocked" ? "解除阻断并重试" : "立即重试",
+        item.status === "configuration_blocked" ? "使用当前默认接口恢复" : "使用当前默认接口重试",
         function (event) { queueTranslationRetry(item, event.currentTarget); }
       ));
     }
@@ -5607,10 +5825,13 @@ function renderTranslations(data) {
     if (!actions.childNodes.length) { addText(actions, "span", "—", "meta"); }
     return [
       title,
+      item.provider_id,
       translationStatusLabels[item.status] || item.status,
-      translationStageNode(item),
+      progressNode(item.progress_percent || 0, (item.progress_percent || 0) + "% · " +
+        (translationStageLabels[item.stage] || item.stage)),
       item.attempt_count,
       translationErrorNode(item),
+      translationActionNode(item),
       translationNextNode(item),
       item.build_status,
       actions
@@ -5618,7 +5839,7 @@ function renderTranslations(data) {
   });
   var list = field("translation-list"); list.replaceChildren();
   if (!rows.length) { addText(list, "p", "当前筛选无任务。", "meta"); return; }
-  list.appendChild(table(["文章", "状态", "阶段", "尝试", "错误代码", "下一次执行", "上线", "操作"], rows));
+  list.appendChild(table(["文章", "Provider", "状态", "进度", "尝试", "错误代码", "Action", "下一次执行", "上线", "操作"], rows));
 }
 function loadTranslations() {
   var query = translationEdition ? "?edition=" + encodeURIComponent(translationEdition) : "";

@@ -223,7 +223,7 @@ fail closed。unit 保持 `enabled` 不影响部署，升级结束后 bootstrap 
 
 ```bash
 cd /srv/news-digest
-sudo systemctl stop news-digest.timer news-digest-wakeup.path news-digest-resume.service
+sudo systemctl stop news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer news-digest-resume.service
 sudo systemctl stop news-digest-backup.timer
 if sudo systemctl is-active --quiet news-digest.service; then
   echo 'worker 仍在运行；等待其结束后重新执行本步骤' >&2
@@ -298,7 +298,7 @@ curl -fsS http://127.0.0.1:8618/healthz        # 期望输出 ok
 curl -fsS http://127.0.0.1:8620/healthz        # 公开读者站点，期望输出 ok
 curl -fsS http://127.0.0.1:8619/admin/ | head -3   # 期望看到登录页 HTML（认证在应用层，回环直连同样要登录）
 sudo docker compose ps                         # web healthy，site/admin running
-sudo systemctl start news-digest.timer news-digest-wakeup.path
+sudo systemctl start news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer
 ```
 
 v1.4.0 首次启用账号与付费阅读时，先在服务器
@@ -358,11 +358,11 @@ sudo docker inspect --format '{{index .Config.Labels "org.opencontainers.image.r
 ## 7. 安装 systemd 定时任务
 
 ```bash
-sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer /etc/systemd/system/
+sudo cp news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest-wakeup.timer news-digest.timer news-digest-backup.service news-digest-backup.timer /etc/systemd/system/
 command -v docker    # 若不是 /usr/bin/docker，同步修改 service 中 ExecStart 的绝对路径
 sudo systemctl daemon-reload
 sudo systemctl disable --now news-digest-backup.timer
-sudo systemctl enable --now news-digest.timer news-digest-wakeup.path
+sudo systemctl enable --now news-digest.timer news-digest-wakeup.path news-digest-wakeup.timer
 systemctl list-timers news-digest.timer        # 核对下次触发时间为 08:00（Asia/Shanghai）
 sudo systemctl start news-digest.service       # 手动触发一次，验证 timer→service→容器链路
 journalctl -u news-digest.service -n 50        # 查看运行日志

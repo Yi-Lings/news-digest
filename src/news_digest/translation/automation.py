@@ -6,6 +6,7 @@ article bodies, provider endpoints, and raw responses never enter automation sta
 
 import datetime as dt
 import json
+import logging
 import math
 import secrets
 import sqlite3
@@ -186,9 +187,10 @@ def claim_translation_work(
             owner=owner,
             now=now,
             lease_seconds=lease_seconds,
-            manual=manual_retry,
+            manual=manual_retry or manual_probe,
+            probe=manual_probe,
         )
-        return TranslationWorkClaim(claimed)
+        return TranslationWorkClaim(claimed, is_probe=manual_probe and claimed is not None)
     if circuit.state == "configuration_blocked" and not manual_probe:
         return TranslationWorkClaim(None, blocked_reason="CONFIGURATION_INVALID")
     if circuit.state == "half_open":
@@ -506,6 +508,23 @@ class TranslationAutomationRunner:
 
             accepted = []
 
+            def persist_stage(stage: str, task_id=candidate.task_id) -> None:
+                stage_conn = db.connect(self.database)
+                try:
+                    db.update_translation_task_progress(
+                        stage_conn,
+                        task_id,
+                        owner=owner,
+                        stage=stage,
+                        now=self._completion_timestamp(now),
+                    )
+                except sqlite3.Error:
+                    logging.getLogger(__name__).warning(
+                        "translation task stage update failed", exc_info=True
+                    )
+                finally:
+                    stage_conn.close()
+
             def audit_request(
                 number,
                 target,
@@ -541,6 +560,7 @@ class TranslationAutomationRunner:
                     frozen_sentences=frozen_sentences,
                     on_result=accepted.append,
                     on_request=audit_request,
+                    on_stage=persist_stage,
                     force=force,
                 )
             except Exception as error:
