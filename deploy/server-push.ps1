@@ -120,6 +120,7 @@ $Files = @(
     (Join-Path $DeployDir "systemd\news-digest.service"),
     (Join-Path $DeployDir "systemd\news-digest-resume.service"),
     (Join-Path $DeployDir "systemd\news-digest-wakeup.path"),
+    (Join-Path $DeployDir "systemd\news-digest-wakeup.timer"),
     (Join-Path $DeployDir "systemd\news-digest.timer"),
     (Join-Path $DeployDir "systemd\news-digest-backup.service"),
     (Join-Path $DeployDir "systemd\news-digest-backup.timer"),
@@ -185,7 +186,7 @@ Stop-OnError $LASTEXITCODE "scp upload"
 
 # Strip CR from every uploaded text file: a Windows checkout may carry CRLF,
 # and a trailing CR breaks bash scripts, systemd units and nginx conf files.
-& ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
+& ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest-wakeup.timer news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
 Stop-OnError $LASTEXITCODE "normalize line endings"
 
 # These values are allow-list validated above before entering the remote POSIX shell.

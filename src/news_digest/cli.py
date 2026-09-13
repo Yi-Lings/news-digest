@@ -1,14 +1,130 @@
 """Command-line entry point."""
 
 import argparse
+import datetime as dt
 import os
+import threading
 import time
 import types
+import uuid
 from pathlib import Path
 
 from news_digest import __version__
 
 _AUTOMATION_ACTION_REQUIRED = 10
+
+
+class _ProcessHeartbeat:
+    """Persist a short-lived automation process heartbeat without owning business state."""
+
+    def __init__(
+        self,
+        database: Path,
+        *,
+        worker_key: str,
+        worker_type: str,
+        owner: str,
+        edition_date: str | None = None,
+        provider_id: str | None = None,
+    ) -> None:
+        self.database = database
+        self.worker_key = worker_key
+        self.worker_type = worker_type
+        self.owner = owner
+        self.instance_id = uuid.uuid4().hex
+        self.edition_date = edition_date
+        self.provider_id = provider_id
+        self.state = "starting"
+        self.next_wakeup_at: str | None = None
+        self.last_error_code: str | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name=f"{worker_key}-heartbeat",
+            daemon=True,
+        )
+
+    def _write(self) -> None:
+        from news_digest.storage import db
+
+        with self._lock:
+            state = self.state
+            edition_date = self.edition_date
+            provider_id = self.provider_id
+            next_wakeup_at = self.next_wakeup_at
+            last_error_code = self.last_error_code
+        conn = None
+        try:
+            conn = db.connect(self.database)
+            active = db.translation_task_for_lease_owner(conn, self.owner)
+            task_id = active.task_id if active is not None else None
+            action_id = active.manual_action_id if active is not None else None
+            if active is not None:
+                state = "running"
+                edition_date = active.edition_date
+                provider_id = active.provider_id
+            db.upsert_worker_runtime_status(
+                conn,
+                worker_key=self.worker_key,
+                instance_id=self.instance_id,
+                worker_type=self.worker_type,
+                execution_kind="process",
+                pid=os.getpid(),
+                thread_name=None,
+                state=state,
+                now=dt.datetime.now(dt.UTC).isoformat(),
+                edition_date=edition_date,
+                task_id=task_id,
+                action_id=action_id,
+                provider_id=provider_id,
+                next_wakeup_at=next_wakeup_at,
+                last_error_code=last_error_code,
+                revision=os.environ.get("NEWS_DEPLOY_REVISION") or None,
+            )
+        except Exception:  # heartbeat must never terminate translation work
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def start(self) -> "_ProcessHeartbeat":
+        self._write()
+        self._thread.start()
+        return self
+
+    def update(
+        self,
+        state: str,
+        *,
+        edition_date: str | None = None,
+        provider_id: str | None = None,
+        next_wakeup_at: str | None = None,
+        last_error_code: str | None = None,
+    ) -> None:
+        with self._lock:
+            self.state = state
+            if edition_date is not None:
+                self.edition_date = edition_date
+            if provider_id is not None:
+                self.provider_id = provider_id
+            self.next_wakeup_at = next_wakeup_at
+            self.last_error_code = last_error_code
+        self._write()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(5):
+            self._write()
+
+    def close(self, *, state: str = "idle", last_error_code: str | None = None) -> None:
+        self._stop.set()
+        with self._lock:
+            self.state = state
+            self.next_wakeup_at = None
+            self.last_error_code = last_error_code
+        self._write()
+        if self._thread.is_alive():
+            self._thread.join(timeout=0.2)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -597,9 +713,10 @@ def _run_translate(date: str | None, limit: int | None, yes: bool, redo: frozens
     def clock():
         return dt.datetime.now(dt.UTC)
 
+    runtime_provider_id = f"default-{translator.cache_identity[:64]}"
     runner = TranslationAutomationRunner(
         database=fetch_config.database,
-        provider_id=f"default-{translator.cache_identity[:64]}",
+        provider_id=runtime_provider_id,
         translator=translator,
         cache_dir=config.cache_dir,
         build_callback=lambda _: "",
@@ -897,9 +1014,10 @@ def _run_automation_daily(
 
     clock = clock or (lambda: dt.datetime.now(dt.UTC))
     sleep = sleep or time.sleep
+    runtime_provider_id = f"default-{translator.cache_identity[:64]}"
     runner = TranslationAutomationRunner(
         database=fetch_config.database,
-        provider_id=f"default-{translator.cache_identity[:64]}",
+        provider_id=runtime_provider_id,
         translator=translator,
         cache_dir=translation_config.cache_dir,
         build_callback=build_callback,
@@ -909,7 +1027,16 @@ def _run_automation_daily(
             build_config.output_root, edition_date=date,
         ).edition,
     )
-    owner = f"daily-{os.getpid()}"
+    worker_role = "automation-resume" if resume else "automation-daily"
+    owner = f"{worker_role}-{os.getpid()}"
+    heartbeat = _ProcessHeartbeat(
+        fetch_config.database,
+        worker_key=worker_role,
+        worker_type=worker_role,
+        owner=owner,
+        edition_date=date,
+        provider_id=runtime_provider_id,
+    ).start()
     recovery_conn = db.connect(fetch_config.database)
     try:
         # The daily service is protected by the same worker flock as resume;
@@ -927,6 +1054,9 @@ def _run_automation_daily(
     try:
         while True:
             now = clock()
+            heartbeat.update(
+                "idle", edition_date=date, provider_id=runtime_provider_id
+            )
             # 每轮自愈:过期租约回收、滞留动作超时、死亡投递认领回收。
             # 单进程串行循环中不会误伤在跑任务;唤醒链断裂时任务回到自然态。
             maintenance_conn = db.connect(fetch_config.database)
@@ -1018,14 +1148,27 @@ def _run_automation_daily(
                     0.1,
                     (dt.datetime.fromisoformat(wake_at) - wake_now).total_seconds(),
                 )
+                heartbeat.update(
+                    "waiting_retry",
+                    edition_date=date,
+                    provider_id=runner.provider_id,
+                    next_wakeup_at=wake_at,
+                )
                 # Do not hold the worker in a long uninterruptible sleep; this
                 # keeps manual Admin wakeups responsive while preserving the
                 # persisted deadline as the source of truth.
                 sleep(min(delay, 60.0))
     except (DeliveryServiceError, KeyboardInterrupt, ValueError) as error:
+        heartbeat.update(
+            "error",
+            edition_date=date,
+            provider_id=runner.provider_id,
+            last_error_code=type(error).__name__,
+        )
         print(f"自动化已停止：{error}")
         return 130 if isinstance(error, KeyboardInterrupt) else _AUTOMATION_ACTION_REQUIRED
     finally:
+        heartbeat.close()
         translator.close()
 
 
@@ -1043,11 +1186,13 @@ def _run_automation_resume(yes: bool) -> int:
     try:
         # The systemd flock guarantees the previous worker is no longer
         # running before this process takes ownership of stale leases.
+        now = dt.datetime.now(dt.UTC).isoformat()
         db.recover_interrupted_translation_tasks(
             conn,
-            now=dt.datetime.now(dt.UTC).isoformat(),
+            now=now,
             process_terminated=True,
         )
+        db.run_worker_maintenance(conn, now=now)
         unfinished = db.unfinished_automation_edition_dates(conn)
     finally:
         conn.close()

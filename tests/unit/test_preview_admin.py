@@ -1169,13 +1169,16 @@ def test_save_edit_key_blank_and_provider_lifecycle(prod_server):
     assert stored["model"] == "new-model"
 
     status, data = _post(port, "/admin/api/providers/default", _default_body(root), auth)
-    assert status == 409 and data["confirmation_required"] is True
-    status, data = _post(
+    assert status == 409
+    assert "SUCCESS" in data["error"]
+    status, _ = _post(
         port,
-        "/admin/api/providers/default",
-        _default_body(root, confirm=True),
+        "/admin/api/providers/test",
+        {**FORM, "base_url": "https://new.example.com", "model": "new-model"},
         auth,
     )
+    assert status == 200
+    status, data = _post(port, "/admin/api/providers/default", _default_body(root), auth)
     assert status == 200 and data["active"] == "claude"
     assert default_provider(load_profiles(root, "providers.json"))["name"] == "claude"
     env = (root / ".env").read_text(encoding="utf-8")
@@ -1243,7 +1246,9 @@ def test_default_rejects_profile_changed_between_precheck_and_locked_update(
 ):
     root, port, _, _ = prod_server
     auth = _login(port)
-    body = _default_body(root, confirm=True)
+    status, _ = _post(port, "/admin/api/providers/test", FORM, auth)
+    assert status == 200
+    body = _default_body(root)
 
     def racing_update(project_root, transform, filename):
         def edit(data):

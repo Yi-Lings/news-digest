@@ -1,0 +1,14 @@
+# Fallback wake-up for durable Admin translation actions.
+# PathChanged remains the fast path; this timer guarantees eventual pickup
+# if the filesystem notification or one resume start is missed.
+[Unit]
+Description=Fallback wake for queued news-digest translation actions
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=news-digest-resume.service
+
+[Install]
+WantedBy=timers.target

@@ -118,6 +118,7 @@ def translate_article_once(
     frozen_sentences: list[list[str]] | None = None,
     on_result: Callable[[TranslationResult], None] | None = None,
     on_request: Callable[[int, str | None, str, float], None] | None = None,
+    on_stage: Callable[[str], None] | None = None,
     force: bool = False,
 ) -> tuple[Article, bool]:
     """Repair invalid sentence slots within the article's single request/time budget."""
@@ -135,6 +136,8 @@ def translate_article_once(
         except (InvalidTranslation, ValueError):
             pass
         else:
+            if on_stage is not None:
+                on_stage("saving_translation")
             if on_result is not None:
                 on_result(result)
             return apply_translation(article, result, translator.label), True
@@ -161,6 +164,8 @@ def translate_article_once(
         )
         target = last_error.sentence_failures[0] if local else None
         target_id = f"P{target[0]}S{target[1]}" if target else None
+        if on_stage is not None:
+            on_stage("waiting_model")
         if on_request is not None:
             on_request(request_number, target_id, "started", time.monotonic() - started)
         outcome = "failed"
@@ -212,10 +217,14 @@ def translate_article_once(
                 else:
                     raw = translator.translate(article)
             _check_cancel(cancel_requested)
+            if on_stage is not None:
+                on_stage("receiving_response")
             if time.monotonic() - started >= budget:
                 raise TranslationError(
                     "Translation execution deadline exceeded", category="total_timeout"
                 )
+            if on_stage is not None:
+                on_stage("schema_validation")
             result = parse_translation(
                 raw,
                 len(article.paragraphs),
@@ -249,6 +258,8 @@ def translate_article_once(
     if result is None:
         raise last_error or InvalidTranslation("Translation request budget exhausted")
     _check_cancel(cancel_requested)
+    if on_stage is not None:
+        on_stage("saving_translation")
     if on_result is not None:
         on_result(result)
     _write_json_cache(cache_file, result_to_dict(result))
