@@ -1,0 +1,119 @@
+name: release-t32-once
+
+on:
+  push:
+    branches: [plan/t32-provider-recovery-worker-console]
+    paths:
+      - .github/workflows/release-t32-once.yml
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  TARGET_SHA: 22315fda72dd74794f44c3538c0968dce18c8b6e
+  TAG: v1.4.0t32
+  PLATFORMS: linux/amd64
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout verified main commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+
+      - name: Verify exact source commit
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+
+      - name: Create immutable candidate tag
+        run: |
+          existing="$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')"
+          if [ -n "$existing" ] && [ "$existing" != "$TARGET_SHA" ]; then
+            echo "tag $TAG already points to $existing, expected $TARGET_SHA" >&2
+            exit 1
+          fi
+          if [ -z "$existing" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG" "$TARGET_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Compute image prefix
+        id: vars
+        run: echo "image_prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push worker
+        id: worker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.worker
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-worker:${{ env.TAG }}
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-worker:sha-${{ env.TARGET_SHA }}
+          build-args: |
+            SOURCE_URL=https://github.com/${{ github.repository }}
+            VCS_REF=${{ env.TARGET_SHA }}
+            VERSION=${{ env.TAG }}
+
+      - name: Build and push web
+        id: web
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.web
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-web:${{ env.TAG }}
+            ${{ steps.vars.outputs.image_prefix }}/news-digest-web:sha-${{ env.TARGET_SHA }}
+          build-args: |
+            SOURCE_URL=https://github.com/${{ github.repository }}
+            VCS_REF=${{ env.TARGET_SHA }}
+            VERSION=${{ env.TAG }}
+
+      - name: Build deployment bundle
+        run: |
+          cat > digests.env <<EOF
+          ND_VERSION=$TAG
+          ND_WORKER_DIGEST=${{ steps.worker.outputs.digest }}
+          ND_WEB_DIGEST=${{ steps.web.outputs.digest }}
+          EOF
+          cp digests.env deploy/digests.env
+          tar -czf news-digest-deploy.tgz \
+            --transform='s|^deploy/systemd/|deploy/|;s|^deploy/nginx/|deploy/|' \
+            --exclude='deploy/server-push.ps1' \
+            --exclude='deploy/deploy-all.ps1' \
+            deploy/
+          sha256sum news-digest-deploy.tgz > news-digest-deploy.tgz.sha256
+
+      - name: Create or refresh prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --latest=false
+            gh release upload "$TAG" news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env --clobber
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --notes "T32 verified production candidate for commit $TARGET_SHA." \
+              --prerelease --latest=false \
+              news-digest-deploy.tgz news-digest-deploy.tgz.sha256 digests.env
+          fi
