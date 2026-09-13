@@ -3,15 +3,14 @@
 Description=Resume queued news-digest translation automation
 After=network-online.target docker.service
 Requires=docker.service
-StartLimitIntervalSec=15min
-StartLimitBurst=4
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flock -E 75 -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
 # Same bounded multi-attempt budget as the daily worker.
 TimeoutStartSec=24h
-SuccessExitStatus=10
-Restart=on-failure
-RestartPreventExitStatus=10
-RestartSec=15s
+SuccessExitStatus=10 75
+# Retries are owned by news-digest-wakeup.timer; avoid service-level restart storms
+# and do not let frequent successful fallback invocations consume a start-limit budget.
+Restart=no

@@ -464,10 +464,11 @@ def test_admin_translation_actions_activate_a_resume_worker():
     assert "OnFailure=news-digest-resume.service" in daily_service
     assert "/usr/bin/flock /run/news-digest-worker.lock" in daily_service
     assert "resume-automation --yes" in resume_service
-    assert "Restart=on-failure" in resume_service
+    assert "Restart=no" in resume_service
+    assert "StartLimitIntervalSec=0" in resume_service
     assert "SuccessExitStatus=10" in daily_service
-    assert "SuccessExitStatus=10" in resume_service
-    assert "RestartPreventExitStatus=10" in resume_service
+    assert "SuccessExitStatus=10 75" in resume_service
+    assert "RestartPreventExitStatus=10" not in resume_service
     assert "TimeoutStartSec=24h" in daily_service
     assert "TimeoutStartSec=24h" in resume_service
     assert "/usr/bin/flock -E 75 -n /run/news-digest-worker.lock" in resume_service
