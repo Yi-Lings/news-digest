@@ -89,6 +89,7 @@ def safe_get(
     allowed_domains: tuple[str, ...],
     *,
     skip_ip_check: bool = False,
+    response_info: dict[str, str] | None = None,
 ) -> bytes:
     """GET with per-hop validation, redirect cap, and response size cap.
 
@@ -114,7 +115,10 @@ def safe_get(
                     if received > MAX_BYTES:
                         raise FetchError(f"响应超过大小上限 {MAX_BYTES}B：{current}")
                     chunks.append(chunk)
+                if response_info is not None:
+                    response_info["content_type"] = response.headers.get("content-type", "")[:128]
                 return b"".join(chunks)
         except httpx.HTTPError as error:
             raise FetchError(f"请求失败：{current}（{error.__class__.__name__}）") from error
     raise FetchError(f"重定向超过 {MAX_REDIRECTS} 次：{url}")
+
