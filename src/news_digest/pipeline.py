@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import shutil
+import time
 import zoneinfo
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -39,6 +40,7 @@ from news_digest.storage import db
 from news_digest.textutil import slugify
 
 _STATIC_DIR = Path(__file__).parent / "static"
+_FRANCE24_RETRY_DELAYS_SECONDS = (120, 300)  # RSS CDN may cache malformed content for 5 min.
 
 
 # ── 真实抓取 ──────────────────────────────────────────────────────────────
@@ -84,10 +86,34 @@ def _collect_candidates(
         }
         report.diagnostics[source.key] = details
         try:
-            raw = safe_get(
-                client, source.feed_url, source.allowed_domains, skip_ip_check=skip_ip_check
-            )
-            parsed = parse_feed(raw, source, diagnostics=details)
+            # Retry only France24's observed HTTP-200-but-unparseable RSS. Avoid
+            # delaying or changing failure behavior for all other news sources.
+            retry_delays = _FRANCE24_RETRY_DELAYS_SECONDS if source.key == "france24" else ()
+            for attempt in range(1, len(retry_delays) + 2):
+                response_info: dict[str, str] = {}
+                raw = safe_get(
+                    client,
+                    source.feed_url,
+                    source.allowed_domains,
+                    skip_ip_check=skip_ip_check,
+                    response_info=response_info,
+                )
+                parsed = parse_feed(raw, source, diagnostics=details)
+                details["feed_attempts"] = attempt
+                if not (details.get("parse_warning") and not parsed):
+                    break
+                if source.key == "france24":
+                    details.setdefault("feed_bad_samples", []).append(
+                        {
+                            "attempt": attempt,
+                            "bytes": len(raw),
+                            "sha256": hashlib.sha256(raw).hexdigest(),
+                            "content_type": response_info.get("content_type", ""),
+                            "prefix": raw[:1024].decode("utf-8", errors="replace"),
+                        }
+                    )
+                if attempt <= len(retry_delays):
+                    time.sleep(retry_delays[attempt - 1])
             details["future"] = sum(
                 datetime.datetime.fromisoformat(c.published_at_utc)
                 > now + datetime.timedelta(minutes=5)
@@ -538,3 +564,4 @@ def _validate_build(build_dir: Path, *, require_manifest: bool = False) -> None:
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"构建产物缺失，已中止发布：{missing}")
+
