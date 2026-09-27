@@ -3,13 +3,14 @@
 import hashlib
 import ipaddress
 import json
+import multiprocessing
 import queue
 import socket
 import ssl
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -34,6 +35,7 @@ ApiType = Literal["openai_chat", "anthropic_messages"]
 _MAX_RETRY_AFTER_SECONDS = 5.0
 _PROBE_MAX_TOKENS = 8
 _CONNECT_TIMEOUT_SECONDS = 10.0
+_DNS_TIMEOUT_SECONDS = 10.0
 _TERMINATION_GRACE_SECONDS = 1.0
 _CANCEL_POLL_SECONDS = 0.1
 
@@ -67,6 +69,18 @@ class _RequestSpec:
     payload: dict[str, Any]
 
 
+@dataclass
+class _RequestTiming:
+    started_at: float
+    deadline: float
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    dns_ms: int | None = None
+    first_byte_ms: int | None = None
+    stream_ms: int | None = None
+    http_status: int | None = None
+
+
 def _default_resolver(hostname: str, port: int) -> Iterable[str]:
     return {
         sockaddr[0]
@@ -76,6 +90,70 @@ def _default_resolver(hostname: str, port: int) -> Iterable[str]:
             type=socket.SOCK_STREAM,
         )
     }
+
+
+def _dns_child(send, hostname: str, port: int, resolver) -> None:
+    try:
+        send.send((True, tuple(resolver(hostname, port))))
+    except (OSError, ValueError):
+        try:
+            send.send((False, ()))
+        except OSError:
+            pass
+    finally:
+        send.close()
+
+
+def _bounded_default_resolver(
+    hostname: str,
+    port: int,
+    timeout_seconds: float,
+    cancelled: threading.Event | None,
+) -> Iterable[str]:
+    """Isolate a blocking OS resolver so a timed-out lookup cannot retain a request slot."""
+    if timeout_seconds <= 0:
+        raise TranslationError("翻译接口 DNS 解析超时", category="connection_timeout")
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    child = context.Process(
+        target=_dns_child,
+        args=(send, hostname, port, _default_resolver),
+        daemon=True,
+    )
+    started = False
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        child.start()
+        started = True
+        send.close()
+        while True:
+            if cancelled is not None and cancelled.is_set():
+                raise TranslationError("翻译请求已取消", category="request_cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TranslationError("翻译接口 DNS 解析超时", category="connection_timeout")
+            if receive.poll(min(remaining, _CANCEL_POLL_SECONDS)):
+                try:
+                    succeeded, addresses = receive.recv()
+                except EOFError as error:
+                    raise TranslationError("翻译接口 DNS 解析失败", category="network") from error
+                if not succeeded:
+                    raise TranslationError("翻译接口 DNS 解析失败", category="network")
+                return addresses
+    except TranslationError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise TranslationError("翻译接口 DNS 解析失败", category="network") from error
+    finally:
+        receive.close()
+        send.close()
+        if started:
+            if child.is_alive():
+                child.terminate()
+            child.join(_TERMINATION_GRACE_SECONDS)
+            if child.is_alive():
+                child.kill()
+                child.join()
 
 
 def _resolve_public_addresses(
@@ -501,6 +579,9 @@ class ApiTranslator:
         self._state_lock = threading.Lock()
         self._active_clients: set[httpx.Client] = set()
         self._unresolved_workers: set[threading.Thread] = set()
+        self._request_local = threading.local()
+        self._timing_lock = threading.Lock()
+        self._request_timings: list[dict[str, int | None]] = []
         self._closed = False
 
     def _new_client(self, timeout_seconds: float | None = None) -> httpx.Client:
@@ -509,7 +590,28 @@ class ApiTranslator:
         )
         transport = self._transport
         if transport is None:
-            hostname, port, addresses = _resolve_public_addresses(self._base_url, self._resolver)
+            timing: _RequestTiming | None = getattr(self._request_local, "timing", None)
+            dns_started = time.monotonic()
+            try:
+                if self._resolver is None:
+                    deadline = (
+                        timing.deadline if timing is not None else dns_started + request_timeout
+                    )
+
+                    def resolver(host: str, port: int) -> Iterable[str]:
+                        return _bounded_default_resolver(
+                            host,
+                            port,
+                            min(_DNS_TIMEOUT_SECONDS, deadline - time.monotonic()),
+                            timing.cancelled if timing is not None else None,
+                        )
+                else:
+                    resolver = self._resolver
+                hostname, port, addresses = _resolve_public_addresses(self._base_url, resolver)
+            finally:
+                if timing is not None:
+                    with timing.lock:
+                        timing.dns_ms = round((time.monotonic() - dns_started) * 1000)
             transport = _PinnedHTTPTransport(hostname, port, addresses)
         return httpx.Client(
             timeout=httpx.Timeout(
@@ -533,6 +635,26 @@ class ApiTranslator:
     @property
     def timeout_seconds(self) -> float:
         return self._config.timeout_seconds
+
+    def drain_request_timings(self) -> list[dict[str, int | None]]:
+        """Return completed request stage durations without endpoint or response content."""
+        with self._timing_lock:
+            timings = self._request_timings
+            self._request_timings = []
+        return timings
+
+    def _record_response_timing(self, started_at: float, status: int) -> None:
+        timing: _RequestTiming | None = getattr(self._request_local, "timing", None)
+        if timing is not None:
+            with timing.lock:
+                timing.first_byte_ms = round((time.monotonic() - started_at) * 1000)
+                timing.http_status = status
+
+    def _record_stream_timing(self, started_at: float) -> None:
+        timing: _RequestTiming | None = getattr(self._request_local, "timing", None)
+        if timing is not None:
+            with timing.lock:
+                timing.stream_ms = round((time.monotonic() - started_at) * 1000)
 
     @property
     def cache_identity(self) -> str:
@@ -699,8 +821,41 @@ class ApiTranslator:
         total_timeout = self._config.timeout_seconds
         if timeout_seconds is not None:
             total_timeout = min(total_timeout, max(0.0, timeout_seconds))
-        if total_timeout <= 0:
-            raise TranslationError("翻译接口请求超过硬总时限", category="total_timeout")
+        started_at = time.monotonic()
+        timing = _RequestTiming(started_at, started_at + total_timeout)
+        try:
+            if total_timeout <= 0:
+                raise TranslationError("翻译接口请求超过硬总时限", category="total_timeout")
+            return self._request_text_with_deadline(
+                system_prompt,
+                user_prompt,
+                max_tokens=max_tokens,
+                cancel_requested=cancel_requested,
+                total_timeout=total_timeout,
+                timing=timing,
+            )
+        finally:
+            with timing.lock:
+                result = {
+                    "dns_ms": timing.dns_ms,
+                    "first_byte_ms": timing.first_byte_ms,
+                    "stream_ms": timing.stream_ms,
+                    "total_ms": round((time.monotonic() - started_at) * 1000),
+                    "http_status": timing.http_status,
+                }
+            with self._timing_lock:
+                self._request_timings.append(result)
+
+    def _request_text_with_deadline(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int,
+        cancel_requested: Callable[[], bool] | None,
+        total_timeout: float,
+        timing: _RequestTiming,
+    ) -> str:
         with self._state_lock:
             if self._closed:
                 raise TranslationError("翻译客户端已关闭", category="configuration")
@@ -716,13 +871,14 @@ class ApiTranslator:
 
         outcome: queue.SimpleQueue[tuple[bool, str | BaseException]] = queue.SimpleQueue()
         response_started = threading.Event()
-        cancelled = threading.Event()
+        cancelled = timing.cancelled
         holder_lock = threading.Lock()
         holder: dict[str, httpx.Client] = {}
 
         def request() -> None:
             client: httpx.Client | None = None
             registered = False
+            self._request_local.timing = timing
             try:
                 client = self._new_client(total_timeout)
                 with self._state_lock:
@@ -749,6 +905,7 @@ class ApiTranslator:
             except BaseException as error:
                 outcome.put((False, error))
             finally:
+                self._request_local.timing = None
                 if client is not None:
                     if registered:
                         with self._state_lock:
@@ -757,7 +914,7 @@ class ApiTranslator:
 
         worker = threading.Thread(target=request, daemon=True)
         worker.start()
-        deadline = time.monotonic() + total_timeout
+        deadline = timing.deadline
         while True:
             if cancel_requested is not None:
                 try:
@@ -854,27 +1011,33 @@ class ApiTranslator:
     ) -> str:
         parser = _SseParser(self._config.api_type, response_started)
         try:
+            request_started = time.monotonic()
             with client.stream(
                 "POST",
                 endpoint,
                 headers=spec.headers,
                 json=spec.payload,
             ) as response:
+                self._record_response_timing(request_started, response.status_code)
                 if response.status_code != 200:
                     raise _status_error(response)
                 response_started.set()
                 event = ""
-                for line in response.iter_lines():
-                    if not line:
-                        event = ""
-                        continue
-                    if line.startswith("event:"):
-                        event = line[6:].strip()
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    if parser.feed(line[5:].strip(), event):
-                        break
+                stream_started = time.monotonic()
+                try:
+                    for line in response.iter_lines():
+                        if not line:
+                            event = ""
+                            continue
+                        if line.startswith("event:"):
+                            event = line[6:].strip()
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        if parser.feed(line[5:].strip(), event):
+                            break
+                finally:
+                    self._record_stream_timing(stream_started)
         except TranslationError:
             raise
         except httpx.HTTPError as error:
@@ -889,16 +1052,22 @@ class ApiTranslator:
         response_started: threading.Event,
     ) -> str:
         try:
+            request_started = time.monotonic()
             with client.stream(
                 "POST",
                 endpoint,
                 headers=spec.headers,
                 json=spec.payload,
             ) as response:
+                self._record_response_timing(request_started, response.status_code)
                 if response.status_code != 200:
                     raise _status_error(response)
                 response_started.set()
-                response.read()
+                stream_started = time.monotonic()
+                try:
+                    response.read()
+                finally:
+                    self._record_stream_timing(stream_started)
         except httpx.HTTPError as error:
             raise _network_error(
                 error,

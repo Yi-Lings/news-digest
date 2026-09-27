@@ -70,6 +70,103 @@ def _open_failed_edition(tmp_path, *, provider_id="provider-1"):
     return conn, tasks
 
 
+def test_probe_completion_and_task_state_roll_back_together(tmp_path, monkeypatch):
+    conn, tasks = _open_failed_edition(tmp_path)
+    try:
+        queued = db.queue_provider_probe(
+            conn, "provider-1", tasks[0].task_id, now=_at(61), actor="admin"
+        )
+        claim = claim_translation_work(
+            conn, queued.task_id, owner="probe-worker", now=_at(62),
+            lease_seconds=900, manual_retry=True, manual_probe=True,
+        )
+        assert claim.task is not None and claim.is_probe
+
+        original_finish = db.finish_provider_probe
+
+        def interrupted(*args, **kwargs):
+            original_finish(*args, **kwargs)
+            raise RuntimeError("injected probe interruption")
+
+        monkeypatch.setattr(db, "finish_provider_probe", interrupted)
+        with pytest.raises(RuntimeError, match="injected probe interruption"):
+            succeed_translation_work(
+                conn, queued.task_id, owner="probe-worker", now=_at(63)
+            )
+        assert db.translation_task(conn, queued.task_id).status == "running"
+        assert db.get_provider_circuit(conn, "provider-1").state == "half_open"
+        assert db.latest_translation_admin_action(conn, queued.task_id).status == "running"
+        assert conn.execute(
+            "SELECT status FROM translation_attempts WHERE task_id = ?",
+            (queued.task_id,),
+        ).fetchone()["status"] == "running"
+    finally:
+        conn.close()
+
+
+def test_wakeup_waits_for_retry_after_probe_deadline_and_skips_terminal_only(tmp_path):
+    conn, tasks = _seed(tmp_path, article_count=2)
+    try:
+        for second in range(1, 6):
+            db.record_provider_outcome(
+                conn, "provider-1", outcome="provider_failure", now=_at(second)
+            )
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0"
+                " WHERE task_id = ?", (tasks[0].task_id,)
+            )
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'retry_wait', auto_retry = 1,"
+                " next_retry_at = ? WHERE task_id = ?", (_at(300), tasks[1].task_id)
+            )
+        assert db.next_automation_wakeup_at(
+            conn, "2026-08-30", now=_at(100)
+        ) == _at(300)
+        assert not db.automation_due(conn, now=_at(100))
+        assert db.automation_due(conn, now=_at(300))
+
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+                " next_retry_at = NULL WHERE task_id = ?", (tasks[1].task_id,)
+            )
+        assert db.next_automation_wakeup_at(conn, "2026-08-30", now=_at(400)) is None
+        assert all(not db.automation_due(conn, now=_at(second)) for second in range(400, 4000, 30))
+    finally:
+        conn.close()
+
+
+def test_automation_due_detects_expired_task_lease(tmp_path):
+    conn, tasks = _seed(tmp_path)
+    try:
+        assert db.claim_translation_task(
+            conn, tasks[0].task_id, owner="stopped-worker", now=_at(),
+            lease_seconds=60,
+        ) is not None
+        assert not db.automation_due(conn, now=_at(59))
+        assert db.automation_due(conn, now=_at(60))
+    finally:
+        conn.close()
+
+
+def test_configuration_blocked_provider_does_not_schedule_pending_task(tmp_path):
+    conn, tasks = _seed(tmp_path, article_count=2)
+    try:
+        db.record_provider_outcome(
+            conn, "provider-1", outcome="configuration_failure", now=_at(1)
+        )
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'configuration_blocked',"
+                " auto_retry = 0 WHERE task_id = ?", (tasks[0].task_id,)
+            )
+        assert db.next_automation_wakeup_at(conn, "2026-08-30", now=_at(2)) is None
+        assert not db.automation_due(conn, now=_at(2))
+    finally:
+        conn.close()
+
+
 class TestTaskCapabilities:
     def test_every_state_has_action_or_explicit_wait(self):
         """不变量:除运行中等待取消确认外,任何状态不得出现空动作。"""

@@ -217,9 +217,13 @@ bootstrap/Admin 会把 `NEWS_SITE_URL`、SMTP、EasyPay 等 Site 必需字段原
 
 ## 4. 固定镜像 digest
 
-**已有实例升级不得先改 live compose。** 无论使用 `server-push.ps1`、bootstrap 还是手工升级，
-都必须先冻结下面所有运行入口；preflight 与 bootstrap 会读取 `ActiveState` 并在任一入口仍活动时
-fail closed。unit 保持 `enabled` 不影响部署，升级结束后 bootstrap 会重新启动 timer 与 wakeup path。
+**已有实例升级不得先改 live compose。** 使用 `server-push.ps1`、`install.sh` 或直接运行
+bootstrap 时，无需手工停止 timer/path、Site 或 Admin。bootstrap 会先记录 timer/path 的
+`active` 与 `enabled` 状态并自动冻结，确认每日、恢复、备份 worker 均未运行后停止旧 Site/Admin，
+完成数据库备份与切换；失败时先恢复旧服务与站点，再恢复原 timer/path 状态。若已有 worker
+正在运行，等待其结束后重试，不要强行停止。
+
+仅在绕过 bootstrap **手工升级**时，才执行以下冻结步骤：
 
 ```bash
 cd /srv/news-digest
@@ -241,7 +245,7 @@ sudo docker compose stop admin site
 ```
 
 保持四处旧 digest 不变，按 §9 使用旧 worker 镜像完成迁移前 SQLite online backup，核验
-`PRAGMA integrity_check` 与 SHA-256 后，才可继续编辑 live compose。备份失败时应恢复旧
+`PRAGMA integrity_check` 与 SHA-256 后，才可继续编辑 live compose。手工备份失败时应恢复旧
 Site/Admin 与 timer/path 并终止升级。首次安装不存在旧 timer、Admin 和数据卷，可直接执行下文。
 
 编辑 `/srv/news-digest/compose.yaml`，替换四处 `image:`：worker、site 与 admin 三处使用
@@ -379,60 +383,34 @@ journalctl -u news-digest.service -n 50        # 查看运行日志
    bootstrap.sh 首次生成，初始口令写入 `config/admin-password.initial`（见 §13）。
    手工生成哈希：`printf 'admin:%s\n' "$(openssl passwd -apr1 '口令')" | sudo tee /srv/news-digest/config/htpasswd-admin`，
    随后 `sudo chown root:root` 并 `sudo chmod 600` 该文件。
-2. 准备 certbot webroot 并临时上线仅 80 的配置（443 块引用的证书还不存在，直接放会导致 `nginx -t` 失败）：
+2. 设置实际 `ND_DOMAIN` 并使用 §0 的部署入口。部署前会核对已保存的
+   `NEWS_SITE_URL`、本项目 Nginx 配置的域名归属、重复 `server_name`、已有证书的
+   SAN 与有效期。存量域名不一致时停止；换域名需单独迁移，不可借升级顺带完成。
+   项目托管配置为 `/etc/nginx/conf.d/news-digest.conf`，续期钩子为
+   `/etc/letsencrypt/renewal-hooks/deploy/news-digest-reload-nginx.sh`。旧版通用文件仅在
+   可确认归属本项目时迁移；第三方同名文件保持原状。
+3. 首次安装签证书失败时，HTTP 仅可读取公开内容；Admin、账号、支付及订阅入口返回
+   404，非 GET/HEAD 请求返回 405。首次 HTTP-only 安装的公开链接使用 HTTP；证书签发后
+   重跑部署会切回 HTTPS，账号会话及付费功能才可使用。排查 DNS、80 端口或 Certbot 后用相同 `ND_DOMAIN` 重跑部署。已有 HTTPS 站点若证书
+   错误或缺失，部署失败，不会降级成 HTTP。
+4. 部署后在服务器上用实际域名验收。本机 SNI 请求验证证书、首页、健康入口及
+   Admin 的 GET 状态；脚本对 HTTPS 使用正常证书校验，不接受 `curl -k`：
 
 ```bash
-DOMAIN=news.example.com   # 替换为实际域名
-sudo mkdir -p /var/www/certbot
-sudo cp news.conf /etc/nginx/conf.d/news.conf
-sudo sed -i "s/news\.example\.com/${DOMAIN}/g" /etc/nginx/conf.d/news.conf
-sudoedit /etc/nginx/conf.d/news.conf   # 用编辑器把第二个 server 块（443 那一整块，从 server { 到配对的 }）整体注释
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN"
+ND_DOMAIN=your.example.org bash /srv/news-digest/incoming/site-gate.sh verify-auto
+sudo nginx -t
+sudo certbot renew --dry-run
+sudo /etc/letsencrypt/renewal-hooks/deploy/news-digest-reload-nginx.sh
 ```
 
-3. 证书就绪后恢复完整配置并重载：
-
-```bash
-sudo cp news.conf /etc/nginx/conf.d/news.conf   # 还原未注释版本
-sudo sed -i "s/news\.example\.com/${DOMAIN}/g" /etc/nginx/conf.d/news.conf
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-4. 验证（本机或任意外部机器）：
-
-```bash
-curl -sI http://news.example.com/ | head -3          # 301 → https
-curl -sI https://news.example.com/ | grep -iE 'x-robots|content-security|x-content-type|referrer'
-curl -sI https://news.example.com/privacy/ | head -3
-```
-
-5. 安装「续期后重载 nginx」钩子。certbot 的 timer 会自动续期，但默认**不会**让 nginx 加载新证书——
-   不装这个钩子，约 90 天后旧证书到期即 HTTPS 静默失效。一键部署脚本会自动安装；手工部署需自己装一次：
-
-```bash
-sudo install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
-printf '#!/bin/sh\nnginx -t && systemctl reload nginx\n' | \
-  sudo tee /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh
-sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh
-```
-
-6. 验证自动续期与重载都就位（不改动真实证书）：
-
-```bash
-systemctl list-timers | grep certbot          # 续期 timer 已挂上
-sudo certbot renew --dry-run                   # 演练一次完整续期，应无报错
-sudo /etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh   # 直接执行钩子本体，验证 reload 生效
-```
-
-   注意：`--dry-run` **不会**执行 deploy 钩子（certbot 明确在演练时跳过），所以钩子要单独跑一次验证；
-   若 certbot 版本支持，也可用 `sudo certbot renew --dry-run --run-deploy-hooks` 合并演练。webroot 方式续期无需停站。
+   `certbot renew --dry-run` 不一定执行 deploy hook，故需单独验证 hook。
 
 ## 9. 备份
 
 - **配置**：`/srv/news-digest/config/`（`.env`、`providers.json` 供应商档案含密钥、
   `htpasswd-admin` 面板口令哈希；其中 `session-secret` 与 `admin-password.initial`
-  可再生，不必备份）、`compose.yaml`（连同其中的 digest）、两个 systemd 单元、`news.conf`。
+  可再生，不必备份）、`compose.yaml`（连同其中的 digest）、systemd 单元、
+  `/etc/nginx/conf.d/news-digest.conf` 与项目专属 Certbot hook。
 - **迁移前 SQLite 一致性备份**：bootstrap 在任何新 Admin/worker 启动前使用 SQLite
   online backup API 备份 `news-digest_news-data` 中的 `news.db`，验证完整性并生成同名
   `.sha256` 文件；两者均为 `root:root/0600`。该备份是 schema 自动迁移前的人工恢复点。
@@ -514,7 +492,7 @@ sudo docker compose -f /srv/news-digest/compose.yaml ps   # web healthy，site/a
 - CPU 架构与 `release.yml` 的 `PLATFORMS` 是否一致（不一致须改后重新发布镜像）。
 - Docker / Compose / systemd / nginx 实际版本是否满足第 2 步下限；`http2 on;` 是否可启用。
 - `docker` 可执行文件绝对路径（service 单元 ExecStart）。
-- worker / web / admin 实测内存峰值，决定 256m / 32m / 32m 上限是否调整。
+- worker / web / site / admin 实测内存峰值，决定 256m / 32m / 64m / 128m 上限是否调整。
 - `run --yes` 四阶段退出码传播：构建成功、投递失败时站点保留且 service 为非零；
   `EMAIL_DELIVERY_ENABLED=false` 时明确跳过并返回成功。
 - `Persistent=true` 的 08:00 补跑是否落在 `EMAIL_CATCHUP_WINDOW_HOURS` 内；窗口外不得自动补发。

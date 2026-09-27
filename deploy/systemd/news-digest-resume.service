@@ -7,6 +7,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
+# A known idle result skips the container start. Any check/container error
+# starts the worker, which performs its own recovery and due checks.
+ExecCondition=/bin/sh -c 'output=$$(/usr/bin/docker compose -f /srv/news-digest/compose.yaml exec -T admin news-digest automation-due --database /data/news.db --config-dir /config 2>&1); result=$$?; if [ "$$result" -eq 1 ] && [ "$$output" = AUTOMATION_IDLE ]; then exit 1; fi; exit 0'
 ExecStart=/usr/bin/flock -E 75 -n /run/news-digest-worker.lock /usr/bin/docker compose -f /srv/news-digest/compose.yaml run --rm worker resume-automation --yes
 # Same bounded multi-attempt budget as the daily worker.
 TimeoutStartSec=24h

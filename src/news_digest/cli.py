@@ -182,6 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
         "resume-automation", help="恢复数据库中未完成的自动化刊期（不重新抓取；需 --yes）"
     )
     resume.add_argument("--yes", action="store_true", help="确认执行真实翻译与后续构建/投递")
+    due = subparsers.add_parser("automation-due", help="只读检查恢复 worker 是否有到期工作")
+    due.add_argument("--database", type=Path, help="待检查的 SQLite 数据库路径")
+    due.add_argument("--config-dir", type=Path, help="含 .env 与 providers.json 的配置目录")
 
     subparsers.add_parser(
         "migrate-content", help="从发布快照恢复当前刊期（不处理往期、不调用模型或邮件）",
@@ -339,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_daily(args.window_hours, args.yes)
     if args.command == "resume-automation":
         return _run_automation_resume(args.yes)
+    if args.command == "automation-due":
+        return _run_automation_due(database=args.database, config_dir=args.config_dir)
     if args.command == "preview":
         return _run_preview(args.port, automation_demo=args.automation_demo)
     if args.command == "preview-email":
@@ -1094,9 +1099,6 @@ def _run_automation_daily(
                 and state.dirty_generation > state.built_generation
                 and state.status != "build_failed"
             )
-            if action_required and not (result.claimed or built or delivered or waiting_build):
-                print("自动化已安全停止：存在需要人工处理的翻译任务。")
-                return _AUTOMATION_ACTION_REQUIRED
             if (
                 delivery_enabled
                 and state is not None
@@ -1113,23 +1115,9 @@ def _run_automation_daily(
             ):
                 return 0
             if not (result.claimed or built or delivered):
-                pending_current = any(
-                    task.provider_id == runner.provider_id
-                    and (
-                        task.status in {"pending", "running"}
-                        or (
-                            task.status in {"failed", "retry_wait"}
-                            and task.auto_retry
-                            and task.next_retry_at is not None
-                        )
-                    )
-                    for task in tasks
-                )
-                if not pending_current and not waiting_build:
-                    if any(task.status != "succeeded" for task in tasks):
-                        print("当前接口无可执行待办；请在 Admin 检查或重绑定剩余任务。")
-                        return _AUTOMATION_ACTION_REQUIRED
-                    return 0
+                if waiting_build:
+                    sleep(1.0)
+                    continue
                 wake_conn = db.connect(fetch_config.database)
                 try:
                     wake_at = db.next_automation_wakeup_at(
@@ -1141,8 +1129,15 @@ def _run_automation_daily(
                 finally:
                     wake_conn.close()
                 if wake_at is None:
-                    sleep(1.0)
-                    continue
+                    if any(task.status != "succeeded" for task in tasks):
+                        message = (
+                            "自动化已安全停止：存在需要人工处理的翻译任务。"
+                            if action_required else
+                            "当前接口无可执行待办；请在 Admin 检查或重绑定剩余任务。"
+                        )
+                        print(message)
+                        return _AUTOMATION_ACTION_REQUIRED
+                    return 0
                 wake_now = clock().astimezone(dt.UTC)
                 delay = max(
                     0.1,
@@ -1208,6 +1203,59 @@ def _run_automation_resume(yes: bool) -> int:
         if code != 0:
             result = code
     return result
+
+
+def _run_automation_due(
+    *,
+    now: dt.datetime | None = None,
+    database: Path | None = None,
+    config_dir: Path | None = None,
+) -> int:
+    """0: actionable work; 1: idle; 2: check failed (start worker conservatively)."""
+    from news_digest.admin_providers import runtime_translation_config
+    from news_digest.config import email_delivery_enabled_from_env, parse_env_text
+    from news_digest.storage import db
+    from news_digest.translation.client import ApiTranslator
+
+    conn = None
+    try:
+        database = database or _fetch_config(None).database
+        conn = db.connect_readonly(database)
+        if conn.execute("SELECT 1 FROM automation_editions LIMIT 1").fetchone() is None:
+            print("AUTOMATION_IDLE")
+            return 1
+        effective_env = dict(os.environ)
+        if config_dir is not None:
+            effective_env.update(parse_env_text((config_dir / ".env").read_text(encoding="utf-8")))
+        timestamp = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC).isoformat()
+        delivery_enabled = email_delivery_enabled_from_env(effective_env)
+        if not db.automation_due(conn, now=timestamp, delivery_enabled=delivery_enabled):
+            print("AUTOMATION_IDLE")
+            return 1
+        config = (
+            runtime_translation_config(config_dir / "providers.json", effective_env)
+            if config_dir is not None
+            else _runtime_translation_config()
+        )
+        translator = ApiTranslator(config)
+        try:
+            provider_id = f"default-{translator.cache_identity[:64]}"
+        finally:
+            translator.close()
+        due = db.automation_due(
+            conn,
+            now=timestamp,
+            delivery_enabled=delivery_enabled,
+            provider_id=provider_id,
+        )
+    except Exception as error:
+        print(f"AUTOMATION_CHECK_ERROR:{type(error).__name__}")
+        return 2
+    finally:
+        if conn is not None:
+            conn.close()
+    print("AUTOMATION_DUE" if due else "AUTOMATION_IDLE")
+    return 0 if due else 1
 
 
 def _signal_translation_worker(path: Path) -> None:

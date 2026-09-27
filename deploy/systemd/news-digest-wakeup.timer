@@ -5,8 +5,8 @@
 Description=Fallback wake for queued news-digest translation actions
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=30s
+OnCalendar=*-*-* *:*:00
+OnCalendar=*-*-* *:*:30
 AccuracySec=1s
 Unit=news-digest-resume.service
 

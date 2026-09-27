@@ -60,7 +60,7 @@ if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or $AppDir -match '(^|/)\.\.?(?:/|$
     Write-Host "[FAIL] Invalid absolute server app directory: $AppDir" -ForegroundColor Red
     exit 1
 }
-if ($Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$') {
+if ($Domain.Length -gt 253 -or $Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9](?:[A-Za-z0-9-]{0,57}[A-Za-z0-9])?)$') {
     Write-Host "[FAIL] Invalid site domain: $Domain" -ForegroundColor Red
     exit 1
 }
@@ -435,8 +435,7 @@ Stop-OnError $LASTEXITCODE "server-push"
 # ---- [6/6] smoke check: every failure is fatal; print DONE only after all checks ----
 Write-Host "[6/6] Final smoke check..."
 $smokeCommand = "set -e; " +
-    "code=`$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' https://$Domain/healthz); " +
-    "test `"`$code`" = 200; echo `"https status: `$code`"; " +
+    "ND_DOMAIN='$Domain' bash '$AppDir/incoming/site-gate.sh' verify-auto; " +
     "systemctl is-enabled --quiet news-digest.timer; " +
     "systemctl is-active --quiet news-digest.timer; " +
     "systemctl is-enabled --quiet news-digest-wakeup.path; " +
@@ -446,6 +445,6 @@ $smokeCommand = "set -e; " +
 Stop-OnError $LASTEXITCODE "final smoke check"
 
 Write-Host ""
-Write-Host "[DONE] https://$Domain/admin/  (configure API/SMTP in Admin; automatic email remains disabled by default)"
+Write-Host "[DONE] $Domain passed site gate. Admin is public only when HTTPS is active; automatic email remains disabled by default."
 if ($Elevated -and -not $NoPrompt) { Read-Host "Press Enter to close" | Out-Null }
 exit 0

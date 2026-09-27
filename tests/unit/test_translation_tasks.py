@@ -358,6 +358,33 @@ def test_cancel_request_does_not_change_running_state_until_termination_confirme
     assert cancelled.lease_owner is None
 
 
+def test_cancelling_active_probe_releases_circuit_without_counting_provider_failure(tmp_path):
+    conn = db.connect(tmp_path / "digest.db")
+    task = _task(conn)
+    for failure in range(5):
+        db.record_provider_outcome(
+            conn, "provider-default", outcome="provider_failure", now=_at(failure)
+        )
+    claim = claim_translation_work(
+        conn, task.task_id, owner="worker", now=_at(64), lease_seconds=900
+    )
+    assert claim.task is not None and claim.is_probe
+    before = db.get_provider_circuit(conn, "provider-default")
+    assert before is not None and before.state == "half_open"
+    db.request_translation_task_cancel(conn, task.task_id, now=_at(65))
+    cancelled = db.confirm_translation_task_cancelled(
+        conn, task.task_id, owner="worker", now=_at(66), request_terminated=True
+    )
+    circuit = db.get_provider_circuit(conn, "provider-default")
+    assert cancelled is not None and cancelled.error_code == "REQUEST_CANCELLED"
+    assert circuit is not None and circuit.state == "open"
+    assert circuit.probe_task_id is None and circuit.probe_owner is None
+    assert circuit.open_count == before.open_count
+    assert circuit.next_probe_at >= cancelled.next_retry_at
+    assert db.sweep_expired_leases(conn, now=_at(1000)) == 0
+    assert db.translation_task(conn, task.task_id).error_code == "REQUEST_CANCELLED"
+
+
 def test_expired_cancel_can_queue_recovery_and_is_marked_recovered(tmp_path):
     conn = db.connect(tmp_path / "digest.db")
     task = _task(conn)

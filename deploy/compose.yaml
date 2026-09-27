@@ -163,7 +163,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    mem_limit: 32m
+    # Provider connection checks spawn an isolated DNS process in this cgroup.
+    mem_limit: 128m
     pids_limit: 64
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8619/healthz', timeout=2)"]

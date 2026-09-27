@@ -49,6 +49,12 @@ jobs:
       - name: Ruff 检查
         run: uv run ruff check .
 
+      - name: 部署 Shell 语法与隔离测试依赖
+        run: |
+          for script in deploy/*.sh; do bash -n "$script"; done
+          sudo apt-get update
+          sudo apt-get install -y nginx openssl curl
+
       # pyproject 的 addopts 默认排除 network 标记，CI 里即离线套件
       - name: 离线测试套件
         run: uv run pytest
@@ -72,9 +78,28 @@ jobs:
             exit 1
           fi
 
+  script-parse:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: 部署 PowerShell 语法
+        shell: pwsh
+        run: |
+          foreach ($path in @('deploy/server-push.ps1', 'deploy/deploy-all.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path).Path, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $errors | Format-List | Out-String | Write-Error
+              exit 1
+            }
+          }
+
   build:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: test
+    needs: [test, script-parse]
     runs-on: ubuntu-24.04
     permissions:
       contents: read

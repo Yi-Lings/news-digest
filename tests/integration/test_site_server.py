@@ -271,6 +271,18 @@ def site(tmp_path):
         harness.stop()
 
 
+def test_fresh_install_home_is_available_before_first_publication(site, tmp_path):
+    site.server.site_dir = tmp_path / "site" / "not-published"
+    status, _headers, page = site.get("/")
+    assert status == 200
+    assert "站点尚未发布内容" in page
+    status, _headers, _page = site.get("/issues/2026-08-30/")
+    assert status == 404
+    (site.server.site_dir.parent / "releases").mkdir()
+    status, _headers, _page = site.get("/")
+    assert status == 404
+
+
 def test_opaque_origin_requires_explicit_loopback_browser_compat(tmp_path):
     strict = SiteHarness(tmp_path / "strict")
     try:
@@ -2089,8 +2101,9 @@ class TestRedemptionDomain:
         status, _headers, page = site.get("/contact")
         assert status == 200
         assert "联系我们" in page
-        assert "如果使用中遇见任何问题，可随时向以下邮箱提供工单：" in page
-        assert "mailto:" in page
+        assert "站点尚未配置联系邮箱" in page
+        assert "support@cheapcoding.top" not in page
+        assert "mailto:" not in page
         assert 'href="/contact"' in page
 
         conn = db.connect(site.db_path)
@@ -2104,6 +2117,7 @@ class TestRedemptionDomain:
         status, _headers, page = site.get("/contact")
         assert status == 200
         assert "custom-help@example.com" in page
+        assert "如果使用中遇见任何问题，可随时向以下邮箱提供工单：" in page
         assert 'href="mailto:custom-help@example.com"' in page
         assert "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号" in page
 

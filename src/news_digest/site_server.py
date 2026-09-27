@@ -943,6 +943,14 @@ class SiteHandler(BaseHTTPRequestHandler):
 
         resource = resolve_static_resource(self.server.site_dir, path)
         if resource is None:
+            if (
+                path in {"/", "/index.html"}
+                and not self.server.site_dir.exists()
+                and not self.server.site_dir.is_symlink()
+                and not (self.server.site_dir.parent / "releases").exists()
+            ):
+                self._html(200, _page("尚未发布", "<p>站点尚未发布内容。</p>"))
+                return
             self._html(404, _page("404", "<p>页面不存在。</p>"))
             return
         file_path, path = resource
@@ -1634,20 +1642,24 @@ class SiteHandler(BaseHTTPRequestHandler):
 
     def _render_contact(self) -> None:
         settings = self._load_settings()
-        contact_email = (
-            settings.get("contact_email", "").strip() or "support@cheapcoding.top"
-        )
+        contact_email = settings.get("contact_email", "").strip()
+        if contact_email:
+            contact_details = (
+                "<p>如果使用中遇见任何问题，可随时向以下邮箱提供工单：</p>"
+                "<p class=\"contact-email-box\">"
+                f"<a href=\"mailto:{html.escape(contact_email)}\" class=\"contact-email-link\">"
+                f"✉ {html.escape(contact_email)}</a>"
+                "</p>"
+                "<p class=\"muted\" style=\"font-size:.85rem;margin-top:1.2rem;\">"
+                "我们会在收到工单邮件后尽快为您跟进处理。"
+                "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号。"
+                "</p>"
+            )
+        else:
+            contact_details = "<p>站点尚未配置联系邮箱，请联系站点管理员。</p>"
         body = (
             "<div class=\"contact-card\">"
-            "<p>如果使用中遇见任何问题，可随时向以下邮箱提供工单：</p>"
-            "<p class=\"contact-email-box\">"
-            f"<a href=\"mailto:{html.escape(contact_email)}\" class=\"contact-email-link\">"
-            f"✉ {html.escape(contact_email)}</a>"
-            "</p>"
-            "<p class=\"muted\" style=\"font-size:.85rem;margin-top:1.2rem;\">"
-            "我们会在收到工单邮件后尽快为您跟进处理。"
-            "如遇支付问题请在提供工单的时候提供付款记录或问题描述与支付订单号。"
-            "</p>"
+            f"{contact_details}"
             "</div>"
         )
         self._html(200, _page("联系我们", body), self._flush_cookie([]))
