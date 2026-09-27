@@ -6,7 +6,15 @@
 import datetime as dt
 import json
 
+import pytest
+
 from news_digest.storage import db
+from news_digest.translation.automation import (
+    claim_translation_work,
+    fail_translation_work,
+    succeed_translation_work,
+)
+from news_digest.translation.client import TranslationError
 
 
 def _at(seconds: int = 0) -> str:
@@ -29,6 +37,36 @@ def _seed(tmp_path, *, article_count: int = 1):
             segmentation_json=json.dumps([1]),
         )
         tasks.append(task)
+    return conn, tasks
+
+
+def _open_failed_edition(tmp_path, *, provider_id="provider-1"):
+    conn, tasks = _seed(tmp_path, article_count=2)
+    with conn:
+        conn.execute(
+            "UPDATE automation_editions SET briefs_json = '[]' WHERE edition_date = ?",
+            ("2026-08-30",),
+        )
+        for position, task in enumerate(tasks):
+            conn.execute(
+                "INSERT INTO edition_items"
+                " (edition_date, article_id, position, source_json, payload, source_hash,"
+                " segmentation_json, active_task_id) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "2026-08-30", task.article_id, position, "{}", "{}",
+                    f"source-hash-{position}", json.dumps([1]), task.task_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+                " error_code = 'PROVIDER_5XX' WHERE task_id = ?",
+                (task.task_id,),
+            )
+    for second in range(1, 6):
+        db.record_provider_outcome(
+            conn, provider_id, outcome="provider_failure", now=_at(second)
+        )
+    assert db.get_provider_circuit(conn, provider_id).state == "open"
     return conn, tasks
 
 
@@ -120,7 +158,7 @@ class TestTaskCapabilities:
 
 
 class TestReaper:
-    def test_stale_requested_action_times_out_and_releases_task(self, tmp_path):
+    def test_valid_queued_action_survives_long_wait(self, tmp_path):
         conn, tasks = _seed(tmp_path)
         with conn:
             conn.execute(
@@ -137,15 +175,39 @@ class TestReaper:
         assert db.reap_stale_admin_actions(conn, now=_at(60), timeout_seconds=900) == 0
         latest = db.latest_translation_admin_action(conn, task.task_id)
         assert latest.status == "requested"
-        # 超时:timed_out + 任务手动标志释放,任务留在 retry_wait(auto_retry=1)可调度。
+        # A valid queue entry can wait behind a long translation without losing
+        # its explicit Admin retry or being charged against the automatic cap.
+        assert db.reap_stale_admin_actions(conn, now=_at(1200), timeout_seconds=900) == 0
+        latest = db.latest_translation_admin_action(conn, task.task_id)
+        assert latest.status == "requested"
+        refreshed = db.translation_task(conn, task.task_id)
+        assert refreshed.manual_action_id == task.manual_action_id
+        assert refreshed.manual_retry_requested_at is not None
+        assert refreshed.status == "retry_wait"
+        assert refreshed.auto_retry is True
+        conn.close()
+
+    def test_orphaned_requested_action_times_out(self, tmp_path):
+        conn, tasks = _seed(tmp_path)
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0"
+                " WHERE task_id = ?",
+                (tasks[0].task_id,),
+            )
+        task = db.queue_translation_task_retry(
+            conn, tasks[0].task_id, now=_at(), actor="admin"
+        )
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET manual_action_id = NULL,"
+                " manual_retry_requested_at = NULL WHERE task_id = ?",
+                (task.task_id,),
+            )
         assert db.reap_stale_admin_actions(conn, now=_at(1200), timeout_seconds=900) == 1
         latest = db.latest_translation_admin_action(conn, task.task_id)
         assert latest.status == "timed_out"
-        refreshed = db.translation_task(conn, task.task_id)
-        assert refreshed.manual_action_id is None
-        assert refreshed.manual_retry_requested_at is None
-        assert refreshed.status == "retry_wait"
-        assert refreshed.auto_retry is True
+        assert latest.result_code == "ACTION_TIMEOUT"
         conn.close()
 
     def test_cancel_actions_are_never_reaped(self, tmp_path):
@@ -271,6 +333,187 @@ class TestEditionRetry:
         assert rebound.error_code is None
         assert rebound.rebind_from_task_id == old_task.task_id
         assert rebound.rebind_reason == "EDITION_RECOVERY"
+        conn.close()
+
+    @pytest.mark.parametrize("rebind", [False, True])
+    def test_retry_edition_probes_once_then_drains_open_provider(self, tmp_path, rebind):
+        target_provider = "provider-2" if rebind else "provider-1"
+        conn, tasks = _open_failed_edition(tmp_path, provider_id=target_provider)
+
+        counts = db.retry_edition_failed_tasks(
+            conn, "2026-08-30", now=_at(6), actor="admin", provider_id=target_provider
+        )
+        assert counts == {"queued": 2, "skipped": 0}
+        active = db.active_translation_tasks(conn, "2026-08-30")
+        assert len(active) == 2
+        assert {task.provider_id for task in active} == {target_provider}
+        if rebind:
+            assert {task.rebind_from_task_id for task in active} == {
+                task.task_id for task in tasks
+            }
+        probes = [task for task in active if task.manual_probe_requested_at is not None]
+        assert len(probes) == 1
+        deferred = next(task for task in active if task.task_id != probes[0].task_id)
+        assert deferred.status == "retry_wait"
+        assert deferred.manual_retry_requested_at is not None
+        assert deferred.manual_probe_requested_at is None
+        assert db.latest_translation_admin_action(conn, deferred.task_id).status == "requested"
+
+        probe = claim_translation_work(
+            conn, probes[0].task_id, owner="worker", now=_at(7), lease_seconds=600,
+            manual_retry=True, manual_probe=True,
+        )
+        assert probe.task is not None and probe.is_probe
+        succeed_translation_work(conn, probes[0].task_id, owner="worker", now=_at(8))
+        assert db.get_provider_circuit(conn, target_provider).state == "closed"
+
+        remaining = db.translation_task(conn, deferred.task_id)
+        claim = claim_translation_work(
+            conn, remaining.task_id, owner="worker", now=_at(9), lease_seconds=600,
+            manual_retry=remaining.manual_retry_requested_at is not None,
+            manual_probe=remaining.manual_probe_requested_at is not None,
+        )
+        assert claim.task is not None and not claim.is_probe
+        attempt = conn.execute(
+            "SELECT kind FROM translation_attempts WHERE task_id = ? ORDER BY attempt_number DESC"
+            " LIMIT 1",
+            (remaining.task_id,),
+        ).fetchone()
+        assert attempt["kind"] == "manual"
+        conn.close()
+
+    def test_retry_edition_rebinds_queued_work_after_failed_probe(self, tmp_path):
+        conn, _ = _open_failed_edition(tmp_path)
+        assert db.retry_edition_failed_tasks(
+            conn, "2026-08-30", now=_at(6), actor="admin", provider_id="provider-1"
+        ) == {"queued": 2, "skipped": 0}
+        old_tasks = db.active_translation_tasks(conn, "2026-08-30")
+        probe = next(task for task in old_tasks if task.manual_probe_requested_at is not None)
+        deferred = next(task for task in old_tasks if task.task_id != probe.task_id)
+        old_action_id = deferred.manual_action_id
+        assert old_action_id is not None
+
+        claimed = claim_translation_work(
+            conn, probe.task_id, owner="worker-a", now=_at(7), lease_seconds=600,
+            manual_retry=True, manual_probe=True,
+        )
+        assert claimed.task is not None and claimed.is_probe
+        fail_translation_work(
+            conn, probe.task_id, owner="worker-a", now=_at(8),
+            error=TranslationError("upstream unavailable", category="provider", status=503),
+            stage="connect_provider",
+        )
+        assert db.get_provider_circuit(conn, "provider-1").state == "open"
+
+        # The Admin now selects a healthy default provider. The pending A retry
+        # must not prevent the whole edition from moving to B.
+        assert db.retry_edition_failed_tasks(
+            conn, "2026-08-30", now=_at(9), actor="admin", provider_id="provider-2"
+        ) == {"queued": 2, "skipped": 0}
+        rebound = db.active_translation_tasks(conn, "2026-08-30")
+        assert len(rebound) == 2
+        assert {task.provider_id for task in rebound} == {"provider-2"}
+        assert {task.rebind_from_task_id for task in rebound} == {
+            task.task_id for task in old_tasks
+        }
+        assert all(task.manual_probe_requested_at is None for task in rebound)
+        assert all(
+            db.latest_translation_admin_action(conn, task.task_id).status == "requested"
+            for task in rebound
+        )
+
+        old_action = conn.execute(
+            "SELECT status, result_code FROM translation_admin_actions WHERE action_id = ?",
+            (old_action_id,),
+        ).fetchone()
+        assert (old_action["status"], old_action["result_code"]) == (
+            "rejected", "PROVIDER_REBOUND"
+        )
+        old_deferred = db.translation_task(conn, deferred.task_id)
+        assert old_deferred.manual_action_id is None
+        assert old_deferred.manual_retry_requested_at is None
+        conn.close()
+
+    def test_deferred_retry_waits_for_open_circuit_cooldown(self, tmp_path):
+        conn, _ = _open_failed_edition(tmp_path)
+        assert db.retry_edition_failed_tasks(
+            conn, "2026-08-30", now=_at(6), actor="admin", provider_id="provider-1"
+        ) == {"queued": 2, "skipped": 0}
+        tasks = db.active_translation_tasks(conn, "2026-08-30")
+        probe = next(task for task in tasks if task.manual_probe_requested_at is not None)
+        deferred = next(task for task in tasks if task.task_id != probe.task_id)
+        assert claim_translation_work(
+            conn, probe.task_id, owner="worker-a", now=_at(7), lease_seconds=600,
+            manual_retry=True, manual_probe=True,
+        ).task is not None
+        fail_translation_work(
+            conn, probe.task_id, owner="worker-a", now=_at(8),
+            error=TranslationError("upstream unavailable", category="provider", status=503),
+            stage="connect_provider",
+        )
+        circuit = db.get_provider_circuit(conn, "provider-1")
+        assert circuit.state == "open" and circuit.next_probe_at > _at(9)
+
+        blocked = claim_translation_work(
+            conn, deferred.task_id, owner="worker-b", now=_at(9), lease_seconds=600,
+            manual_retry=True, manual_probe=False,
+        )
+        assert blocked.task is None
+        assert db.translation_task(conn, deferred.task_id).status == "retry_wait"
+        assert db.next_automation_wakeup_at(
+            conn, "2026-08-30", provider_id="provider-1", now=_at(9)
+        ) == circuit.next_probe_at
+        assert conn.execute(
+            "SELECT COUNT(*) FROM translation_attempts WHERE task_id = ?",
+            (deferred.task_id,),
+        ).fetchone()[0] == 0
+        conn.close()
+
+    def test_batch_retry_waits_through_long_first_translation(self, tmp_path):
+        conn, tasks = _seed(tmp_path, article_count=2)
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+                " error_code = 'SCHEMA_VALIDATION_FAILED' WHERE edition_date = ?",
+                ("2026-08-30",),
+            )
+            conn.execute(
+                "UPDATE translation_tasks SET attempt_count = 3 WHERE task_id = ?",
+                (tasks[1].task_id,),
+            )
+            for attempt in range(1, 4):
+                conn.execute(
+                    "INSERT INTO translation_attempts"
+                    " (task_id, attempt_number, owner, kind, status, started_at, provider_id)"
+                    " VALUES (?, ?, 'old-worker', 'automatic', 'failed', ?, ?)",
+                    (tasks[1].task_id, attempt, _at(-attempt), tasks[1].provider_id),
+                )
+        assert db.retry_edition_failed_tasks(
+            conn, "2026-08-30", now=_at(1), actor="admin"
+        ) == {"queued": 2, "skipped": 0}
+        first = db.claim_translation_task(
+            conn, tasks[0].task_id, owner="worker", now=_at(2), lease_seconds=900,
+            manual=True,
+        )
+        assert first is not None
+
+        db.run_worker_maintenance(conn, now=_at(120))
+        waiting = db.translation_task(conn, tasks[1].task_id)
+        assert waiting.manual_retry_requested_at is not None
+        assert db.latest_translation_admin_action(conn, waiting.task_id).status == "requested"
+
+        db.finish_translation_task_success(
+            conn, first.task_id, owner="worker", now=_at(121)
+        )
+        db.run_worker_maintenance(conn, now=_at(122))
+        waiting = db.translation_task(conn, tasks[1].task_id)
+        assert waiting.manual_retry_requested_at is not None
+        claimed = db.claim_translation_task(
+            conn, waiting.task_id, owner="worker", now=_at(123),
+            lease_seconds=900, manual=waiting.manual_retry_requested_at is not None,
+        )
+        assert claimed is not None
+        assert db.latest_translation_admin_action(conn, waiting.task_id).status == "running"
         conn.close()
 
 

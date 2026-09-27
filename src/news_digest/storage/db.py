@@ -2605,6 +2605,7 @@ def queue_translation_task_retry(
     now: str,
     actor: str,
     force: bool = False,
+    defer_until_probe: bool = False,
 ) -> TranslationTask:
     _validate_test_attempt_digest(task_id, "task_id")
     actor = _non_empty(actor, "actor", maximum=128)
@@ -2634,7 +2635,7 @@ def queue_translation_task_retry(
             "SELECT state FROM provider_circuits WHERE provider_id = ?",
             (row["provider_id"],),
         ).fetchone()
-        if circuit is not None and circuit["state"] != "closed":
+        if circuit is not None and circuit["state"] != "closed" and not defer_until_probe:
             raise RuntimeError("provider circuit requires a controlled probe")
         conn.execute(
             "INSERT INTO translation_admin_actions"
@@ -3454,11 +3455,11 @@ def next_automation_wakeup_at(
         task_parameters.append(provider_id)
     for row in conn.execute(task_where, task_parameters):
         state = provider_states.get(row["provider_id"])
-        manual = (
-            row["manual_retry_requested_at"] is not None
-            or row["manual_probe_requested_at"] is not None
-        )
-        if manual or (row["status"] == "pending" and state in {None, "closed"}):
+        manual_probe = row["manual_probe_requested_at"] is not None
+        manual_retry = row["manual_retry_requested_at"] is not None
+        if manual_probe or (
+            (manual_retry or row["status"] == "pending") and state in {None, "closed"}
+        ):
             deadlines.append(now)
         elif (
             row["status"] in {"failed", "retry_wait"}
@@ -3801,7 +3802,8 @@ def reap_stale_admin_actions(
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT a.action_id, a.task_id, a.action, t.status AS task_status,"
-            " t.lease_expires_at, t.cancel_requested_at, t.manual_action_id"
+            " t.lease_expires_at, t.cancel_requested_at, t.manual_action_id,"
+            " t.manual_retry_requested_at, t.manual_probe_requested_at"
             " FROM translation_admin_actions a"
             " LEFT JOIN translation_tasks t ON t.task_id = a.task_id"
             " WHERE a.status = 'requested' AND a.requested_at <= ?",
@@ -3820,6 +3822,18 @@ def reap_stale_admin_actions(
                 )
             )
             if action in {"cancel", "recover"} and not detached:
+                continue
+            if (
+                action in {"dispatch", "retry", "probe"}
+                and row["manual_action_id"] == row["action_id"]
+                and row["task_status"] in {
+                    "pending", "failed", "retry_wait", "cancelled", "configuration_blocked"
+                }
+                and (
+                    row["manual_retry_requested_at"] is not None
+                    or row["manual_probe_requested_at"] is not None
+                )
+            ):
                 continue
             conn.execute(
                 "UPDATE translation_admin_actions SET status = 'timed_out',"
@@ -4329,8 +4343,8 @@ def retry_edition_failed_tasks(
 ) -> dict[str, int]:
     """刊期级一键恢复:把失败任务重新入队，可选地切换到当前 provider。
 
-    消灭 partial 死端:任何终态任务都能一次操作回到可调度。已排队或电路未闭合
-    的任务被跳过并计数,不部分失败。返回 {queued, skipped} 计数。
+    消灭 partial 死端:任何终态任务都能一次操作回到可调度。电路未闭合时先排
+    一篇受控探测,其余任务等待电路恢复。已排队任务跳过并计数。
     """
     _validate_test_attempt_date(edition_date)
     actor = _non_empty(actor, "actor", maximum=128)
@@ -4348,6 +4362,21 @@ def retry_edition_failed_tasks(
             "configuration_blocked",
         }:
             continue
+        target_provider_id = provider_id or task.provider_id
+        if (
+            task.provider_id == target_provider_id
+            and (task.manual_retry_requested_at is not None
+                 or task.manual_probe_requested_at is not None)
+        ):
+            skipped += 1
+            continue
+        circuit = get_provider_circuit(conn, target_provider_id)
+        blocked = circuit is not None and circuit.state != "closed"
+        probe_pending = blocked and (
+            queued_provider_probe(conn, target_provider_id) is not None
+            or (circuit.state == "half_open" and circuit.probe_task_id is not None)
+        )
+        use_probe = blocked and not probe_pending
         if provider_id is not None and task.provider_id != provider_id:
             if translation_item(conn, task.task_id) is not None:
                 try:
@@ -4357,7 +4386,9 @@ def retry_edition_failed_tasks(
                         provider_id=provider_id,
                         now=now,
                         actor=actor,
+                        action="probe" if use_probe else "retry",
                         reason="EDITION_RECOVERY",
+                        defer_until_probe=blocked and not use_probe,
                     )
                 except (ValueError, RuntimeError):
                     skipped += 1
@@ -4369,12 +4400,14 @@ def retry_edition_failed_tasks(
             # migration rather than mutating historical audit facts in place.
             skipped += 1
             continue
-        circuit = get_provider_circuit(conn, task.provider_id)
-        if circuit is not None and circuit.state != "closed":
-            skipped += 1
-            continue
         try:
-            queue_translation_task_retry(conn, task.task_id, now=now, actor=actor)
+            if use_probe:
+                queue_translation_task_probe(conn, task.task_id, now=now, actor=actor)
+            else:
+                queue_translation_task_retry(
+                    conn, task.task_id, now=now, actor=actor,
+                    defer_until_probe=blocked,
+                )
         except (RuntimeError, ValueError):
             skipped += 1
             continue
@@ -4757,6 +4790,7 @@ def rebind_translation_item(
     force: bool = False,
     action: Literal["retry", "probe"] = "retry",
     reason: TranslationRebindReason = "MANUAL_REBIND",
+    defer_until_probe: bool = False,
 ) -> str:
     """Switch the active failed task, preserving every historical provider attempt."""
     provider_id = _non_empty(provider_id, "provider_id", maximum=128)
@@ -4785,19 +4819,53 @@ def rebind_translation_item(
                 }
                 and not (force and task.status in {"pending", "succeeded"})
             )
-            or task.manual_retry_requested_at is not None
-            or task.manual_probe_requested_at is not None
+            or (
+                provider_id == task.provider_id
+                and (task.manual_retry_requested_at is not None
+                     or task.manual_probe_requested_at is not None)
+            )
         ):
             raise RuntimeError("Active task is not available for rebinding")
         circuit = get_provider_circuit(conn, provider_id)
-        if circuit is not None and circuit.state != "closed" and action != "probe":
+        if (
+            circuit is not None and circuit.state != "closed"
+            and action != "probe" and not defer_until_probe
+        ):
             raise RuntimeError("Provider requires a controlled probe")
+        if (
+            action == "probe" and circuit is not None and circuit.state != "closed"
+            and (circuit.state == "half_open" or queued_provider_probe(conn, provider_id))
+        ):
+            raise RuntimeError("provider probe is already queued")
         new_id = _translation_task_id(task.edition_date, task.article_id, provider_id)
         previous = translation_task(conn, new_id)
         if previous is not None and (
             previous.status == "running" or (previous.status == "succeeded" and not force)
         ):
             raise RuntimeError("Target provider task is already running or succeeded")
+        for superseded in (task, previous):
+            if superseded is None or not (
+                superseded.manual_retry_requested_at or superseded.manual_probe_requested_at
+            ):
+                continue
+            if superseded.manual_action_id is None:
+                raise RuntimeError("Queued translation action is missing")
+            cursor = conn.execute(
+                "UPDATE translation_admin_actions SET status = 'rejected',"
+                " finished_at = ?, result_code = 'PROVIDER_REBOUND'"
+                " WHERE action_id = ? AND status = 'requested'",
+                (now, superseded.manual_action_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Queued translation action is no longer available")
+        if task.manual_retry_requested_at or task.manual_probe_requested_at:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0,"
+                " next_retry_at = NULL, manual_retry_requested_at = NULL,"
+                " manual_probe_requested_at = NULL, manual_action_id = NULL, updated_at = ?"
+                " WHERE task_id = ?",
+                (now, task_id),
+            )
         action_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO translation_tasks"

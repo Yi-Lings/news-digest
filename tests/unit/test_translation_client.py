@@ -106,16 +106,30 @@ def test_translator_explicitly_ignores_environment_proxies(monkeypatch):
     assert captured["trust_env"] is False
 
 
-def test_formal_request_uses_bounded_connect_and_read_timeouts():
+def test_formal_request_allows_slow_model_response_within_total_timeout():
     def handler(request: httpx.Request) -> httpx.Response:
         timeout = request.extensions["timeout"]
         assert timeout["connect"] == 10.0
-        assert timeout["read"] == 30.0
+        assert timeout["read"] == 180.0
         assert timeout["write"] == 180.0
         return httpx.Response(200, json=_openai_non_stream("ok"))
 
     translator = _translator(handler, stream=False, timeout_seconds=180.0)
     assert translator.probe() == "ok"
+
+
+def test_short_request_budget_also_bounds_read_timeout():
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]
+        assert timeout["connect"] == 2.0
+        assert timeout["read"] == 2.0
+        return httpx.Response(200, json=_openai_non_stream("ok"))
+
+    translator = _translator(handler, stream=False, timeout_seconds=180.0)
+    assert (
+        translator._request_text("Reply briefly.", "Hi", max_tokens=8, timeout_seconds=2.0)
+        == "ok"
+    )
 
 
 def _openai_sse(*chunks: str) -> bytes:
@@ -266,7 +280,7 @@ def test_unconfirmed_timeout_blocks_follow_up_request(monkeypatch):
         stream=False,
         timeout_seconds=0.01,
     )
-    monkeypatch.setattr(translator, "_new_client", BlockingClient)
+    monkeypatch.setattr(translator, "_new_client", lambda *_: BlockingClient())
     def request(*args, **kwargs):
         nonlocal calls
         calls += 1
@@ -301,7 +315,7 @@ def test_completed_request_does_not_wait_for_blocking_client_close(monkeypatch):
         stream=False,
         timeout_seconds=0.1,
     )
-    monkeypatch.setattr(translator, "_new_client", BlockingClient)
+    monkeypatch.setattr(translator, "_new_client", lambda *_: BlockingClient())
     monkeypatch.setattr(translator, "_request_text_blocking", lambda *args, **kwargs: "ok")
 
     started = time.monotonic()
@@ -365,8 +379,8 @@ def test_confirmed_hard_timeout_allows_next_request(monkeypatch):
     original_new_client = translator._new_client
 
     class ClosingClient:
-        def __init__(self):
-            self.inner = original_new_client()
+        def __init__(self, timeout_seconds=None):
+            self.inner = original_new_client(timeout_seconds)
 
         def close(self):
             release.set()
