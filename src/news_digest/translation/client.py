@@ -34,7 +34,6 @@ ApiType = Literal["openai_chat", "anthropic_messages"]
 _MAX_RETRY_AFTER_SECONDS = 5.0
 _PROBE_MAX_TOKENS = 8
 _CONNECT_TIMEOUT_SECONDS = 10.0
-_READ_TIMEOUT_SECONDS = 30.0
 _TERMINATION_GRACE_SECONDS = 1.0
 _CANCEL_POLL_SECONDS = 0.1
 
@@ -504,16 +503,19 @@ class ApiTranslator:
         self._unresolved_workers: set[threading.Thread] = set()
         self._closed = False
 
-    def _new_client(self) -> httpx.Client:
+    def _new_client(self, timeout_seconds: float | None = None) -> httpx.Client:
+        request_timeout = (
+            self._config.timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
         transport = self._transport
         if transport is None:
             hostname, port, addresses = _resolve_public_addresses(self._base_url, self._resolver)
             transport = _PinnedHTTPTransport(hostname, port, addresses)
         return httpx.Client(
             timeout=httpx.Timeout(
-                self._config.timeout_seconds,
-                connect=min(self._config.timeout_seconds, _CONNECT_TIMEOUT_SECONDS),
-                read=min(self._config.timeout_seconds, _READ_TIMEOUT_SECONDS),
+                request_timeout,
+                connect=min(request_timeout, _CONNECT_TIMEOUT_SECONDS),
+                read=request_timeout,
             ),
             transport=transport,
             follow_redirects=False,
@@ -722,7 +724,7 @@ class ApiTranslator:
             client: httpx.Client | None = None
             registered = False
             try:
-                client = self._new_client()
+                client = self._new_client(total_timeout)
                 with self._state_lock:
                     if self._closed or cancelled.is_set():
                         return
