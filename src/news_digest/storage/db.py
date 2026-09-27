@@ -5,7 +5,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,7 +20,7 @@ from news_digest.models import (
     article_to_dict,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 PAYMENT_CREATION_LEASE_SECONDS = 30
 _MAX_TRANSLATION_LEASE_SECONDS = MAX_TRANSLATION_TIMEOUT_SECONDS + 60
 
@@ -307,6 +307,8 @@ class TranslationAttempt:
     diagnostic_id: str | None
     provider_id: str | None = None
     requests_json: str = "[]"
+    http_status: int | None = None
+    timings_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -489,6 +491,8 @@ CREATE TABLE IF NOT EXISTS translation_attempts (
     error_category TEXT,
     failure_stage TEXT,
     diagnostic_id TEXT,
+    http_status INTEGER,
+    timings_json TEXT,
     UNIQUE (task_id, attempt_number)
 );
 CREATE INDEX IF NOT EXISTS idx_translation_attempts_task_started
@@ -1000,6 +1004,19 @@ def connect(path: Path) -> sqlite3.Connection:
         raise
 
 
+def connect_readonly(path: Path) -> sqlite3.Connection:
+    """Open an existing database without schema initialization or file writes."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
 def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
@@ -1011,6 +1028,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         _apply_v11_schema(conn)
         _apply_v12_schema(conn)
         _apply_v13_schema(conn)
+        _apply_v14_schema(conn)
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -1022,7 +1040,7 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
         conn.executescript(_ACCOUNTS_SCHEMA)
         _ensure_accounts_schema(conn)
         return conn
-    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+    if version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}:
         found = row["value"]
         raise RuntimeError(f"schema 版本不匹配:库中为 {found},代码期望 {SCHEMA_VERSION},需迁移")
     if version in {1, 2}:
@@ -1052,7 +1070,10 @@ def _initialize_connection(conn: sqlite3.Connection, path: Path) -> sqlite3.Conn
     if version <= 11:
         _migrate_to_v12(conn, path)
         _set_schema_version(conn, 12)
-    _migrate_to_v13(conn, path)
+    if version <= 12:
+        _migrate_to_v13(conn, path)
+        _set_schema_version(conn, 13)
+    _migrate_to_v14(conn, path)
     _set_schema_version(conn, SCHEMA_VERSION)
     return conn
 
@@ -1159,6 +1180,37 @@ def _migrate_to_v13(conn: sqlite3.Connection, path: Path) -> None:
         conn.execute("UPDATE meta SET value='13' WHERE key='schema_version'")
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise RuntimeError("schema v13 foreign key validation failed")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _apply_v14_schema(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(translation_attempts)")}
+    if "http_status" not in columns:
+        conn.execute("ALTER TABLE translation_attempts ADD COLUMN http_status INTEGER")
+    if "timings_json" not in columns:
+        conn.execute("ALTER TABLE translation_attempts ADD COLUMN timings_json TEXT")
+
+
+def _migrate_to_v14(conn: sqlite3.Connection, path: Path) -> None:
+    backup_path = path.with_name(f"{path.name}.pre-v14.bak")
+    if not backup_path.exists():
+        with closing(sqlite3.connect(backup_path)) as backup:
+            conn.backup(backup)
+    with closing(sqlite3.connect(backup_path)) as backup:
+        if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+            raise RuntimeError("schema v14 backup integrity failed")
+        version = backup.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if version != ("13",):
+            raise RuntimeError("schema v14 backup version mismatch")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _apply_v14_schema(conn)
+        conn.execute("UPDATE meta SET value='14' WHERE key='schema_version'")
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("schema v14 foreign key validation failed")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2109,6 +2161,8 @@ def _translation_attempt(row: sqlite3.Row) -> TranslationAttempt:
         diagnostic_id=row["diagnostic_id"],
         provider_id=row["provider_id"],
         requests_json=row["requests_json"],
+        http_status=row["http_status"],
+        timings_json=row["timings_json"],
     )
 
 
@@ -2118,7 +2172,8 @@ def list_translation_attempts(
     _validate_test_attempt_digest(task_id, "task_id")
     rows = conn.execute(
         "SELECT id, task_id, attempt_number, owner, kind, status, started_at, finished_at,"
-        " error_code, error_category, failure_stage, diagnostic_id, provider_id, requests_json"
+        " error_code, error_category, failure_stage, diagnostic_id, provider_id, requests_json,"
+        " http_status, timings_json"
         " FROM translation_attempts WHERE task_id = ? ORDER BY attempt_number",
         (task_id,),
     ).fetchall()
@@ -2844,7 +2899,7 @@ def confirm_translation_task_cancelled(
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT attempt_count, manual_action_id FROM translation_tasks"
+            "SELECT attempt_count, manual_action_id, provider_id FROM translation_tasks"
             " WHERE task_id = ? AND status = 'running' AND lease_owner = ?"
             " AND cancel_requested_at IS NOT NULL",
             (task_id, owner),
@@ -2886,6 +2941,26 @@ def confirm_translation_task_cancelled(
             " ORDER BY requested_at DESC LIMIT 1)",
             (now, now, task_id),
         )
+        probe = conn.execute(
+            "SELECT next_probe_at FROM provider_circuits"
+            " WHERE provider_id = ? AND state = 'half_open'"
+            " AND probe_task_id = ? AND probe_owner = ?",
+            (row["provider_id"], task_id, owner),
+        ).fetchone()
+        if probe is not None:
+            # Cancellation is not a provider failure. Release the probe lease
+            # with the task completion so lease recovery cannot rewrite it.
+            next_probe_at = probe["next_probe_at"]
+            state = "open" if next_probe_at is not None else "configuration_blocked"
+            if next_probe_at is not None:
+                next_probe_at = max(next_probe_at, _future_timestamp(now, delay))
+            conn.execute(
+                "UPDATE provider_circuits SET state = ?, next_probe_at = ?,"
+                " probe_task_id = NULL, probe_owner = NULL, probe_lease_expires_at = NULL,"
+                " updated_at = ? WHERE provider_id = ? AND state = 'half_open'"
+                " AND probe_task_id = ? AND probe_owner = ?",
+                (state, next_probe_at, now, row["provider_id"], task_id, owner),
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2913,6 +2988,36 @@ def _validate_translation_failure(
         raise ValueError("http_status must be a valid HTTP status")
 
 
+def _safe_attempt_timings(timings: dict | None) -> tuple[str | None, int | None]:
+    if timings is None:
+        return None, None
+    if set(timings) != {"requests", "attempt_total_ms", "validation_ms"}:
+        raise ValueError("invalid attempt timing fields")
+    requests = timings["requests"]
+    if not isinstance(requests, list) or len(requests) > 3:
+        raise ValueError("invalid request timings")
+    for name in ("attempt_total_ms", "validation_ms"):
+        value = timings[name]
+        if value is not None and (type(value) is not int or not 0 <= value <= 86_400_000):
+            raise ValueError("invalid attempt timing")
+    last_status = None
+    for request in requests:
+        if not isinstance(request, dict) or set(request) != {
+            "dns_ms", "first_byte_ms", "stream_ms", "total_ms", "http_status"
+        }:
+            raise ValueError("invalid request timing fields")
+        for name, value in request.items():
+            if value is None:
+                continue
+            if type(value) is not int or not (
+                100 <= value <= 599 if name == "http_status" else 0 <= value <= 86_400_000
+            ):
+                raise ValueError("invalid request timing")
+        if request["http_status"] is not None:
+            last_status = request["http_status"]
+    return json.dumps(timings, separators=(",", ":")), last_status
+
+
 def finish_translation_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2924,17 +3029,22 @@ def finish_translation_task_failure(
     failure_stage: str,
     diagnostic_id: str,
     http_status: int | None = None,
+    timings: dict | None = None,
     auto_retry: bool = True,
+    _commit: bool = True,
 ) -> TranslationTask:
     _validate_translation_failure(
         error_code, error_category, failure_stage, diagnostic_id, http_status
     )
+    timings_json, request_status = _safe_attempt_timings(timings)
+    attempt_http_status = http_status if http_status is not None else request_status
     now = _automation_timestamp(now)
     # Only locally validated configuration errors may permanently block a
     # provider. Upstream HTTP/auth/permission failures remain retryable.
     configuration_blocked = error_code == "CONFIGURATION_INVALID"
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT attempt_count, manual_action_id FROM translation_tasks"
             " WHERE task_id = ? AND status = 'running' AND lease_owner = ?",
@@ -2976,7 +3086,8 @@ def finish_translation_task_failure(
         )
         conn.execute(
             "UPDATE translation_attempts SET status = 'failed', finished_at = ?,"
-            " error_code = ?, error_category = ?, failure_stage = ?, diagnostic_id = ?"
+            " error_code = ?, error_category = ?, failure_stage = ?, diagnostic_id = ?,"
+            " http_status = ?, timings_json = ?"
             " WHERE task_id = ? AND attempt_number = ? AND status = 'running' AND owner = ?",
             (
                 now,
@@ -2984,6 +3095,8 @@ def finish_translation_task_failure(
                 error_category,
                 failure_stage,
                 diagnostic_id,
+                attempt_http_status,
+                timings_json,
                 task_id,
                 row["attempt_count"],
                 owner,
@@ -2995,7 +3108,8 @@ def finish_translation_task_failure(
                 " result_code = ? WHERE action_id = ? AND status = 'running'",
                 (now, error_code, row["manual_action_id"]),
             )
-        conn.commit()
+        if _commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -3014,10 +3128,14 @@ def finish_translation_task_success(
     article: Article | None = None,
     result_json: str | None = None,
     expected_attempt: int | None = None,
+    timings: dict | None = None,
+    _commit: bool = True,
 ) -> TranslationTask:
     now = _automation_timestamp(now)
+    timings_json, request_status = _safe_attempt_timings(timings)
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT attempt_count, manual_action_id, cancel_requested_at, lease_expires_at"
             " FROM translation_tasks"
@@ -3058,9 +3176,10 @@ def finish_translation_task_success(
             (now, now, now, task_id),
         )
         conn.execute(
-            "UPDATE translation_attempts SET status = 'succeeded', finished_at = ?"
+            "UPDATE translation_attempts SET status = 'succeeded', finished_at = ?,"
+            " http_status = ?, timings_json = ?"
             " WHERE task_id = ? AND attempt_number = ? AND status = 'running' AND owner = ?",
-            (now, task_id, row["attempt_count"], owner),
+            (now, request_status, timings_json, task_id, row["attempt_count"], owner),
         )
         if row["manual_action_id"] is not None:
             conn.execute(
@@ -3074,7 +3193,8 @@ def finish_translation_task_success(
                 (task_id,),
             )
             mark_translation_ready_for_build(conn, task_id, now=now, _commit=False)
-        conn.commit()
+        if _commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -3440,52 +3560,90 @@ def next_automation_wakeup_at(
     if provider_id is not None:
         provider_id = _non_empty(provider_id, "provider_id", maximum=128)
     deadlines: list[str] = []
-    provider_states = {
-        row["provider_id"]: row["state"]
-        for row in conn.execute("SELECT provider_id, state FROM provider_circuits")
+    circuits = {
+        row["provider_id"]: row
+        for row in conn.execute(
+            "SELECT provider_id, state, next_probe_at, probe_lease_expires_at"
+            " FROM provider_circuits"
+        )
     }
     task_parameters: list[object] = [edition_date]
     task_where = (
         "SELECT provider_id, status, auto_retry, next_retry_at,"
-        " manual_retry_requested_at, manual_probe_requested_at FROM translation_tasks"
+        " manual_retry_requested_at, manual_probe_requested_at, lease_expires_at"
+        " FROM translation_tasks"
         " WHERE edition_date = ? AND " + _CURRENT_TRANSLATION_TASK_SQL
     )
     if provider_id is not None:
         task_where += " AND provider_id = ?"
         task_parameters.append(provider_id)
     for row in conn.execute(task_where, task_parameters):
-        state = provider_states.get(row["provider_id"])
+        circuit = circuits.get(row["provider_id"])
+        state = circuit["state"] if circuit is not None else "closed"
+        if row["status"] == "running":
+            if row["lease_expires_at"] is not None:
+                deadlines.append(row["lease_expires_at"])
+            continue
         manual_probe = row["manual_probe_requested_at"] is not None
         manual_retry = row["manual_retry_requested_at"] is not None
-        if manual_probe or (
-            (manual_retry or row["status"] == "pending") and state in {None, "closed"}
-        ):
-            deadlines.append(now)
+        if manual_probe:
+            task_due = now
+        elif manual_retry or row["status"] == "pending":
+            task_due = now
         elif (
             row["status"] in {"failed", "retry_wait"}
             and row["auto_retry"]
             and row["next_retry_at"] is not None
-            and state in {None, "closed"}
         ):
-            deadlines.append(row["next_retry_at"])
-
-    circuit_parameters: list[object] = [edition_date]
-    circuit_where = (
-        "SELECT DISTINCT provider_circuits.next_probe_at FROM provider_circuits"
-        " JOIN translation_tasks ON translation_tasks.provider_id = provider_circuits.provider_id"
-        " WHERE translation_tasks.edition_date = ? AND " + _CURRENT_TRANSLATION_TASK_SQL
-        + " AND provider_circuits.state = 'open'"
-        " AND provider_circuits.next_probe_at IS NOT NULL"
-    )
-    if provider_id is not None:
-        circuit_where += " AND provider_circuits.provider_id = ?"
-        circuit_parameters.append(provider_id)
-    deadlines.extend(
-        row["next_probe_at"]
-        for row in conn.execute(circuit_where, circuit_parameters)
-        if row["next_probe_at"] is not None
-    )
+            task_due = row["next_retry_at"]
+        else:
+            continue
+        if state == "closed" or (manual_probe and state != "half_open"):
+            deadlines.append(task_due)
+        elif state == "open" and circuit["next_probe_at"] is not None:
+            deadlines.append(max(task_due, circuit["next_probe_at"]))
+        elif state == "half_open" and circuit["probe_lease_expires_at"] is not None:
+            deadlines.append(max(task_due, circuit["probe_lease_expires_at"]))
     return min(deadlines) if deadlines else None
+
+
+def automation_due(
+    conn: sqlite3.Connection,
+    *,
+    now: str,
+    delivery_enabled: bool = False,
+    provider_id: str | None = None,
+) -> bool:
+    """Read-only predicate for the timer's existing Admin-container preflight."""
+    now = _automation_timestamp(now)
+    if conn.execute(
+        "SELECT 1 FROM automation_editions WHERE status = 'delivery_pending'"
+        " AND delivery_expires_at IS NOT NULL AND delivery_expires_at <= ? LIMIT 1",
+        (now,),
+    ).fetchone() is not None:
+        return True
+    for date in unfinished_automation_edition_dates(conn):
+        edition = automation_edition(conn, date)
+        if edition is None:
+            continue
+        if (
+            edition.dirty_generation > edition.built_generation
+            and edition.status != "build_failed"
+            and (edition.build_not_before is None or edition.build_not_before <= now)
+        ):
+            return True
+        if (
+            edition.status == "building"
+            and edition.build_lease_expires_at is not None
+            and edition.build_lease_expires_at <= now
+        ):
+            return True
+        if delivery_enabled and edition.status == "complete":
+            return True
+        wake_at = next_automation_wakeup_at(conn, date, provider_id=provider_id, now=now)
+        if wake_at is not None and wake_at <= now:
+            return True
+    return False
 
 
 def pending_automation_build_dates(conn: sqlite3.Connection) -> list[str]:
@@ -3960,6 +4118,7 @@ def record_provider_outcome(
     *,
     outcome: ProviderOutcome,
     now: str,
+    _commit: bool = True,
 ) -> ProviderCircuit:
     provider_id = _non_empty(provider_id, "provider_id", maximum=128)
     now = _automation_timestamp(now)
@@ -3971,7 +4130,8 @@ def record_provider_outcome(
     }:
         raise ValueError("provider outcome is invalid")
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
         circuit = _ensure_provider_circuit(conn, provider_id, now)
         if circuit.state == "half_open":
             raise RuntimeError("half-open outcome must finish the active probe")
@@ -4028,7 +4188,8 @@ def record_provider_outcome(
                 provider_id,
             ),
         )
-        conn.commit()
+        if _commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -4087,6 +4248,7 @@ def finish_provider_probe(
     owner: str,
     outcome: ProviderOutcome,
     now: str,
+    _commit: bool = True,
 ) -> ProviderCircuit:
     if outcome not in {
         "success",
@@ -4097,7 +4259,8 @@ def finish_provider_probe(
         raise ValueError("provider outcome is invalid")
     now = _automation_timestamp(now)
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
         circuit = _ensure_provider_circuit(conn, provider_id, now)
         if circuit.state != "half_open" or circuit.probe_owner != owner:
             raise RuntimeError("provider probe is not owned by this worker")
@@ -4152,7 +4315,8 @@ def finish_provider_probe(
                 " WHERE provider_id = ? AND status = 'configuration_blocked'",
                 (now, provider_id),
             )
-        conn.commit()
+        if _commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -4594,13 +4758,15 @@ def record_selection_report(conn, date: str, reasons: dict, *, now: str) -> None
     save_fetch_report(conn, date, report, now=now)
 
 
-def upsert_articles(conn: sqlite3.Connection, date: str, articles: list[Article]) -> None:
+def upsert_articles(
+    conn: sqlite3.Connection, date: str, articles: list[Article], *, _commit: bool = True
+) -> None:
     """按 url 写入文章,单个事务提交。
 
     覆盖规则:库中已翻译(translated_by 非空)的行不被未翻译的新版本覆盖,
     避免重新抓取刷掉翻译成果;其余情况一律用新数据整体覆盖。
     """
-    with conn:
+    with conn if _commit else nullcontext():
         for article in articles:
             if not article.translated_by:
                 row = conn.execute(

@@ -6,10 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import queue
 import secrets
-import socket
-import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -26,6 +23,7 @@ from news_digest.config_io import (
     locked_path,
     update_text,
 )
+from news_digest.translation.client import TranslationError, _bounded_default_resolver
 
 PROFILES_FILE = ".env.providers.local"
 ENV_FILE = ".env.local"
@@ -366,17 +364,6 @@ def assert_recent_success(root: Path, provider: dict[str, Any], *, max_age_secon
     )
 
 
-def _default_resolver(hostname: str, port: int) -> Iterable[str]:
-    return {
-        sockaddr[0]
-        for _, _, _, _, sockaddr in socket.getaddrinfo(
-            hostname,
-            port,
-            type=socket.SOCK_STREAM,
-        )
-    }
-
-
 def validate_public_https_target(
     base_url: str,
     resolver: Callable[[str, int], Iterable[str]] | None = None,
@@ -404,25 +391,25 @@ def validate_public_https_target(
     }
     if parts.hostname.casefold() in local_names:
         raise AdminConfigError("生产 API 测试目标不是公网主机")
-    outcome: queue.SimpleQueue[tuple[bool, object]] = queue.SimpleQueue()
-
-    def resolve() -> None:
-        try:
-            outcome.put((True, list((resolver or _default_resolver)(parts.hostname, port))))
-        except BaseException as error:
-            outcome.put((False, error))
-
-    worker = threading.Thread(target=resolve, daemon=True)
-    worker.start()
-    worker.join(max(0.0, timeout_seconds))
-    if worker.is_alive():
-        raise AdminConfigError("API 主机 DNS 解析超时")
-    succeeded, value = outcome.get()
-    if not succeeded:
-        if isinstance(value, (OSError, socket.gaierror)):
-            raise AdminConfigError("API 主机 DNS 解析失败") from value
-        raise AdminConfigError("API 主机 DNS 解析失败")
-    addresses = list(value)
+    try:
+        if resolver is None:
+            addresses = list(
+                _bounded_default_resolver(
+                    parts.hostname, port, min(_DNS_TIMEOUT_SECONDS, timeout_seconds), None
+                )
+            )
+        elif timeout_seconds <= 0:
+            raise AdminConfigError("API 主机 DNS 解析超时")
+        else:
+            addresses = list(resolver(parts.hostname, port))
+    except TranslationError as error:
+        if error.category == "connection_timeout":
+            raise AdminConfigError("API 主机 DNS 解析超时") from error
+        raise AdminConfigError("API 主机 DNS 解析失败") from error
+    except AdminConfigError:
+        raise
+    except Exception as error:
+        raise AdminConfigError("API 主机 DNS 解析失败") from error
     if not addresses:
         raise AdminConfigError("API 主机 DNS 无可用结果")
     for value in addresses:

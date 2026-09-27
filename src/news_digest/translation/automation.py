@@ -10,6 +10,7 @@ import logging
 import math
 import secrets
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -230,40 +231,40 @@ def fail_translation_work(
     now: str,
     error: Exception,
     stage: FailureStage,
+    timings: dict | None = None,
 ) -> db.TranslationTask:
-    task = db.translation_task(conn, task_id)
-    if task is None:
-        raise RuntimeError("translation task does not exist")
     failure = classify_translation_failure(error, stage=stage)
     diagnostic_id = secrets.token_hex(8)
-    failed = db.finish_translation_task_failure(
-        conn,
-        task_id,
-        owner=owner,
-        now=now,
-        error_code=failure.error_code,
-        error_category=failure.error_category,
-        failure_stage=stage,
-        diagnostic_id=diagnostic_id,
-        http_status=failure.http_status,
-        auto_retry=failure.auto_retry,
-    )
-    circuit = db.get_provider_circuit(conn, task.provider_id)
-    if circuit is not None and circuit.state == "half_open" and circuit.probe_owner == owner:
-        db.finish_provider_probe(
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        task = db.translation_task(conn, task_id)
+        if task is None:
+            raise RuntimeError("translation task does not exist")
+        failed = db.finish_translation_task_failure(
+            conn,
+            task_id,
+            owner=owner,
+            now=now,
+            error_code=failure.error_code,
+            error_category=failure.error_category,
+            failure_stage=stage,
+            diagnostic_id=diagnostic_id,
+            http_status=failure.http_status,
+            timings=timings,
+            auto_retry=failure.auto_retry,
+            _commit=False,
+        )
+        _record_work_outcome(
             conn,
             task.provider_id,
             owner=owner,
             outcome=failure.provider_outcome,
             now=now,
         )
-    else:
-        db.record_provider_outcome(
-            conn,
-            task.provider_id,
-            outcome=failure.provider_outcome,
-            now=now,
-        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return failed
 
 
@@ -276,25 +277,50 @@ def succeed_translation_work(
     article: Article | None = None,
     result_json: str | None = None,
     expected_attempt: int | None = None,
+    timings: dict | None = None,
+    _commit: bool = True,
 ) -> db.TranslationTask:
-    task = db.translation_task(conn, task_id)
-    if task is None:
-        raise RuntimeError("translation task does not exist")
-    succeeded = db.finish_translation_task_success(
-        conn,
-        task_id,
-        owner=owner,
-        now=now,
-        article=article,
-        result_json=result_json,
-        expected_attempt=expected_attempt,
-    )
-    circuit = db.get_provider_circuit(conn, task.provider_id)
-    if circuit is not None and circuit.state == "half_open" and circuit.probe_owner == owner:
-        db.finish_provider_probe(conn, task.provider_id, owner=owner, outcome="success", now=now)
-    else:
-        db.record_provider_outcome(conn, task.provider_id, outcome="success", now=now)
+    try:
+        if _commit:
+            conn.execute("BEGIN IMMEDIATE")
+        task = db.translation_task(conn, task_id)
+        if task is None:
+            raise RuntimeError("translation task does not exist")
+        succeeded = db.finish_translation_task_success(
+            conn,
+            task_id,
+            owner=owner,
+            now=now,
+            article=article,
+            result_json=result_json,
+            expected_attempt=expected_attempt,
+            timings=timings,
+            _commit=False,
+        )
+        _record_work_outcome(conn, task.provider_id, owner=owner, outcome="success", now=now)
+        if _commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return succeeded
+
+
+def _record_work_outcome(
+    conn: sqlite3.Connection,
+    provider_id: str,
+    *,
+    owner: str,
+    outcome: db.ProviderOutcome,
+    now: str,
+) -> None:
+    circuit = db.get_provider_circuit(conn, provider_id)
+    if circuit is not None and circuit.state == "half_open" and circuit.probe_owner == owner:
+        db.finish_provider_probe(
+            conn, provider_id, owner=owner, outcome=outcome, now=now, _commit=False
+        )
+    else:
+        db.record_provider_outcome(conn, provider_id, outcome=outcome, now=now, _commit=False)
 
 
 class TranslationAutomationRunner:
@@ -507,8 +533,24 @@ class TranslationAutomationRunner:
                 continue
 
             accepted = []
+            timing_reader = getattr(self.translator, "drain_request_timings", None)
+            if callable(timing_reader):
+                timing_reader()
+            attempt_started = time.monotonic()
+            timing_state = {"validation_started": None, "validation_seconds": 0.0, "seen": False}
 
-            def persist_stage(stage: str, task_id=candidate.task_id) -> None:
+            def persist_stage(
+                stage: str, task_id=candidate.task_id, timing_state=timing_state
+            ) -> None:
+                stage_at = time.monotonic()
+                if timing_state["validation_started"] is not None:
+                    timing_state["validation_seconds"] += (
+                        stage_at - timing_state["validation_started"]
+                    )
+                    timing_state["validation_started"] = None
+                if stage == "schema_validation":
+                    timing_state["validation_started"] = stage_at
+                    timing_state["seen"] = True
                 stage_conn = db.connect(self.database)
                 try:
                     db.update_translation_task_progress(
@@ -548,6 +590,28 @@ class TranslationAutomationRunner:
                 finally:
                     audit_conn.close()
 
+            def attempt_timings(
+                timing_reader=timing_reader,
+                attempt_started=attempt_started,
+                timing_state=timing_state,
+            ) -> dict | None:
+                finished_at = time.monotonic()
+                if timing_state["validation_started"] is not None:
+                    timing_state["validation_seconds"] += (
+                        finished_at - timing_state["validation_started"]
+                    )
+                    timing_state["validation_started"] = None
+                if not callable(timing_reader):
+                    return None
+                return {
+                    "requests": timing_reader(),
+                    "attempt_total_ms": round((finished_at - attempt_started) * 1000),
+                    "validation_ms": (
+                        round(timing_state["validation_seconds"] * 1000)
+                        if timing_state["seen"] else None
+                    ),
+                }
+
             try:
                 translated, cache_hit = translate_article_once(
                     article,
@@ -564,6 +628,7 @@ class TranslationAutomationRunner:
                     force=force,
                 )
             except Exception as error:
+                timings = attempt_timings()
                 completed_at = self._completion_timestamp(now)
                 conn = db.connect(self.database)
                 try:
@@ -587,12 +652,14 @@ class TranslationAutomationRunner:
                             now=completed_at,
                             error=error,
                             stage=_failure_stage(error),
+                            timings=timings,
                         )
                 finally:
                     conn.close()
                 result.failed += 1
                 continue
 
+            timings = attempt_timings()
             completed_at = self._completion_timestamp(now)
             conn = db.connect(self.database)
             try:
@@ -605,16 +672,29 @@ class TranslationAutomationRunner:
                         article=translated,
                         result_json=json.dumps(result_to_dict(accepted[0])),
                         expected_attempt=claim.task.attempt_count,
+                        timings=timings,
                     )
                 else:
-                    db.upsert_articles(conn, candidate.edition_date, [translated])
-                    succeed_translation_work(
-                        conn,
-                        candidate.task_id,
-                        owner=owner,
-                        now=completed_at,
-                    )
-                    db.mark_translation_ready_for_build(conn, candidate.task_id, now=completed_at)
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        db.upsert_articles(
+                            conn, candidate.edition_date, [translated], _commit=False
+                        )
+                        succeed_translation_work(
+                            conn,
+                            candidate.task_id,
+                            owner=owner,
+                            now=completed_at,
+                            timings=timings,
+                            _commit=False,
+                        )
+                        db.mark_translation_ready_for_build(
+                            conn, candidate.task_id, now=completed_at, _commit=False
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
             finally:
                 conn.close()
             result.succeeded += 1

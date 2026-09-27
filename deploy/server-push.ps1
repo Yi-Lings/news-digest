@@ -53,7 +53,7 @@ if ($AppDir -notmatch '^/[A-Za-z0-9._/-]+$' -or $AppDir -match '(^|/)\.\.?(?:/|$
     Write-Host "[FAIL] Invalid absolute server app directory: $AppDir" -ForegroundColor Red
     exit 1
 }
-if ($Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$') {
+if ($Domain.Length -gt 253 -or $Domain -notmatch '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,63}|xn--[A-Za-z0-9](?:[A-Za-z0-9-]{0,57}[A-Za-z0-9])?)$') {
     Write-Host "[FAIL] Invalid site domain: $Domain" -ForegroundColor Red
     exit 1
 }
@@ -125,6 +125,8 @@ $Files = @(
     (Join-Path $DeployDir "systemd\news-digest-backup.service"),
     (Join-Path $DeployDir "systemd\news-digest-backup.timer"),
     (Join-Path $DeployDir "nginx\news.conf"),
+    (Join-Path $DeployDir "site-gate.sh"),
+    (Join-Path $DeployDir "rollback-schema.py"),
     (Join-Path $DeployDir "preflight.sh"),
     (Join-Path $DeployDir "bootstrap.sh")
 )
@@ -186,7 +188,7 @@ Stop-OnError $LASTEXITCODE "scp upload"
 
 # Strip CR from every uploaded text file: a Windows checkout may carry CRLF,
 # and a trailing CR breaks bash scripts, systemd units and nginx conf files.
-& ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest-wakeup.timer news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh"
+& ssh @SshArgs $Server "cd $Incoming && sed -i 's/\r$//' compose.yaml news-digest.service news-digest-resume.service news-digest-wakeup.path news-digest-wakeup.timer news-digest.timer news-digest-backup.service news-digest-backup.timer news.conf site-gate.sh rollback-schema.py preflight.sh bootstrap.sh && chmod +x preflight.sh bootstrap.sh site-gate.sh"
 Stop-OnError $LASTEXITCODE "normalize line endings"
 
 # These values are allow-list validated above before entering the remote POSIX shell.
@@ -230,5 +232,5 @@ if ($BootstrapExit -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[DONE] Deployment completed. Configure API/SMTP in Admin; automatic delivery remains disabled until enabled there."
+Write-Host "[DONE] Deployment completed. If HTTPS was issued, configure API/SMTP in Admin; HTTP-only installs keep public Admin disabled."
 exit 0

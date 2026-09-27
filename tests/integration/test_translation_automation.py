@@ -3,11 +3,18 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from news_digest.config import BuildConfig, FetchConfig
 from news_digest.models import Article, DailyEdition, Paragraph
 from news_digest.pipeline import build_editions
 from news_digest.storage import db
-from news_digest.translation.automation import TranslationAutomationRunner
+from news_digest.translation.automation import (
+    TranslationAutomationRunner,
+    claim_translation_work,
+    fail_translation_work,
+    succeed_translation_work,
+)
 from news_digest.translation.client import TranslationError
 from news_digest.translation.schema import InvalidTranslation
 
@@ -89,6 +96,46 @@ class FakeTranslator:
         if article.slug in self.fail_first and self.calls[article.slug] == 1:
             raise TranslationError("redacted", category="network")
         return _translation(article)
+
+
+def test_automation_persists_safe_request_timings_with_task_completion(tmp_path):
+    class TimedTranslator(FakeTranslator):
+        def __init__(self):
+            super().__init__(set(), Counter())
+            self.timings = []
+
+        def translate(self, article):
+            self.timings.append({
+                "dns_ms": 4, "first_byte_ms": 20, "stream_ms": 5,
+                "total_ms": 29, "http_status": 200,
+            })
+            return super().translate(article)
+
+        def drain_request_timings(self):
+            result, self.timings = self.timings, []
+            return result
+
+    database = tmp_path / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider",
+        translator=TimedTranslator(),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+    result = runner.run_ready(now=_at(1), owner="worker")
+    assert result.succeeded == 1
+    conn = db.connect(database)
+    task = db.list_translation_tasks(conn, "2026-07-28")[0]
+    attempt = db.list_translation_attempts(conn, task.task_id)[0]
+    assert attempt.http_status == 200
+    assert json.loads(attempt.timings_json)["requests"][0] == {
+        "dns_ms": 4, "first_byte_ms": 20, "stream_ms": 5,
+        "total_ms": 29, "http_status": 200,
+    }
+    conn.close()
 
 
 class BuildHarness:
@@ -321,6 +368,70 @@ def test_provider_circuit_uses_one_real_task_for_automatic_half_open(tmp_path):
     assert recovered is not None
     assert recovered.state == "closed"
     assert recovered.recovery_mode
+
+
+@pytest.mark.parametrize("succeed", [False, True])
+def test_translation_completion_rolls_back_all_state_if_circuit_write_fails(
+    tmp_path, monkeypatch, succeed
+):
+    database = tmp_path / "data" / "news.db"
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=lambda date: date,
+        delivery_callback=lambda date, key: True,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+    conn = db.connect(database)
+    try:
+        task = db.list_translation_tasks(conn, "2026-07-28")[0]
+        queued = db.queue_translation_task_dispatch(
+            conn, task.task_id, now=_at(1).isoformat(), actor="admin"
+        )
+        claim = claim_translation_work(
+            conn, task.task_id, owner="worker-a", now=_at(2).isoformat(),
+            lease_seconds=900, manual_retry=True,
+        )
+        assert claim.task is not None
+
+        original_record = db.record_provider_outcome
+
+        def interrupted(*args, **kwargs):
+            original_record(*args, **kwargs)
+            raise RuntimeError("injected circuit interruption")
+
+        monkeypatch.setattr(db, "record_provider_outcome", interrupted)
+        with pytest.raises(RuntimeError, match="injected circuit interruption"):
+            if succeed:
+                succeed_translation_work(
+                    conn, task.task_id, owner="worker-a", now=_at(3).isoformat(),
+                    article=_article(1), result_json='{"title_zh":"translated"}',
+                    expected_attempt=claim.task.attempt_count,
+                )
+            else:
+                fail_translation_work(
+                    conn, task.task_id, owner="worker-a", now=_at(3).isoformat(),
+                    error=TranslationError("upstream unavailable", category="provider", status=503),
+                    stage="waiting_model",
+                )
+
+        current = db.translation_task(conn, task.task_id)
+        attempt = conn.execute(
+            "SELECT status FROM translation_attempts WHERE task_id = ?", (task.task_id,)
+        ).fetchone()
+        action = db.latest_translation_admin_action(conn, task.task_id)
+        item = db.translation_item(conn, task.task_id)
+        edition = db.automation_edition(conn, "2026-07-28")
+        assert current.status == "running"
+        assert attempt["status"] == "running"
+        assert action.status == "running" and action.action_id == queued.manual_action_id
+        assert item["result_json"] is None
+        assert edition.dirty_generation == 0
+        assert db.get_provider_circuit(conn, "provider-default") is None
+    finally:
+        conn.close()
 
 
 def test_next_automation_wakeup_includes_retry_and_provider_probe_deadlines(tmp_path):

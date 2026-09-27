@@ -198,7 +198,7 @@ def test_deploy_targets_are_explicit_validated_and_forwarded():
     assert "仓库外的本地 powershell wrapper" in deploy_docs.lower()
 
 
-def test_deploy_requires_all_runtime_units_to_be_inactive_before_mutation():
+def test_deploy_freezes_timers_after_confirming_workers_are_idle():
     preflight = _read("deploy/preflight.sh")
     bootstrap = _read("deploy/bootstrap.sh")
     units = (
@@ -217,9 +217,13 @@ def test_deploy_requires_all_runtime_units_to_be_inactive_before_mutation():
     assert preflight.index("\ncheck_deployment_unit_quiescence\n") < preflight.index(
         "# --- CPU 架构"
     )
-    assert bootstrap.index("\nrequire_deployment_units_quiescent\n") < bootstrap.index(
+    assert bootstrap.index("\nrequire_workers_quiescent\n") < bootstrap.index(
+        "\nfreeze_deployment_timers\n"
+    )
+    assert bootstrap.index("\nfreeze_deployment_timers\n") < bootstrap.index(
         'section "2/10 目录与配置工件就位"'
     )
+    assert "bootstrap 会记录原状态并自动冻结" in preflight
 
 
 def test_all_deploy_ports_must_be_pairwise_distinct():
@@ -412,11 +416,25 @@ def test_deployment_never_runs_the_content_pipeline():
     assert bootstrap.index(stamp) < bootstrap.index(
         "systemctl enable --now news-digest.timer"
     )
-    assert "https://$Domain/healthz" in deploy_all
+    assert "site-gate.sh' verify-auto" in deploy_all
+    assert "curl -sk" not in deploy_all
     assert "https://$Domain/);" not in deploy_all
     assert 'if [ "$HEALTH_CODE" != "200" ]' in bootstrap
     assert 'if [ "$ADMIN_CODE" != "200" ]' in bootstrap
     assert '"${COMPOSE[@]}" logs --no-color --tail 100 admin' in bootstrap
+
+
+def test_all_deploy_entrypoints_accept_ascii_idn_domains_without_shell_metacharacters():
+    for path in (
+        "deploy/install.sh",
+        "deploy/preflight.sh",
+        "deploy/bootstrap.sh",
+        "deploy/server-push.ps1",
+        "deploy/deploy-all.ps1",
+    ):
+        script = _read(path)
+        assert "253" in script
+        assert "xn--" in script or "[xX][nN]--" in script
 
 
 def test_public_switch_and_scheduling_follow_all_local_health_checks():

@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import os
+import sqlite3
 import types
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from news_digest.admin_providers import AdminConfigError, save_profiles
 from news_digest.cli import (
     _run_admin,
     _run_automation_daily,
+    _run_automation_due,
     _run_automation_resume,
     _run_daily,
     _run_preview,
@@ -427,9 +429,12 @@ def test_production_automation_waits_and_retries_only_failed_article(
     assert now[0] == dt.datetime(2026, 7, 28, 0, 0, 17, tzinfo=dt.UTC)
 
 
+@pytest.mark.parametrize("scenario", ["terminal", "delayed_retry", "blocked_pending"])
 def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, scenario
 ):
+    mixed_retry = scenario == "delayed_retry"
+    now = [dt.datetime(2026, 7, 28, tzinfo=dt.UTC)]
     fetch_config = FetchConfig(None, 24, "Asia/Shanghai", tmp_path / "data")
     article = Article(
         slug="article-1",
@@ -455,6 +460,8 @@ def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
             pass
 
     class FakeRunner:
+        provider_id = "provider-default"
+
         def __init__(self, **kwargs):
             del kwargs
             self.calls = 0
@@ -466,7 +473,10 @@ def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
         def run_ready(self, *, now, owner, max_tasks):
             del now, owner, max_tasks
             self.calls += 1
-            claimed = 1 if self.calls == 1 else 0
+            claimed = int(
+                scenario != "blocked_pending"
+                and self.calls == (2 if mixed_retry else 1)
+            )
             return types.SimpleNamespace(
                 claimed=claimed, succeeded=0, failed=1, blocked=0
             )
@@ -512,26 +522,66 @@ def test_automation_drains_ready_tasks_before_stopping_on_terminal_failure(
     monkeypatch.setattr(
         "news_digest.storage.db.automation_edition",
         lambda conn, date: types.SimpleNamespace(
-            status="partial",
+            status="complete" if mixed_retry and holder["runner"].calls >= 2 else "partial",
             dirty_generation=0,
             built_generation=0,
         ),
     )
+
+    def task_states(conn, date):
+        del conn, date
+        terminal = types.SimpleNamespace(
+            status="failed", auto_retry=False, provider_id="provider-default"
+        )
+        if not mixed_retry:
+            if scenario == "blocked_pending":
+                return [
+                    types.SimpleNamespace(
+                        status="configuration_blocked", auto_retry=False,
+                        provider_id="provider-default",
+                    ),
+                    types.SimpleNamespace(
+                        status="pending", auto_retry=True,
+                        provider_id="provider-default",
+                    ),
+                ]
+            return [terminal]
+        if holder["runner"].calls >= 2:
+            return [types.SimpleNamespace(status="succeeded", provider_id="provider-default")]
+        return [
+            terminal,
+            types.SimpleNamespace(
+                status="retry_wait", auto_retry=True, provider_id="provider-default",
+                next_retry_at=(now[0] + dt.timedelta(seconds=15)).isoformat(),
+            ),
+        ]
+
     monkeypatch.setattr(
         "news_digest.storage.db.active_translation_tasks",
-        lambda conn, date: [types.SimpleNamespace(status="failed", auto_retry=False)],
+        task_states,
     )
+    monkeypatch.setattr(
+        "news_digest.storage.db.next_automation_wakeup_at",
+        lambda *args, **kwargs: (
+            (now[0] + dt.timedelta(seconds=15)).isoformat() if mixed_retry else None
+        ),
+    )
+
+    def sleep(seconds):
+        now[0] += dt.timedelta(seconds=seconds)
 
     assert (
         _run_automation_daily(
             fetch_config,
             edition,
-            clock=lambda: dt.datetime(2026, 7, 28, tzinfo=dt.UTC),
-            sleep=lambda seconds: None,
+            clock=lambda: now[0],
+            sleep=sleep,
         )
-        == 10
+        == (0 if mixed_retry else 10)
     )
-    assert holder["runner"].calls == 2
+    assert holder["runner"].calls == (1 if scenario == "blocked_pending" else 2)
+    if mixed_retry:
+        assert now[0] == dt.datetime(2026, 7, 28, 0, 0, 15, tzinfo=dt.UTC)
 
 
 def test_daily_partial_or_archive_failure_returns_nonzero(tmp_path, monkeypatch):
@@ -825,6 +875,128 @@ def test_resume_automation_is_a_noop_without_unfinished_editions(tmp_path, monke
 
     assert _run_automation_resume(True) == 0
     assert called == []
+
+
+def test_automation_due_cli_is_readonly_and_distinguishes_idle_due_and_error(
+    tmp_path, monkeypatch, capsys
+):
+    class FakeTranslator:
+        cache_identity = "current-provider"
+
+        def __init__(self, config):
+            del config
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("news_digest.translation.client.ApiTranslator", FakeTranslator)
+    monkeypatch.setattr("news_digest.cli._runtime_translation_config", lambda: object())
+    database = tmp_path / "news.db"
+    conn = db.connect(database)
+    try:
+        db.ensure_automation_edition(
+            conn, "2026-08-01", target_count=1, now="2026-08-01T00:00:00+00:00"
+        )
+        task = db.ensure_translation_task(
+            conn, edition_date="2026-08-01", article_id="https://example.com/a",
+            article_title="Article", provider_id="default-current-provider",
+            now="2026-08-01T00:00:00+00:00",
+        )
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0"
+                " WHERE task_id = ?", (task.task_id,)
+            )
+        monkeypatch.setattr(
+            "news_digest.cli._fetch_config",
+            lambda _window: types.SimpleNamespace(database=database),
+        )
+        monkeypatch.setattr(
+            "news_digest.config.email_delivery_enabled_from_env", lambda _env=None: False
+        )
+        now = dt.datetime(2026, 8, 1, 0, 1, tzinfo=dt.UTC)
+        assert _run_automation_due(now=now) == 1
+        assert capsys.readouterr().out.strip() == "AUTOMATION_IDLE"
+
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'pending' WHERE task_id = ?",
+                (task.task_id,),
+            )
+        assert _run_automation_due(now=now) == 0
+        assert capsys.readouterr().out.strip() == "AUTOMATION_DUE"
+
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0"
+                " WHERE task_id = ?", (task.task_id,)
+            )
+        db.ensure_translation_task(
+            conn, edition_date="2026-08-01", article_id="https://example.com/old",
+            article_title="Old provider article", provider_id="provider-retired",
+            now="2026-08-01T00:00:00+00:00",
+        )
+        assert _run_automation_due(now=now) == 1
+        assert capsys.readouterr().out.strip() == "AUTOMATION_IDLE"
+        assert all(
+            not db.automation_due(
+                conn,
+                now=(now + dt.timedelta(seconds=offset)).isoformat(),
+                provider_id="default-current-provider",
+            )
+            for offset in range(0, 3600, 30)
+        )
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / ".env").write_text("EMAIL_DELIVERY_ENABLED=false\n", encoding="utf-8")
+        monkeypatch.setenv("EMAIL_DELIVERY_ENABLED", "true")
+        captured = {}
+
+        def load_runtime_config(path, environ):
+            captured["path"] = path
+            captured["delivery"] = environ["EMAIL_DELIVERY_ENABLED"]
+            return object()
+
+        monkeypatch.setattr(
+            "news_digest.admin_providers.runtime_translation_config", load_runtime_config
+        )
+        assert _run_automation_due(
+            now=now, database=database, config_dir=config_dir
+        ) == 1
+        assert capsys.readouterr().out.strip() == "AUTOMATION_IDLE"
+        assert captured == {
+            "path": config_dir / "providers.json",
+            "delivery": "false",
+        }
+
+        read_only = db.connect_readonly(database)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                read_only.execute("UPDATE translation_tasks SET status = 'failed'")
+        finally:
+            read_only.close()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "news_digest.cli._fetch_config",
+        lambda _window: types.SimpleNamespace(database=tmp_path / "absent.db"),
+    )
+    assert _run_automation_due(now=now) == 2
+    assert capsys.readouterr().out.strip().startswith("AUTOMATION_CHECK_ERROR:")
+
+    fresh_database = tmp_path / "fresh.db"
+    db.connect(fresh_database).close()
+    assert _run_automation_due(
+        now=now, database=fresh_database, config_dir=tmp_path / "missing-config"
+    ) == 1
+    assert capsys.readouterr().out.strip() == "AUTOMATION_IDLE"
+
+    assert _run_automation_due(
+        now=now, database=database, config_dir=tmp_path / "missing-config"
+    ) == 2
+    assert capsys.readouterr().out.strip().startswith("AUTOMATION_CHECK_ERROR:")
 
 
 def test_resume_automation_selects_latest_unfinished_edition(tmp_path, monkeypatch):

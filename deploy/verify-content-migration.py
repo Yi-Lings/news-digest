@@ -33,7 +33,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", type=Path)
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--site-url", help="Site URL used when --build is enabled")
     args = parser.parse_args()
+    if args.build and not (args.site_url or "").strip():
+        parser.error("--build requires --site-url")
     root = args.snapshot.resolve()
     database = root / "news.db"
     if not database.is_file():
@@ -63,7 +66,7 @@ def main():
             str(path.relative_to(root / "current")): hashlib.sha256(path.read_bytes()).hexdigest()
             for date in unconfirmed for path in (root / "current/issues" / date).glob("*.html")
         }
-        build_editions(editions, BuildConfig(root, "https://news.cheapcoding.top"))
+        build_editions(editions, BuildConfig(root, args.site_url.rstrip("/")))
         assert all(
             hashlib.sha256((root / "current" / path).read_bytes()).hexdigest() == digest
             for path, digest in historical_pages.items()

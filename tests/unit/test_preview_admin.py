@@ -48,6 +48,7 @@ from news_digest.preview_server import (
     mask_key,
 )
 from news_digest.storage import db
+from news_digest.translation import client as client_module
 from news_digest.translation.client import ApiTranslator, TranslationError
 
 PANEL_PASSWORD = "test-password-1"
@@ -759,19 +760,31 @@ def test_ssrf_rejects_all_non_public_and_unsafe_targets():
     )
 
 
-def test_public_target_dns_validation_has_hard_timeout():
-    def slow_resolver(host, port):
-        time.sleep(0.05)
-        return ["93.184.216.34"]
+def _blocked_public_target_dns(host, port):
+    time.sleep(30)
+    return ["93.184.216.34"]
+
+
+def _available_public_target_dns(host, port):
+    return ["93.184.216.34"]
+
+
+def test_public_target_dns_validation_has_hard_timeout_and_recovers(monkeypatch):
+    monkeypatch.setattr(client_module, "_default_resolver", _blocked_public_target_dns)
 
     started = time.monotonic()
     with pytest.raises(AdminConfigError, match="DNS 解析超时"):
         validate_public_https_target(
             "https://api.example.com/v1",
-            slow_resolver,
-            timeout_seconds=0.01,
+            timeout_seconds=1.0,
         )
-    assert time.monotonic() - started < 0.04
+    assert time.monotonic() - started < 3.0
+
+    monkeypatch.setattr(client_module, "_default_resolver", _available_public_target_dns)
+    assert (
+        validate_public_https_target("https://api.example.com/v1", timeout_seconds=1.0)
+        == "https://api.example.com/v1"
+    )
 
 
 def test_production_never_serves_config_static_and_requires_login(prod_server):

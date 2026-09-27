@@ -34,6 +34,7 @@ def business_status(database: Path, site_dir: Path, *, timezone: str, now: dt.da
     conn = db.connect(database)
     try:
         state = db.operational_snapshot(conn, date=local.date().isoformat(), now=now.isoformat())
+        state["translation_health"] = _translation_health(conn, now=now)
     finally:
         conn.close()
     edition = state["edition"]
@@ -47,6 +48,8 @@ def business_status(database: Path, site_dir: Path, *, timezone: str, now: dt.da
             or edition["target_count"] == 0
         ),
         "translation_blocked": bool(state["tasks"].get("configuration_blocked")),
+        "probe_overdue": bool(state["translation_health"]["probe_overdue"]),
+        "retry_action_stale": bool(state["translation_health"]["retry_action_stale"]),
         "mail_unknown": bool(state["delivery"].get("unknown")),
         "mail_failed": bool(state["delivery"].get("failed")),
         "outbox_overdue": bool(state["outbox_overdue"]),
@@ -58,6 +61,42 @@ def business_status(database: Path, site_dir: Path, *, timezone: str, now: dt.da
     state["disk_free_bytes"] = shutil.disk_usage(database.parent).free
     state["checks"]["disk_low"] = state["disk_free_bytes"] < 256 * 1024 * 1024
     return state
+
+
+def _translation_health(conn: sqlite3.Connection, *, now: dt.datetime) -> dict[str, int]:
+    overdue = (now.astimezone(dt.UTC) - dt.timedelta(minutes=5)).isoformat()
+    recent = (now.astimezone(dt.UTC) - dt.timedelta(hours=24)).isoformat()
+    probe_overdue = conn.execute(
+        "SELECT COUNT(*) FROM provider_circuits c WHERE"
+        " (c.state = 'open' AND c.next_probe_at <= ? AND EXISTS ("
+        " SELECT 1 FROM translation_tasks t WHERE t.provider_id = c.provider_id"
+        " AND ((t.status IN ('pending', 'retry_wait')"
+        " AND COALESCE(t.next_retry_at, t.created_at) <= ?)"
+        " OR (t.status = 'failed' AND t.manual_probe_requested_at IS NOT NULL))))"
+        " OR (c.state = 'half_open' AND c.probe_lease_expires_at <= ?)",
+        (overdue, overdue, overdue),
+    ).fetchone()[0]
+    retry_action_stale = conn.execute(
+        "SELECT COUNT(*) FROM translation_admin_actions a"
+        " LEFT JOIN translation_tasks t ON t.task_id = a.task_id"
+        " WHERE a.action IN ('retry', 'probe') AND"
+        " ((a.status = 'requested' AND a.requested_at <= ?)"
+        " OR (a.status = 'running' AND"
+        " (t.hard_timeout_at <= ? OR (t.status != 'running' AND a.started_at <= ?))))",
+        (overdue, overdue, overdue),
+    ).fetchone()[0]
+    provider_504_recent = conn.execute(
+        "SELECT COUNT(*) FROM translation_attempts"
+        " WHERE started_at >= ? AND (http_status = 504 OR EXISTS ("
+        " SELECT 1 FROM json_each(translation_attempts.timings_json, '$.requests') r"
+        " WHERE json_extract(r.value, '$.http_status') = 504))",
+        (recent,),
+    ).fetchone()[0]
+    return {
+        "probe_overdue": probe_overdue,
+        "retry_action_stale": retry_action_stale,
+        "provider_504_recent": provider_504_recent,
+    }
 
 
 def monitor(

@@ -18,10 +18,15 @@ OWNER="$ND_OWNER"
 WEB_PORT="${ND_WEB_PORT:-8618}"
 ADMIN_PORT="${ND_ADMIN_PORT:-8619}"
 SITE_PORT="${ND_SITE_PORT:-8620}"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${SRC_DIR}/site-gate.sh" ] || { echo '错误：缺少 site-gate.sh' >&2; exit 1; }
+# shellcheck source=site-gate.sh
+source "${SRC_DIR}/site-gate.sh"
 if [[ ! "$OWNER" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
    [[ ! "$APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$APP_DIR/" == *"//"* ]] ||
    [[ "$APP_DIR/" == *"/./"* ]] || [[ "$APP_DIR/" == *"/../"* ]] ||
-   [[ ! "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] ||
+   (( ${#DOMAIN} > 253 )) ||
+   [[ ! "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+([A-Za-z]{2,63}|[xX][nN]--[A-Za-z0-9]([A-Za-z0-9-]{0,57}[A-Za-z0-9])?)$ ]] ||
    [[ ! "$ND_CERTBOT_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]; then
   printf '错误：部署目标格式非法。\n' >&2
   exit 1
@@ -55,6 +60,7 @@ check_deployment_unit_quiescence() {
     news-digest.service \
     news-digest-resume.service \
     news-digest-wakeup.path \
+    news-digest-wakeup.timer \
     news-digest-backup.timer \
     news-digest-backup.service
   do
@@ -70,12 +76,18 @@ check_deployment_unit_quiescence() {
       fail "无法读取 ${unit} 的 ActiveState——拒绝在运行状态未知时部署"
       continue
     fi
-    case "$active_state" in
-      inactive|failed)
-        ok "${unit} ActiveState=${active_state}——已冻结（enabled 状态不影响部署）"
+    case "$unit:$active_state" in
+      *.service:inactive|*.service:failed)
+        ok "${unit} ActiveState=${active_state}——worker 未运行"
+        ;;
+      *.timer:active|*.path:active)
+        ok "${unit} ActiveState=active——bootstrap 会记录原状态并自动冻结"
+        ;;
+      *.timer:inactive|*.timer:failed|*.path:inactive|*.path:failed)
+        ok "${unit} ActiveState=${active_state}——bootstrap 会记录原状态"
         ;;
       *)
-        fail "${unit} ActiveState=${active_state:-unknown}——先停止该 unit，再重新部署"
+        fail "${unit} ActiveState=${active_state:-unknown}——等待 worker 完成或状态稳定后重试"
         ;;
     esac
   done
@@ -86,7 +98,7 @@ echo " news-digest 部署前体检（只读，不做任何修改）"
 echo " $(date '+%F %T %Z')  host=$(hostname 2>/dev/null || echo unknown)"
 echo "================================================================"
 
-# --- 写入冻结：enabled 只表示开机持久化；部署只要求四个运行入口当前均非 active ---
+# --- worker 必须空闲；timer/path 可保持运行，由 bootstrap 事务内冻结并恢复 ---
 check_deployment_unit_quiescence
 
 # --- CPU 架构：release.yml 目前只发布 linux/amd64，架构不符必须先改 CI 重新发布 ---
@@ -131,16 +143,45 @@ else
   warn "无法读取 df 输出——请人工核对磁盘余量"
 fi
 
-# --- 宿主机 Nginx：现有主站与 SUB2API 在用，reload 前提是全局配置本就通过 ---
+# --- 宿主机 Nginx：reload 前必须确认全局配置与站点归属 ---
 if NGINX_V="$(nginx -v 2>&1)"; then
   ok "Nginx：${NGINX_V}"
-  if nginx -t >/dev/null 2>&1; then
-    ok "nginx -t 现有配置通过——可安全新增 conf.d/news.conf 并 reload"
+  if nd_nginx_test; then
+    ok "nginx -t 现有配置通过且无重复 server_name 警告"
   else
-    fail "nginx -t 现有配置不通过——先修复存量配置，否则任何 reload 都会牵连主站与 SUB2API"
+    fail "Nginx 配置无效或已有重复 server_name——先修复再部署"
+  fi
+  if nd_check_nginx_ownership; then
+    ok "ND_DOMAIN 的 Nginx 归属清楚，未被第三方站点声明"
+  else
+    fail "ND_DOMAIN 的 Nginx 归属不清或存在冲突"
   fi
 else
   fail "nginx 不可用——公网入口依赖宿主机 Nginx 反代，请先确认其安装与运行"
+fi
+if nd_check_saved_domain; then
+  ok "已有 NEWS_SITE_URL 与 ND_DOMAIN 一致（或为首次安装）"
+else
+  fail "已有 NEWS_SITE_URL 与 ND_DOMAIN 不一致"
+fi
+if nd_check_hook_ownership; then
+  ok "Certbot 项目专属 hook 路径可安全使用"
+else
+  fail "Certbot 项目专属 hook 路径被第三方占用"
+fi
+if nd_check_certificate; then
+  ok "现有证书有效且 SAN 覆盖 ND_DOMAIN"
+else
+  cert_status=$?
+  if [ "$cert_status" -eq 2 ]; then
+    if nd_has_owned_https; then
+      fail "现有 HTTPS 配置的证书缺失；禁止降级为 HTTP"
+    else
+      warn "尚无 ND_DOMAIN 证书；首次部署将尝试签发，失败时仅开放 HTTP 站点"
+    fi
+  else
+    fail "现有 ND_DOMAIN 证书无效、过期或 SAN 不匹配"
+  fi
 fi
 
 # --- certbot：缺失不阻断（bootstrap 会跳过 HTTPS 并保留 http-only 配置）---

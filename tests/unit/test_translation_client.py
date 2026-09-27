@@ -16,6 +16,7 @@ from news_digest.config import (
     translation_config_from_env,
 )
 from news_digest.models import Article, Paragraph
+from news_digest.translation import client as client_module
 from news_digest.translation.client import (
     ApiTranslator,
     TranslationError,
@@ -116,6 +117,19 @@ def test_formal_request_allows_slow_model_response_within_total_timeout():
 
     translator = _translator(handler, stream=False, timeout_seconds=180.0)
     assert translator.probe() == "ok"
+
+
+@pytest.mark.parametrize("provider_latency_seconds", [90, 180])
+def test_simulated_long_provider_response_fits_request_budget(provider_latency_seconds):
+    def gateway(request: httpx.Request) -> httpx.Response:
+        read_budget = request.extensions["timeout"]["read"]
+        if read_budget < provider_latency_seconds:
+            return httpx.Response(504)
+        return httpx.Response(200, json=_openai_non_stream("ok"))
+
+    translator = _translator(gateway, stream=False, timeout_seconds=600.0)
+    assert translator.probe() == "ok"
+    assert translator.drain_request_timings()[0]["http_status"] == 200
 
 
 def test_short_request_budget_also_bounds_read_timeout():
@@ -364,6 +378,72 @@ def test_dns_timeout_waits_until_worker_termination_is_confirmed():
     assert 0.04 <= time.monotonic() - started < 0.2
 
 
+def _blocked_dns_for_test(hostname, port):
+    time.sleep(30)
+    return ["93.184.216.34"]
+
+
+def _public_dns_for_test(hostname, port):
+    return ["93.184.216.34"]
+
+
+def test_default_dns_timeout_kills_child_and_allows_follow_up(monkeypatch):
+    monkeypatch.setattr(client_module, "_default_resolver", _blocked_dns_for_test)
+    monkeypatch.setattr(client_module, "_DNS_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(
+        client_module,
+        "_PinnedHTTPTransport",
+        lambda *_: httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_openai_non_stream("ok"))
+        ),
+    )
+    translator = ApiTranslator(_config(stream=False, timeout_seconds=5.0))
+    started = time.monotonic()
+    with pytest.raises(TranslationError) as excinfo:
+        translator.probe()
+    assert excinfo.value.category == "connection_timeout", repr(excinfo.value.__cause__)
+    assert time.monotonic() - started < 3.0
+    assert translator.drain_request_timings()[0]["dns_ms"] is not None
+
+    monkeypatch.setattr(client_module, "_default_resolver", _public_dns_for_test)
+    assert translator.probe() == "ok"
+    assert translator.drain_request_timings()[0]["http_status"] == 200
+    assert translator.drain_request_timings() == []
+
+
+def test_request_timings_capture_status_without_sensitive_values():
+    translator = _translator(
+        lambda request: httpx.Response(504, text="private upstream error"),
+        stream=False,
+    )
+    with pytest.raises(TranslationError) as excinfo:
+        translator.probe()
+    assert excinfo.value.status == 504
+    timings = translator.drain_request_timings()
+    assert len(timings) == 1
+    assert set(timings[0]) == {
+        "dns_ms", "first_byte_ms", "stream_ms", "total_ms", "http_status"
+    }
+    assert timings[0]["dns_ms"] is None
+    assert timings[0]["first_byte_ms"] is not None
+    assert timings[0]["stream_ms"] is None
+    assert timings[0]["total_ms"] is not None
+    assert timings[0]["http_status"] == 504
+    assert "private" not in repr(timings)
+
+
+def test_request_timings_record_stream_after_success():
+    translator = _translator(
+        lambda request: httpx.Response(200, content=_openai_sse("ok")),
+    )
+    assert translator.probe() == "ok"
+    timing = translator.drain_request_timings()[0]
+    assert timing["http_status"] == 200
+    assert timing["first_byte_ms"] is not None
+    assert timing["stream_ms"] is not None
+    assert timing["total_ms"] is not None
+
+
 def test_confirmed_hard_timeout_allows_next_request(monkeypatch):
     calls = 0
     release = threading.Event()
@@ -400,8 +480,10 @@ def test_confirmed_hard_timeout_allows_next_request(monkeypatch):
 
 def test_cancelled_request_must_confirm_worker_termination(monkeypatch):
     release = threading.Event()
+    started = threading.Event()
 
     def blocking(request):
+        started.set()
         release.wait(1.0)
         return httpx.Response(200, json=_openai_non_stream("ok"))
 
@@ -410,7 +492,9 @@ def test_cancelled_request_must_confirm_worker_termination(monkeypatch):
 
     try:
         with pytest.raises(TranslationError) as excinfo:
-            translator.translate_with_cancel(_article(), cancel_requested=lambda: True)
+            translator.translate_with_cancel(
+                _article(), cancel_requested=lambda: started.is_set()
+            )
         assert excinfo.value.category == "termination_unconfirmed"
         assert excinfo.value.termination_confirmed is False
     finally:
