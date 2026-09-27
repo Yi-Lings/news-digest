@@ -629,7 +629,7 @@ def test_automatic_claim_completes_when_last_unknown_recipient_unsubscribes(tmp_
     database = tmp_path / "news.db"
     recipient = "reader@example.com"
     _add_paid_users(database, (recipient,))
-    _complete_automation_edition(database)
+    _complete_automation_edition(database, error=None)
     conn = db.connect(database)
     try:
         subscription = db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
@@ -691,7 +691,7 @@ def test_automatic_zero_targets_stays_incomplete_while_delivery_is_sending(tmp_p
     database = tmp_path / "news.db"
     recipient = "reader@example.com"
     _add_paid_users(database, (recipient,))
-    _complete_automation_edition(database)
+    _complete_automation_edition(database, error=None)
     conn = db.connect(database)
     try:
         db.add_admin_test_recipient(conn, recipient, NOW.isoformat())
@@ -741,7 +741,7 @@ def test_automatic_zero_targets_stays_incomplete_while_delivery_is_sending(tmp_p
 
 def test_manual_delivery_does_not_override_active_automation_claim(tmp_path):
     database = tmp_path / "news.db"
-    _complete_automation_edition(database)
+    _complete_automation_edition(database, error=None)
     conn = db.connect(database)
     try:
         key = db.claim_automation_delivery(conn, DATE, now=NOW.isoformat())
@@ -794,7 +794,7 @@ def test_manual_delivery_reports_incomplete_automation_summary(
 
 def test_manual_delivery_reconciles_expired_automation_claim(tmp_path):
     database = tmp_path / "news.db"
-    _complete_automation_edition(database)
+    _complete_automation_edition(database, error=None)
     claim_started_at = NOW - dt.timedelta(minutes=11)
     conn = db.connect(database)
     try:

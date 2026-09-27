@@ -137,6 +137,69 @@ def test_wakeup_waits_for_retry_after_probe_deadline_and_skips_terminal_only(tmp
         conn.close()
 
 
+def test_failed_delivery_does_not_launch_fallback_every_30_seconds(tmp_path):
+    conn = db.connect(tmp_path / "news.db")
+    try:
+        db.ensure_automation_edition(conn, "2026-08-30", target_count=0, now=_at())
+        with conn:
+            conn.execute(
+                "UPDATE automation_editions SET status = 'complete'"
+                " WHERE edition_date = '2026-08-30'"
+            )
+            conn.execute(
+                "UPDATE automation_editions SET last_error_code = 'UNCLASSIFIED'"
+                " WHERE edition_date = '2026-08-30'"
+            )
+        assert not db.automation_due(conn, now=_at(), delivery_enabled=True)
+        assert db.unfinished_automation_edition_dates(conn) == []
+        with conn:
+            conn.execute(
+                "UPDATE automation_editions SET last_error_code = NULL, delivery_key = ?"
+                " WHERE edition_date = '2026-08-30'", ("a" * 64,),
+            )
+        assert not db.automation_due(conn, now=_at(), delivery_enabled=True)
+        with conn:
+            conn.execute(
+                "UPDATE automation_editions SET delivery_key = NULL"
+                " WHERE edition_date = '2026-08-30'"
+            )
+        assert db.automation_due(conn, now=_at(), delivery_enabled=True)
+
+        key = db.claim_automation_delivery(conn, "2026-08-30", now=_at())
+        assert key is not None
+        db.finish_automation_delivery(
+            conn, "2026-08-30", delivery_key=key, now=_at(1), succeeded=False
+        )
+        assert db.unfinished_automation_edition_dates(conn) == []
+        assert all(
+            not db.automation_due(
+                conn, now=_at(second), delivery_enabled=True, provider_id="provider-current"
+            )
+            for second in range(30, 3600, 30)
+        )
+        assert db.claim_automation_delivery(conn, "2026-08-30", now=_at(60)) is None
+
+        task = db.ensure_translation_task(
+            conn, edition_date="2026-08-30", article_id="https://example.com/new",
+            article_title="New article", provider_id="provider-current", now=_at(60),
+        )
+        assert db.automation_due(
+            conn, now=_at(60), delivery_enabled=True, provider_id="provider-current"
+        )
+        with conn:
+            conn.execute(
+                "UPDATE translation_tasks SET status = 'failed', auto_retry = 0"
+                " WHERE task_id = ?", (task.task_id,),
+            )
+        assert not db.automation_due(
+            conn, now=_at(61), delivery_enabled=True, provider_id="provider-current"
+        )
+
+        assert db.claim_automation_delivery(conn, "2026-08-30", now=_at(62)) is None
+    finally:
+        conn.close()
+
+
 def test_automation_due_detects_expired_task_lease(tmp_path):
     conn, tasks = _seed(tmp_path)
     try:

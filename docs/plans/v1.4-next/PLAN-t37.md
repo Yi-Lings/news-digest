@@ -1,6 +1,6 @@
-# v1.4.0t36：公网验收与诊断收口计划
+# v1.4.0t37：公网验收与诊断收口计划
 
-日期：2026-09-27。状态：**待实施**。以 t35 的本机 SNI/TLS 门禁、可终止默认 DNS、schema 14 翻译诊断为基线。本文件只规划未收口的问题，不改变 t35 代码或发布结论。所有检查使用部署者输入的 `ND_DOMAIN`，不得预设任何生产域名、服务器 IP 或第三方代理配置。
+日期：2026-09-27。状态：**待实施**。以 t35 的本机 SNI/TLS 门禁、可终止默认 DNS、schema 14 翻译诊断及 t36 的投递失败空转修复为基线。本文件只规划未收口的问题。所有检查使用部署者输入的 `ND_DOMAIN`，不得预设任何生产域名、服务器 IP 或第三方代理配置。
 
 ## 待修问题与实施标准
 
@@ -10,6 +10,9 @@
 | P3：取消 attempt 丢失诊断 | 翻译请求已收到响应后被确认取消时，Runner 已采集安全阶段耗时，但 `confirm_translation_task_cancelled` 不写入 attempt 的 `timings_json` 或 `http_status`。 | 给取消完成函数增加可选 `timings` 参数，复用 schema 14 的安全字段校验；与 task、attempt、Admin action、probe lease 的取消结果在同一 SQLite 事务写入。旧调用方不传参数时行为不变，task 仍按取消策略进入 `retry_wait`。 | 模拟流式响应开始后取消、取消前收到 504、尚未发请求即取消：attempt 分别保留已有阶段/状态或 `null`，不出现 URL、密钥、正文；故障注入提交前中断全部回滚；旧调用方测试继续通过。无需 schema 15。 |
 | P3：自定义 DNS resolver 无期限 | 非默认 Admin 集成给 provider 校验注入阻塞的 `resolver` 时，该 callable 当前同步运行，可占住 HTTP 请求线程。生产默认 resolver 已由 t35 隔离。 | 把 provider 域名校验的可注入 resolver 限定为测试内部：公开 Admin 保存、连接测试路径始终使用 t35 可终止解析；提取纯公网地址校验函数供单元测试直接传入地址。SMTP 的独立 resolver 注入不在本项修改。保留翻译客户端固定目标 IP 连接与所有地址必须为公网的规则。 | 阻塞 DNS 在 10 秒期限加有界清理宽限后安全失败，紧接着第二次测试可成功；Admin API 不存在绕过可终止解析的 callable 路径；私网、混合公网/私网、非法 IP 仍被拒绝，成功连接只访问已校验地址。 |
 | P3：迁移演练时区固定 | 非 `Asia/Hong_Kong` 的开源部署使用 `verify-content-migration.py --build` 时，构建演练仍以固定时区读取刊期，与目标实例配置不一致。 | `--build` 同时要求显式 `--timezone`（IANA 时区）和现有 `--site-url`；用 `zoneinfo.ZoneInfo` 校验后传入 `FetchConfig`。不读取或修改生产 `.env`，无 `--build` 的纯数据核对保持原用法。 | 缺失或非法时区在读取快照前报错；以 `UTC` 与 `Asia/Shanghai` 的隔离快照分别演练并核对刊期及历史页面哈希；脚本不含实例域名、IP 或固定时区。 |
+| P2：自动投递窗口与失败分类 | t36 阻止失败投递每 30 秒重试，但首次恢复旧 `complete` 刊期可能在当日补发窗口外尝试一次，并记为通用 `DELIVERY_FAILED`；归档失败也可能与 SMTP 成功混在同一状态。 | 在只读到期判断和实际认领处共用部署时区的当日窗口；窗口外记 `DELIVERY_EXPIRED`。将归档故障与收件人失败分别显示，保留 `sent` 与 `unknown` 的现有防重规则。 | 当日窗口内首次可执行；过窗、旧刊、失败或过期租约维护后不再自动投递；手动仅重试 `failed`，`sent` 不重发、`unknown` 仍需显式确认；归档失败在 Admin 可见。 |
+| P3：状态输出包含抓取响应片段 | 当前 `business-status` 的抓取诊断可带上游页面 HTML 前缀，若被运维日志收集会违反“不记录原始响应”的边界。 | 状态接口保留来源、字节数、类型和摘要哈希，去掉原始响应前缀；已有数据库诊断字段仅在受限管理视图按需读取。 | 模拟异常 RSS/HTML 响应，CLI 和监控日志均不出现原始正文或凭据；排障所需计数与哈希仍可用。 |
+| P3：历史 Provider 探测告警 | 生产保留旧 Provider 的 open circuit 和旧刊期未完成 task；`business-status` 会报 `probe_overdue`，即使当前默认 Provider 已更换，容易把历史积压误认为当前翻译故障。 | 保留历史待办总数，同时单列当前默认 Provider 的可执行超期探测数；不自动删除或重绑历史 task。 | 切换默认 Provider 后，旧 Provider 的超期数仍可查，但当前可执行告警为 0；切回或明确发起旧 Provider 探测时恢复准确告警。 |
 
 ## 实施顺序与发布验收
 

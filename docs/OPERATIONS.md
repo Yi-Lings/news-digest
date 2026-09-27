@@ -64,7 +64,7 @@ Admin 保存 SMTP 密码时会在 `config/.env` 中写为 `nd-b64-v1:` 开头的
 
 **Admin：** preview 运行中访问 `http://127.0.0.1:8618/admin/`。供应商档案存于 `.env.providers.local`（生产为 `/config/providers.json`）；每档案显式保存协议、stream、推理强度、启用和默认状态。每日翻译只使用唯一默认档案。页面只返回 `key_set`，编辑时 key 留空表示沿用。点击“测试连接”前会确认一次固定 `Hi` 的真实生成请求（2 字符输入、最多 8 output tokens、可能计费），不提供任意测试消息输入框。推理强度下拉仅对 OpenAI GPT 模型生效；非 GPT 模型或 Anthropic 请求不会发送该字段。
 
-邮件区的连接测试使用当前表单但不写配置、不发信；测试邮件可使用当前 SMTP 表单，但内容组合和收件人强制使用已保存值，且必须从 active 订阅行按单个 `subscription_id` 选择。预览、测试、08:00 自动投递和指定刊期人工发送共用同一内容选择器。投递状态按收件人记录；`unknown` 表示 SMTP 可能已接受 DATA，自动任务不得重试。
+邮件区的连接测试使用当前表单但不写配置、不发信；测试邮件可使用当前 SMTP 表单，但内容组合和收件人强制使用已保存值，且必须从 active 订阅行按单个 `subscription_id` 选择。预览、测试、08:00 自动投递和指定刊期人工发送共用同一内容选择器。投递状态按收件人记录；`unknown` 表示 SMTP 可能已接受 DATA，自动任务不得重试。自动投递失败后，30 秒恢复定时器不反复投递；检查原因后使用 Admin 的“重试失败”或 `send-email --resend --yes`，仅重试 `failed` 收件人。
 
 正式刊物与刊物测试邮件仅发送 UTF-8 `text/plain`；Admin 的 HTML 仅用于页面预览，不进入 SMTP。正式订阅刊物仍设置 `List-Unsubscribe` 与 RFC 8058 one-click 头。SMTP 部分拒收逐收件人记 `failed`，全部拒收
 使 run 失败；DATA 后连接复位等无法确认是否送达的结果记 `unknown`。`.eml` 归档失败会令

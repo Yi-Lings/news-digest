@@ -240,7 +240,7 @@ def test_isolated_automation_retries_only_failed_article_and_delivers_once(tmp_p
     assert all(task.status == "succeeded" and task.build_status == "online" for task in tasks)
 
 
-def test_delivery_callback_exception_releases_claim_for_retry(tmp_path):
+def test_delivery_callback_exception_stops_automatic_retry(tmp_path):
     database = tmp_path / "data" / "news.db"
     build = BuildHarness(database, tmp_path / "site")
     runner = TranslationAutomationRunner(
@@ -279,8 +279,8 @@ def test_delivery_callback_exception_releases_claim_for_retry(tmp_path):
         build_callback=build,
         delivery_callback=lambda date, key: calls.append((date, key)) or True,
     )
-    assert restarted.flush_delivery(edition_date="2026-07-28", now=_at(4))
-    assert len(calls) == 1
+    assert not restarted.flush_delivery(edition_date="2026-07-28", now=_at(4))
+    assert calls == []
 
 
 def test_delivery_targets_current_edition_and_expires_older_failure(tmp_path):
