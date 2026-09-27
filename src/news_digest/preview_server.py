@@ -2530,9 +2530,14 @@ class PreviewHandler(SimpleHTTPRequestHandler):
                         "no_eligible_recipients"
                         if edition.last_error_code == "NO_ELIGIBLE_RECIPIENTS" else None
                     ),
-                    # partial/build_failed 刊期提供一键批量恢复入口。
+                    # 全部翻译失败时刊期仍可能停在 translating，且没有构建可触发 partial。
                     "retry_edition_available": (
-                        edition.status in {"partial", "build_failed"} and summary["failed"] > 0
+                        (edition.status in {"partial", "build_failed"} and summary["failed"] > 0)
+                        or (
+                            edition.status == "translating"
+                            and summary["total"] > 0
+                            and summary["failed"] == summary["total"]
+                        )
                     ),
                     "error_code": (
                         edition.last_error_code

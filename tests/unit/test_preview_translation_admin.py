@@ -370,6 +370,74 @@ def test_translation_admin_keeps_running_edition_visible(tmp_path):
         assert payload["edition_dates"] == ["2026-07-28"]
         assert payload["edition"]["date"] == "2026-07-28"
         assert payload["summary"]["running"] == 1
+        assert payload["edition"]["retry_edition_available"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_translation_admin_can_retry_edition_when_all_tasks_failed(tmp_path):
+    database = tmp_path / "news.db"
+    provider_id = _validated_default_provider(tmp_path)
+    conn = db.connect(database)
+    try:
+        task = db.ensure_translation_task(
+            conn,
+            edition_date="2026-07-28",
+            article_id="article-timeout",
+            article_title="Timed out article",
+            provider_id=provider_id,
+            now=_at(),
+        )
+        db.ensure_automation_edition(conn, "2026-07-28", target_count=1, now=_at())
+        db.claim_translation_task(
+            conn, task.task_id, owner="worker", now=_at(), lease_seconds=60
+        )
+        db.finish_translation_task_failure(
+            conn,
+            task.task_id,
+            owner="worker",
+            now=_at(1),
+            error_code="REQUEST_TIMEOUT",
+            error_category="provider_infrastructure",
+            failure_stage="waiting_model",
+            diagnostic_id="timeout-diagnostic",
+            auto_retry=False,
+        )
+    finally:
+        conn.close()
+
+    wakeups = []
+    server = create_server(
+        tmp_path,
+        tmp_path,
+        0,
+        serve_static=False,
+        db_path=database,
+        translation_wakeup_callback=lambda: wakeups.append("wake"),
+        clock=lambda: dt.datetime.fromisoformat(_at(2)).timestamp(),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        status, payload = _request(port, "GET", "/admin/api/translations")
+        assert status == 200
+        assert payload["edition"]["status"] == "translating"
+        assert payload["summary"]["failed"] == payload["summary"]["total"] == 1
+        assert payload["items"][0]["build_status"] == "build_pending"
+        assert payload["edition"]["retry_edition_available"] is True
+
+        status, queued = _request(
+            port,
+            "POST",
+            "/admin/api/translations/retry-edition",
+            {"edition_date": "2026-07-28", "confirm": True},
+        )
+        assert status == 202
+        assert queued["queued"] == 1
+        assert queued["skipped"] == 0
+        assert wakeups == ["wake"]
     finally:
         server.shutdown()
         server.server_close()
