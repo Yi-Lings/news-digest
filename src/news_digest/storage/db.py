@@ -3530,8 +3530,7 @@ def unfinished_automation_edition_dates(conn: sqlite3.Connection) -> list[str]:
         "SELECT edition_date FROM automation_editions"
         " WHERE status NOT IN ('delivered', 'delivery_pending')"
         " AND history_status != 'source_only'"
-        " AND NOT (status = 'complete' AND COALESCE(last_error_code, '')"
-        " IN ('DELIVERY_EXPIRED', 'NO_ELIGIBLE_RECIPIENTS'))"
+        " AND NOT (status = 'complete' AND last_error_code IS NOT NULL)"
         " OR EXISTS (SELECT 1 FROM translation_tasks"
         "   WHERE translation_tasks.edition_date = automation_editions.edition_date"
         "   AND translation_tasks.status IN ('pending', 'retry_wait', 'running')"
@@ -3638,7 +3637,12 @@ def automation_due(
             and edition.build_lease_expires_at <= now
         ):
             return True
-        if delivery_enabled and edition.status == "complete":
+        if (
+            delivery_enabled
+            and edition.status == "complete"
+            and edition.last_error_code is None
+            and edition.delivery_key is None
+        ):
             return True
         wake_at = next_automation_wakeup_at(conn, date, provider_id=provider_id, now=now)
         if wake_at is not None and wake_at <= now:
@@ -3914,7 +3918,8 @@ def claim_automation_delivery(
         cursor = conn.execute(
             "UPDATE automation_editions SET status = 'delivery_pending', delivery_key = ?,"
             " delivery_expires_at = ?, delivery_started_at = ?, updated_at = ?"
-            " WHERE edition_date = ? AND status = 'complete' AND delivery_key IS NULL",
+            " WHERE edition_date = ? AND status = 'complete' AND delivery_key IS NULL"
+            " AND last_error_code IS NULL",
             (
                 delivery_key,
                 _future_timestamp(now, _DELIVERY_CLAIM_LEASE_SECONDS),
