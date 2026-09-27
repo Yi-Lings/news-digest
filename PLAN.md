@@ -1,7 +1,7 @@
 # Cheapcoding News Digest - 本地开发与服务器部署计划
 
 > 2026-09-05：t26 之后以 [新版架构与迭代计划](docs/plans/v1.4-next/PLAN.md) 为实施依据。
-> `v1.4.0t35` 已部署；投递失败时的 30 秒空转追加由 t36 修复。实施记录见 [2026-09-27 专项计划](docs/plans/v1.4-next/PLAN-TRANSLATION-RELIABILITY-2026-09-27.md)，后续范围见 [t37 计划](docs/plans/v1.4-next/PLAN-t37.md)。正式版等待用户观察后决定。
+> 当前线上为 `v1.4.0t36` 测试候选；t35 的重译恢复与部署可靠性已交付，t36 修复投递失败时的 30 秒空转。见 [实施记录](docs/plans/v1.4-next/PLAN-TRANSLATION-RELIABILITY-2026-09-27.md)、[t36 发布记录](docs/plans/v1.4-next/RELEASE-t36.md)与 [t37 计划](docs/plans/v1.4-next/PLAN-t37.md)。正式版等待用户观察后决定。
 > 已按小规模网站需求精简；[系统架构审查](docs/plans/v1.4-next/SYSTEM_REVIEW.md) 保留发现和取舍，取消项不作为后续必做任务。
 > 本文件保留历史决策和既有草稿；其中旧阶段门禁及 12A/12B/12D 不再作为并行执行清单。
 
