@@ -42,8 +42,10 @@ def _run_gate(command: str, **env: str) -> subprocess.CompletedProcess[str]:
 def _nginx_wrapper(tmp_path: Path, conf_dir: Path) -> tuple[Path, Path]:
     conf = tmp_path / "nginx.conf"
     conf.write_text(
-        f"pid {tmp_path / 'nginx.pid'};\nevents {{}}\n"
-        f"http {{ include {conf_dir}/*.conf; }}\n",
+        f"pid {tmp_path / 'nginx.pid'};\n"
+        f"error_log {tmp_path / 'nginx-error.log'} notice;\n"
+        "events {}\n"
+        f"http {{ access_log off; include {conf_dir}/*.conf; }}\n",
         encoding="utf-8",
     )
     bindir = tmp_path / "bin"
