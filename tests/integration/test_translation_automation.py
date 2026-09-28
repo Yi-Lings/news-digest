@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from news_digest.config import BuildConfig, FetchConfig
+from news_digest.delivery import publisher
 from news_digest.models import Article, DailyEdition, Paragraph
 from news_digest.pipeline import build_editions
 from news_digest.storage import db
@@ -238,6 +239,68 @@ def test_isolated_automation_retries_only_failed_article_and_delivers_once(tmp_p
         final.close()
     assert state is not None and state.status == "delivered"
     assert all(task.status == "succeeded" and task.build_status == "online" for task in tasks)
+
+
+def test_prune_failure_does_not_leave_published_tasks_waiting_for_build(
+    tmp_path, monkeypatch, caplog,
+):
+    database = tmp_path / "data" / "news.db"
+    output_root = tmp_path / "site"
+    config = BuildConfig(output_root, "https://example.test")
+    prior = DailyEdition(date="2026-07-27", articles=[_article(99)])
+    old_release = build_editions([prior], config)
+    for _ in range(4):
+        build_editions([prior], config)
+    original_rmtree = publisher.shutil.rmtree
+
+    def denied(path, *args, **kwargs):
+        if Path(path) == old_release:
+            raise PermissionError(13, "private-response-marker", str(old_release))
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(publisher.shutil, "rmtree", denied)
+
+    def build(edition_date):
+        conn = db.connect(database)
+        try:
+            current = db.frozen_edition(conn, edition_date)
+        finally:
+            conn.close()
+        return build_editions([current], config).name
+
+    runner = TranslationAutomationRunner(
+        database=database,
+        provider_id="provider-default",
+        translator=FakeTranslator(set(), Counter()),
+        cache_dir=tmp_path / "cache",
+        build_callback=build,
+        delivery_callback=lambda date, key: True,
+        publication_reader=lambda date: publisher.resolve_published_release(
+            output_root, edition_date=date,
+        ).edition,
+    )
+    runner.seed_edition(DailyEdition(date="2026-07-28", articles=[_article(1)]), now=_at())
+    assert runner.run_ready(now=_at(1), owner="worker").succeeded == 1
+    assert runner.flush_build(now=_at(3), owner="builder")
+
+    publication = publisher.resolve_published_release(output_root, edition_date="2026-07-28")
+    conn = db.connect(database)
+    try:
+        state = db.automation_edition(conn, "2026-07-28")
+        task = db.active_translation_tasks(conn, "2026-07-28")[0]
+        assert db.publication_covers_build(conn, "2026-07-28", 1, publication.edition)
+    finally:
+        conn.close()
+    assert state.status == "complete"
+    assert state.online_count == state.succeeded_count == state.target_count == 1
+    assert state.built_generation == state.dirty_generation == 1
+    assert state.last_error_code is None
+    assert task.build_status == task.current_stage == "online"
+    assert old_release.is_dir()
+    assert len(list((output_root / "releases").iterdir())) == 6
+    assert "release_prune_failed error=PermissionError errno=13" in caplog.text
+    assert "private-response-marker" not in caplog.text
+    assert str(old_release) not in caplog.text
 
 
 def test_delivery_callback_exception_stops_automatic_retry(tmp_path):

@@ -12,6 +12,7 @@ The switch is designed for both platforms:
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -264,7 +265,12 @@ def publish(build_dir: Path, output_root: Path, release_name: str) -> Path:
     shutil.move(str(build_dir), str(target))
     switch_current(output_root, target)
     persist_publication_index(output_root)
-    _prune_releases(releases, keep_name=target.name)
+    try:
+        _prune_releases(releases, keep_name=target.name)
+    except OSError as error:
+        logging.getLogger(__name__).warning(
+            "release_prune_failed error=%s errno=%s", type(error).__name__, error.errno,
+        )
     return target
 
 
