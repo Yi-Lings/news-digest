@@ -1,6 +1,6 @@
 # v1.4.0t37：发布后清理失败误报修复
 
-日期：2026-09-28。状态：**已实施，待发布验收**。以 t36 为基线，本候选只修复当日复现的发布状态错误。所有部署检查仍使用部署者输入的 `ND_DOMAIN`，不得预设任何生产域名、服务器 IP 或第三方代理配置。
+日期：2026-09-28。状态：**已发布测试候选并通过生产验收**。以 t36 为基线，本候选只修复当日复现的发布状态错误。所有部署检查仍使用部署者输入的 `ND_DOMAIN`，不得预设任何生产域名、服务器 IP 或第三方代理配置。
 
 ## 本候选的具体故障与范围
 
@@ -11,6 +11,16 @@
 回归要求：注入旧版本清理权限错误后，current 和索引可验证、旧版本仍保留、任务为 `online`、刊期为 `complete`；generation、source hash 和 result revision 必须匹配。warning 不包含路径或原始异常文本。切换 current 失败及索引写入失败仍是失败。
 
 当日生产恢复先保存 SQLite 一致性备份、旧目录所有权记录与 timer/path 状态；仅修正已确认的历史目录所有权。核对当日 manifest 与数据库结果完全匹配后，使用现有认领/完成接口确认 6/6 已上线，未重新翻译或重新构建。恢复原 timer/path 后自动流程没有实际邮件收件人，随后 fallback 跳过无工作运行。
+
+## 发布与生产验收记录
+
+- PR [#8](https://github.com/Yi-Lings/news-digest/pull/8)，候选 [v1.4.0t37](https://github.com/Yi-Lings/news-digest/releases/tag/v1.4.0t37)，不可变 tag commit `f32c2a253e5c2da430bbb3b6ad3df343b672558d`。
+- 发布 [CI](https://github.com/Yi-Lings/news-digest/actions/runs/36379705525) 全部通过；Linux 离线 1098 passed、7 network deselected（含隔离 Nginx/TLS）；Windows 离线 1073 passed、25 skipped、7 network deselected；Ruff 和部署脚本语法通过。故障注入定向测试 35 passed。
+- 生产 worker 固定 `sha256:54abf07633395850df3324ceea73022f759611e4d1642d79c8c149a16a9220f0`，web 固定 `sha256:e493734766e4f546911c564b0c6a6657c25e30561dfdc247b5685c55e1b35d4d`，同一 tag/revision。
+- 05:01 UTC 验收：刊期 `complete`、六篇 `online`、`built_generation=dirty_generation=6`、publication 对账通过、SQLite integrity `ok`；current 仍为 `2026-09-28-01`。本机 SNI 和独立公网 `/`、`/healthz`、`/admin/` 均为 HTTP 200，启用正常 TLS 校验。
+- daily timer、wakeup timer/path 均恢复 active。原先 disabled 的 backup timer 按部署前状态保留，此状态不属于本次 build 故障原因。
+- 状态修正前备份 `/srv/news-digest/backups/build-state-20260928T044619Z/` 保存数据库、目录所有权与 unit 状态；数据库 SHA-256 `2348bdc8ffe71eecf938cafd0f32a52b2f97610058a3ec621ae9cea65688beb3`，本机副本位于 `E:/backups/news-digest/t37/` 并已核验。
+- 镜像部署前备份 `news-db-v1.4.0t37-20260928-050013-o0vnnT.sqlite3`；原 compose 保留为 `/srv/news-digest/compose.yaml.bak-20260928-050013`，t36 固定镜像保留为回滚依据。schema 仍为 14。
 
 ## 后续 backlog（不属于 t37 发布门禁）
 
