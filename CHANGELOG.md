@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### v1.4.0t37 候选
+
+- 修复页面已发布后，旧 release 清理权限错误仍将本次 build 标为失败、任务停留在
+  `waiting_build` 的问题。清理失败仅记录异常类型与 errno，不记录路径或原始异常正文。
+- 保留发布前错误及发布索引写入错误的失败语义；回归覆盖有效 current/索引、
+  generation/source hash/result revision 对账与任务 `online` 状态。
+- 本候选只包含此已复现故障的修复；原 t37 七项扩展移入后续 backlog。
+
 ### v1.4.0t28 候选
 
 - schema 12 补齐权益命令与幂等记录、迟到到账/退款/争议台账、有界后台支付对账。

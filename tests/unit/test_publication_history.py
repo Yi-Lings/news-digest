@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,51 @@ def test_publication_index_can_recover_after_current_switch(tmp_path, monkeypatc
         publisher.load_publication_record(root, DATE).edition_sha256 == publication.edition_sha256
     )
     assert len(list((root / "releases").iterdir())) == 1
+
+
+def test_current_switch_failure_remains_fatal(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "site"
+    config = BuildConfig(root, "https://example.test")
+    old_release = build_editions([edition()], config)
+
+    def denied(_root, _target):
+        raise PermissionError(13, "current switch denied")
+
+    monkeypatch.setattr(publisher, "switch_current", denied)
+    with pytest.raises(PermissionError, match="current switch denied"):
+        build_editions([edition()], config)
+    assert publisher.resolve_published_release(root).path == old_release.resolve()
+    assert "release_prune_failed" not in caplog.text
+
+
+def test_release_prune_failure_preserves_valid_publication(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "site"
+    config = BuildConfig(root, "https://example.test")
+    old_release = build_editions([edition()], config)
+    for _ in range(4):
+        build_editions([edition()], config)
+    original_rmtree = publisher.shutil.rmtree
+
+    def denied(path, *args, **kwargs):
+        if Path(path) == old_release:
+            raise PermissionError(13, "private-response-marker", str(old_release))
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(publisher.shutil, "rmtree", denied)
+    release = build_editions([edition()], config)
+
+    publication = publisher.resolve_published_release(root)
+    assert publication.path == release.resolve()
+    assert publication.edition == edition()
+    assert publisher.load_publication_record(root, DATE).edition == publication.edition
+    assert old_release.is_dir()
+    assert len(list((root / "releases").iterdir())) == 6
+    warnings = [record for record in caplog.records if record.name == publisher.__name__]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "release_prune_failed error=PermissionError errno=13"
+    assert warnings[0].exc_info is None
+    assert "private-response-marker" not in caplog.text
+    assert str(old_release) not in caplog.text
 
 
 def test_build_keeps_unconfirmed_legacy_pages_and_archive_dates(tmp_path):
