@@ -457,6 +457,17 @@ def build_editions(
     previous_issues = output_root / "current" / "issues"
     if previous_issues.is_dir():
         shutil.copytree(previous_issues, build_dir / "issues")
+        # Retained articles may lack a source snapshot, but still need the current reader layout.
+        for retained_page in (build_dir / "issues").rglob("*.html"):
+            retained_html = retained_page.read_text(encoding="utf-8")
+            if '/assets/layout.js' not in retained_html:
+                retained_html = retained_html.replace(
+                    "</head>",
+                    '<script src="/assets/layout.js?v=20261004"></script>'
+                    '<link rel="stylesheet" href="/assets/mobile.css?v=20261004"></head>',
+                    1,
+                )
+                retained_page.write_text(retained_html, encoding="utf-8")
         known_dates = {edition.date for edition in editions}
         editions = list(editions)
         for issue in previous_issues.iterdir():
@@ -558,10 +569,11 @@ def _validate_build(build_dir: Path, *, require_manifest: bool = False) -> None:
         build_dir / "archive" / "index.html",
         build_dir / "assets" / "style.css",
         build_dir / "assets" / "app.js",
+        build_dir / "assets" / "layout.js",
+        build_dir / "assets" / "mobile.css",
     ]
     if require_manifest:
         required.append(build_dir / "release.json")
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"构建产物缺失，已中止发布：{missing}")
-

@@ -248,6 +248,7 @@ def _page(title: str, body: str, modal: str = "") -> str:
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"robots\" content=\"noindex\">"
         f"<title>{html.escape(title)} · Cheapcoding News</title>"
+        '<script src="/assets/layout.js?v=20261004"></script>'
         "<style>"
         ":root{--ink:#1c1b17;--muted:#69665f;--paper:#f5f2eb;--sheet:#fff;"
         "--rule:#cbc5b9;--red:#a52f24;--green:#116b39}"
@@ -464,17 +465,25 @@ def _page(title: str, body: str, modal: str = "") -> str:
         "background:var(--red);border-color:var(--red);transform:translateY(-2px)}"
         "@media(max-width:480px){.back-to-top{right:1.1rem;bottom:1.2rem;width:2.4rem;height:2.4rem}}"
         "@media(prefers-reduced-motion:reduce){.wrap{animation:none}}"
-        "</style></head><body>"
+        '</style><link rel="stylesheet" href="/assets/mobile.css?v=20261004">'
+        "</head><body>"
         "<header class=\"site-head\"><div class=\"site-kicker\">Member edition</div>"
+        '<button type="button" class="mobile-nav-toggle" data-nav-toggle '
+        'aria-controls="site-menu" aria-expanded="false">菜单</button>'
         "<a class=\"brand\" href=\"/\">Cheapcoding News</a>"
-        "<nav class=\"site-nav\" aria-label=\"会员导航\"><a href=\"/\">今日</a>"
+        '<nav class="site-nav" id="site-menu" aria-label="会员导航"><a href="/">今日</a>'
         "<a href=\"/archive/\">往期归档</a><a href=\"/subscribe\">会员订阅</a>"
         "<a href=\"/account\">我的账户</a><a href=\"/contact\">联系我们</a>"
         f"{_ADMIN_NAV_MARKER}</nav></header>"
         "<main class=\"wrap\"><p class=\"desk-label\">Reader desk</p>"
         f"<h1>{html.escape(title)}</h1>{body}"
         "<p class=\"muted\"><a href=\"/\">返回首页</a></p></main>"
-        "<footer class=\"site-foot\">Cheapcoding News · 每日双语新闻</footer>"
+        '<footer class="site-foot">Cheapcoding News · 每日双语新闻'
+        '<div class="layout-switch" role="group" aria-label="页面版本"><span>页面版本</span>'
+        '<button type="button" data-layout-btn="auto" aria-pressed="true">自动</button>'
+        '<button type="button" data-layout-btn="mobile" aria-pressed="false">手机版</button>'
+        '<button type="button" data-layout-btn="desktop" aria-pressed="false">电脑版</button>'
+        '</div></footer>'
         f"{modal}"
         "<button type=\"button\" class=\"back-to-top\" id=\"back-to-top\" title=\"回到顶部\" "
         "aria-label=\"回到顶部\"><svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" "
