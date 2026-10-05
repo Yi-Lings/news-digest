@@ -1,0 +1,202 @@
+/* Reader editions: desktop keeps the newspaper; mobile uses a single reading column. */
+.mobile-nav-toggle, .mobile-read-link { display: none; }
+.layout-switch {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: .5rem; margin: 1rem 0 0; font: 14px/1.4 Arial, "Microsoft YaHei", sans-serif;
+}
+.layout-switch button {
+  width: auto; min-height: 44px; margin: 0; padding: .5rem .75rem;
+  border: 1px solid var(--rule); background: transparent; color: var(--ink); cursor: pointer;
+  font: inherit;
+}
+.layout-switch button[aria-pressed="true"] {
+  background: var(--ink); border-color: var(--ink); color: #fff;
+}
+html[data-layout="desktop"] body { min-width: 960px; }
+
+html[data-layout="mobile"] { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html[data-layout="mobile"] body {
+  width: 100%; max-width: 48rem; min-width: 0; margin-inline: auto;
+  font-size: 17px; line-height: 1.7;
+}
+html[data-layout="mobile"][data-layout-preference="mobile"] body { max-width: 30rem; }
+html[data-layout="mobile"] :is(.page, .wrap, .masthead-title, .story, .plan-card) {
+  min-width: 0; overflow-wrap: anywhere;
+}
+html[data-layout="mobile"] :is(.page, .wrap) {
+  width: 100%; padding: 1.25rem 1rem 2.5rem;
+  padding-inline: max(1rem, env(safe-area-inset-left)) max(1rem, env(safe-area-inset-right));
+}
+html[data-layout="mobile"] .masthead-brand {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) 44px;
+  align-items: start; gap: .6rem; padding: 1.25rem 1rem .9rem;
+}
+html[data-layout="mobile"] .brandmark { width: 26px; height: 26px; margin-top: 1.4rem; }
+html[data-layout="mobile"] .masthead-kicker { font-size: 11px; letter-spacing: .08em; gap: 0; }
+html[data-layout="mobile"] .kicker-rule { display: none; }
+html[data-layout="mobile"] .logotype { font-size: clamp(20px, 5.9vw, 30px); line-height: 1.2; }
+html[data-layout="mobile"] .dateline { font-size: 12px; line-height: 1.6; }
+html[data-layout="mobile"] .issue-meta { display: grid; gap: .05rem; }
+html[data-layout="mobile"] .issue-meta-divider { display: none; }
+html[data-layout="mobile"] .mobile-nav-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; margin: .6rem 0 0; padding: .25rem;
+  border: 1px solid var(--rule); background: transparent; color: var(--ink);
+  font: 600 14px/1.2 Arial, "Microsoft YaHei", sans-serif; cursor: pointer;
+}
+html[data-layout="mobile"] .topnav {
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  justify-content: stretch; align-items: stretch;
+  gap: .65rem; padding: .35rem 1rem .8rem;
+  font-size: 15px;
+}
+html[data-layout="mobile"] :is(.topnav-links, .site-nav) {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .25rem .5rem; width: 100%;
+}
+html[data-layout="mobile"] :is(.topnav-links, .site-nav) > a {
+  display: flex; align-items: center; justify-content: center; min-height: 44px;
+  padding: .5rem .1rem; white-space: normal; text-align: center;
+}
+html[data-layout="mobile"] .topnav-links .admin-entry { grid-column: auto; width: auto; }
+html[data-layout="mobile"][data-nav="closed"] :is(.topnav-links, .site-nav) > a:nth-child(n+4) {
+  display: none;
+}
+html[data-layout="mobile"] .mode-switch { display: flex; gap: .4rem; width: 100%; }
+html[data-layout="mobile"] .mode-label { font-size: 12px; white-space: nowrap; }
+html[data-layout="mobile"] .mode-switch button {
+  flex: 1; min-height: 44px; padding: .45rem .25rem; font-size: 15px;
+}
+html[data-layout="mobile"] .filter-bar {
+  flex-wrap: nowrap; overflow-x: auto; gap: .5rem; margin-bottom: 1.25rem;
+  padding: 0 0 .8rem; scrollbar-width: thin; overscroll-behavior-x: contain;
+}
+html[data-layout="mobile"] .filter-label { flex: none; font-size: 12px; }
+html[data-layout="mobile"] .chip {
+  flex: none; min-height: 44px; padding: .45rem .75rem; font-size: 14px; white-space: nowrap;
+}
+html[data-layout="mobile"] :is(.front, .front-row) { display: block; padding: 0; border-bottom: 0; }
+html[data-layout="mobile"] .front-side { display: contents; border: 0; padding: 0; }
+html[data-layout="mobile"] :is(.lead, .card, .front-side .card:first-child, .front-row .card) {
+  margin: 0 0 1.5rem; padding: 0 0 1.5rem; border: 0; border-bottom: 1px solid var(--rule);
+}
+html[data-layout="mobile"] .lead-figure img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+html[data-layout="mobile"] .card-meta { font-size: 12px; gap: .4rem .75rem; }
+html[data-layout="mobile"] .lead-title { font-size: 28px; line-height: 1.22; }
+html[data-layout="mobile"] .card-title { font-size: 23px; line-height: 1.3; }
+html[data-layout="mobile"] :is(.lead-title, .card-title) .lang-zh {
+  font-size: 17px; line-height: 1.65; margin-top: .4rem;
+}
+html[data-layout="mobile"] :is(.lead-summary, .card-summary) { font-size: 17px; line-height: 1.7; }
+html[data-layout="mobile"] :is(.lead-summary, .card-summary) .lang-en {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
+}
+html[data-layout="mobile"] :is(.lead-summary, .card-summary) .lang-zh {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  font-size: 16px; line-height: 1.8; margin-top: .6rem;
+}
+html[data-layout="mobile"][data-mode="en"] .lang-zh,
+html[data-layout="mobile"][data-mode="zh"] .lang-en { display: none; }
+html[data-layout="mobile"] .mobile-read-link {
+  display: inline-flex; align-items: center; min-height: 44px; margin-top: .5rem;
+  color: var(--cinnabar); font: 600 14px/1.4 var(--font-ui); text-decoration: none;
+}
+html[data-layout="mobile"] .brief-list { columns: 1; }
+html[data-layout="mobile"] .brief-list li { padding: .9rem 0; }
+html[data-layout="mobile"] .brief-title { font-size: 17px; }
+html[data-layout="mobile"] :is(.subscribe, .support) { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+html[data-layout="mobile"] .subscribe { padding: 1.25rem 1rem; }
+html[data-layout="mobile"] :is(.subscribe-copy p, .support-copy p) { font-size: 15px; line-height: 1.8; }
+html[data-layout="mobile"] .section-title { font-size: 14px; letter-spacing: .12em; }
+html[data-layout="mobile"] .archive-banner { flex-direction: column; padding: 1.25rem 0; }
+html[data-layout="mobile"] .archive-banner-btn { width: 100%; min-height: 44px; }
+html[data-layout="mobile"] .archive-calendar-box { max-width: 100%; }
+html[data-layout="mobile"] .calendar-card { padding: .85rem .5rem; }
+html[data-layout="mobile"] .cal-day { min-height: 44px; aspect-ratio: auto; }
+html[data-layout="mobile"] :is(.cal-nav-arrow, .cal-title-btn) { min-height: 44px; }
+html[data-layout="mobile"] .cal-nav-arrow { min-width: 44px; }
+html[data-layout="mobile"] .cal-day-num { font-size: 16px; }
+html[data-layout="mobile"] .cal-date-dispatch { padding: 1rem .75rem; }
+html[data-layout="mobile"] .cal-dispatch-row {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem;
+}
+html[data-layout="mobile"] .cal-dispatch-input { grid-column: 1 / -1; width: 100%; font-size: 16px; min-height: 44px; }
+html[data-layout="mobile"] :is(.cal-dispatch-picker-btn, .cal-dispatch-btn) { min-height: 44px; padding: .5rem .25rem; }
+html[data-layout="mobile"] .archive-entry { grid-template-columns: minmax(0, 1fr); gap: .4rem; padding: 1rem 0; }
+html[data-layout="mobile"] .archive-count { grid-column: 1; font-size: 13px; }
+html[data-layout="mobile"] .archive-date { display: inline-flex; align-items: center; min-height: 44px; }
+html[data-layout="mobile"] .archive-lead { font-size: 18px; }
+html[data-layout="mobile"] .story-title { font-size: 29px; line-height: 1.25; }
+html[data-layout="mobile"] .story-title-zh { font-size: 19px; line-height: 1.7; }
+html[data-layout="mobile"] .story-back-link { min-height: 44px; font-size: 14px; }
+html[data-layout="mobile"] .story-summary { padding: 1rem .8rem; }
+html[data-layout="mobile"] .para-en { font-size: 18px; line-height: 1.8; }
+html[data-layout="mobile"] :is(.gloss, .sentence-analysis, .collocation dd) { font-size: 17px; line-height: 1.9; }
+html[data-layout="mobile"] .gloss { padding-left: .75rem; }
+html[data-layout="mobile"] .tts-bar {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: .65rem; gap: .5rem;
+}
+html[data-layout="mobile"] .tts-bar .filter-label { grid-column: 1; grid-row: 1; align-self: center; }
+html[data-layout="mobile"] .tts-rate { grid-column: 2; grid-row: 1; justify-self: end; }
+html[data-layout="mobile"] [data-tts-play] { grid-column: 1; grid-row: 2; }
+html[data-layout="mobile"] [data-tts-stop] { grid-column: 2; grid-row: 2; }
+html[data-layout="mobile"] :is(.tts-bar button, .tts-rate select, .para-listen) { min-height: 44px; font-size: 15px; }
+html[data-layout="mobile"] .vocab { display: block; font-size: 17px; }
+html[data-layout="mobile"] .vocab thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+html[data-layout="mobile"] .vocab tbody { display: block; }
+html[data-layout="mobile"] .vocab tr {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .35rem .5rem;
+  padding: .85rem 0; border-bottom: 1px solid var(--rule);
+}
+html[data-layout="mobile"] .vocab td { display: block; padding: 0; border: 0; overflow-wrap: anywhere; }
+html[data-layout="mobile"] .vocab td:nth-child(n+3) { grid-column: 1 / -1; }
+html[data-layout="mobile"] .vocab-phonetic { font-size: 14px; }
+html[data-layout="mobile"] .vocab td:nth-child(3)::before { content: "释义 · "; font-size: 13px; color: var(--gloss); }
+html[data-layout="mobile"] .vocab-example::before { content: "例句 · "; font-size: 13px; color: var(--gloss); font-style: normal; }
+html[data-layout="mobile"] .footer { padding: 1.25rem 1rem 2rem; font-size: 13px; }
+html[data-layout="mobile"] .back-to-top {
+  width: 44px; height: 44px;
+  right: calc(16px + env(safe-area-inset-right, 0px) + var(--viewport-right, 0px));
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--viewport-bottom, 0px));
+  opacity: 0; visibility: hidden; pointer-events: none;
+}
+html[data-layout="mobile"] .back-to-top.is-visible {
+  opacity: .9; visibility: visible; pointer-events: auto;
+}
+html[data-layout="mobile"][data-layout-preference="mobile"] .back-to-top {
+  right: calc(max(16px, (100vw - 30rem) / 2 + 16px) + env(safe-area-inset-right, 0px) + var(--viewport-right, 0px));
+}
+/* Account, membership, registration, checkout and contact share the same edition. */
+html[data-layout="mobile"] .site-head { padding: 1rem; }
+html[data-layout="mobile"] .site-head .mobile-nav-toggle { float: right; margin: 0; }
+html[data-layout="mobile"] .brand { font-size: 24px; }
+html[data-layout="mobile"] .site-nav { font: 600 15px/1.4 Arial, "Microsoft YaHei", sans-serif; }
+html[data-layout="mobile"] .wrap h1 { font-size: 28px; }
+html[data-layout="mobile"] .wrap h2 { font-size: 20px; }
+html[data-layout="mobile"] .wrap form { padding: 1rem .8rem; }
+html[data-layout="mobile"] .wrap :is(input:not([type="checkbox"]):not([type="hidden"]), select, textarea) {
+  width: 100%; min-width: 0; min-height: 44px; font-size: 16px;
+}
+html[data-layout="mobile"] .wrap button { min-height: 44px; font-size: 16px; }
+html[data-layout="mobile"] .wrap form > button { width: 100%; }
+html[data-layout="mobile"] .plans-grid { grid-template-columns: minmax(0, 1fr); }
+html[data-layout="mobile"] .plan-summary { min-height: 0; }
+html[data-layout="mobile"] :is(.muted, .field > span) { font-size: 15px; }
+html[data-layout="mobile"] .order-list li { grid-template-columns: minmax(0, 1fr); }
+html[data-layout="mobile"] .order-actions { width: 100%; gap: .6rem; }
+html[data-layout="mobile"] :is(.order-action, .order-action button) { width: auto; flex: 1; min-height: 44px; }
+html[data-layout="mobile"] :is(.order-pay-btn, .order-cancel-btn) { min-height: 44px; padding: .6rem .8rem !important; font-size: 15px !important; }
+html[data-layout="mobile"] .contact-card { padding: 1.1rem .8rem; }
+html[data-layout="mobile"] .contact-email-box { max-width: 100%; padding: .75rem; overflow-wrap: anywhere; }
+html[data-layout="mobile"] .terms-row { flex-wrap: wrap; padding: .75rem .6rem; }
+html[data-layout="mobile"] .terms-text { min-width: 0; font-size: 15px; }
+html[data-layout="mobile"] .pay-modal-overlay { height: 100%; height: 100dvh; padding: .75rem; overflow-y: auto; }
+html[data-layout="mobile"] .pay-modal-card { max-height: 100%; overflow-y: auto; background: #fff; }
+html[data-layout="mobile"] .pay-modal-close { min-width: 44px; min-height: 44px; flex: none; }
+html[data-layout="mobile"] .privacy-content-scroll { max-height: 45vh; font-size: 16px; padding: 1rem; }
+html[data-layout="mobile"] .privacy-foot-actions { flex-wrap: wrap; }
+html[data-layout="mobile"] .privacy-foot-actions button { min-height: 44px; }
+html[data-layout="mobile"] .pay-channel-btn { min-height: 60px; }
+html[data-layout="mobile"] .layout-switch { gap: .35rem; }
+html[data-layout="mobile"] .reveal { opacity: 1; transform: none; }

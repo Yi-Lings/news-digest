@@ -129,6 +129,24 @@ def test_build_keeps_unconfirmed_legacy_pages_and_archive_dates(tmp_path):
     assert not (root / "current/.editions/2026-09-04.json").exists()
 
 
+def test_retained_legacy_reader_gets_current_layout_script(tmp_path):
+    root = tmp_path / "site"
+    config = BuildConfig(root, "https://example.test")
+    build_editions([edition("2026-09-04")], config)
+    legacy = root / "current/issues/2026-09-04/old-link.html"
+    legacy.write_text(
+        legacy.read_text(encoding="utf-8")
+        .replace("layout.js?v=20261005-edge", "layout.js?v=20261004")
+        .replace("style.css?v=20261005-edge", "style.css"),
+        encoding="utf-8",
+    )
+    build_editions([edition(), DailyEdition("2026-09-04", source_status="unavailable")], config)
+    retained = legacy.read_text(encoding="utf-8")
+    assert retained.count("/assets/layout.js?v=20261005-edge") == 1
+    assert retained.count("/assets/style.css?v=20261005-edge") == 1
+    assert "/assets/layout.js?v=20261004" not in retained
+
+
 def test_duplicate_page_paths_fail_before_switch(tmp_path):
     root = tmp_path / "site"
     config = BuildConfig(root, "https://example.test")
