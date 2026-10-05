@@ -465,13 +465,13 @@ def build_editions(
             if '/assets/layout.js' not in retained_html:
                 retained_html = retained_html.replace(
                     "</head>",
-                    '<script src="/assets/layout.js?v=20261005"></script>'
+                    '<script src="/assets/layout.js?v=20261005-edge"></script>'
                     '<link rel="stylesheet" href="/assets/mobile.css?v=20261004"></head>',
                     1,
                 )
             retained_html = re.sub(
-                r'(/assets/layout\.js)(?:\?[^\s\"\'<>]*)?',
-                r'\1?v=20261005',
+                r'(/assets/(?:layout\.js|style\.css))(?:\?[^\s\"\'<>]*)?',
+                r'\1?v=20261005-edge',
                 retained_html,
             )
             if retained_html != original_html:

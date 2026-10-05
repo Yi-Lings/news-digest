@@ -135,12 +135,15 @@ def test_retained_legacy_reader_gets_current_layout_script(tmp_path):
     build_editions([edition("2026-09-04")], config)
     legacy = root / "current/issues/2026-09-04/old-link.html"
     legacy.write_text(
-        legacy.read_text(encoding="utf-8").replace("layout.js?v=20261005", "layout.js?v=20261004"),
+        legacy.read_text(encoding="utf-8")
+        .replace("layout.js?v=20261005-edge", "layout.js?v=20261004")
+        .replace("style.css?v=20261005-edge", "style.css"),
         encoding="utf-8",
     )
     build_editions([edition(), DailyEdition("2026-09-04", source_status="unavailable")], config)
     retained = legacy.read_text(encoding="utf-8")
-    assert retained.count("/assets/layout.js?v=20261005") == 1
+    assert retained.count("/assets/layout.js?v=20261005-edge") == 1
+    assert retained.count("/assets/style.css?v=20261005-edge") == 1
     assert "/assets/layout.js?v=20261004" not in retained
 
 

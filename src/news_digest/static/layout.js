@@ -21,6 +21,16 @@
       || (navigator.maxTouchPoints > 0 && window.screen.width <= 900);
   }
 
+  function desktopRequested() {
+    var agent = navigator.userAgent || "";
+    // Mobile browsers request a desktop site by sending a desktop user agent.
+    // Touch support alone must not override that choice in automatic mode.
+    return touchDevice()
+      && !(navigator.userAgentData && navigator.userAgentData.mobile)
+      && !/iPhone|iPod|IEMobile|Mobile/i.test(agent)
+      && /Windows NT|X11|Macintosh|Android|Linux (x86_64|i[3-6]86)/i.test(agent);
+  }
+
   function updateViewportInsets() {
     var visible = window.visualViewport;
     // Fixed controls must stay inside the visible area when browser chrome or zoom changes.
@@ -33,12 +43,13 @@
   function applyLayout() {
     var touch = touchDevice();
     var mobile = preference === "mobile"
-      || (preference === "auto" && (touch || window.innerWidth <= 900));
+      || (preference === "auto" && !desktopRequested()
+        && (touch || window.innerWidth <= 900));
     root.setAttribute("data-layout", mobile ? "mobile" : "desktop");
     root.setAttribute("data-layout-preference", preference);
     if (viewport) {
       // Numeric width also helps touch browsers that initially request a desktop viewport.
-      var content = preference === "desktop" && touch ? "width=1200"
+      var content = !mobile && touch ? "width=1200"
         : "width=" + (touch && window.screen.width <= 900 ? window.screen.width : "device-width")
           + ", initial-scale=1, viewport-fit=cover";
       if (viewport.content !== content) viewport.content = content;

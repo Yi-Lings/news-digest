@@ -248,7 +248,7 @@ def _page(title: str, body: str, modal: str = "") -> str:
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"robots\" content=\"noindex\">"
         f"<title>{html.escape(title)} · Cheapcoding News</title>"
-        '<script src="/assets/layout.js?v=20261005"></script>'
+        '<script src="/assets/layout.js?v=20261005-edge"></script>'
         "<style>"
         ":root{--ink:#1c1b17;--muted:#69665f;--paper:#f5f2eb;--sheet:#fff;"
         "--rule:#cbc5b9;--red:#a52f24;--green:#116b39}"
@@ -446,13 +446,19 @@ def _page(title: str, body: str, modal: str = "") -> str:
         ".site-foot{border-top:1px solid var(--rule);padding:1rem 1.25rem 2rem;"
         "text-align:center;color:var(--muted);font-size:.82rem}"
         "@keyframes page-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;"
-        "transform:none}}@media(max-width:480px){.site-head{padding:.85rem 1rem}"
-        ".wrap{padding:1.7rem 1rem 3rem}form{padding:.85rem}input,select,textarea,button{"
-        "width:100%}.plans-grid{grid-template-columns:1fr}.plan-summary{min-height:0}"
-        ".pay-methods{flex-direction:column;align-items:stretch}.pay-method-badge{justify-content:center}"
-        ".order-list li{grid-template-columns:1fr}"
-        ".order-actions,.order-action,.order-action button{width:100%}"
-        ".captcha-row input{width:100%}.site-nav{display:grid;"
+        'transform:none}}@media(max-width:480px){html:not([data-layout="desktop"]) '
+        ".site-head{padding:.85rem 1rem}"
+        'html:not([data-layout="desktop"]) .wrap{padding:1.7rem 1rem 3rem}'
+        'html:not([data-layout="desktop"]) form{padding:.85rem}'
+        'html:not([data-layout="desktop"]) :is(input,select,textarea,button){width:100%}'
+        'html:not([data-layout="desktop"]) .plans-grid{grid-template-columns:1fr}'
+        'html:not([data-layout="desktop"]) .plan-summary{min-height:0}'
+        'html:not([data-layout="desktop"]) .pay-methods{flex-direction:column;align-items:stretch}'
+        'html:not([data-layout="desktop"]) .pay-method-badge{justify-content:center}'
+        'html:not([data-layout="desktop"]) .order-list li{grid-template-columns:1fr}'
+        'html:not([data-layout="desktop"]) :is(.order-actions,.order-action,.order-action button)'
+        '{width:100%}html:not([data-layout="desktop"]) .captcha-row input{width:100%}'
+        'html:not([data-layout="desktop"]) .site-nav{display:grid;'
         "grid-template-columns:repeat(2,minmax(0,1fr));"
         "gap:.45rem .8rem}}"
         ".back-to-top{position:fixed;right:2rem;bottom:2.2rem;width:2.75rem;height:2.75rem;"
@@ -463,7 +469,8 @@ def _page(title: str, body: str, modal: str = "") -> str:
         "visibility .22s ease,background .15s ease}.back-to-top.is-visible{opacity:.9;"
         "visibility:visible;transform:translateY(0)}.back-to-top:hover{opacity:1;"
         "background:var(--red);border-color:var(--red);transform:translateY(-2px)}"
-        "@media(max-width:480px){.back-to-top{right:1.1rem;bottom:1.2rem;width:2.4rem;height:2.4rem}}"
+        '@media(max-width:480px){html:not([data-layout="desktop"]) '
+        '.back-to-top{right:1.1rem;bottom:1.2rem;width:2.4rem;height:2.4rem}}'
         "@media(prefers-reduced-motion:reduce){.wrap{animation:none}}"
         '</style><link rel="stylesheet" href="/assets/mobile.css?v=20261004">'
         "</head><body>"
