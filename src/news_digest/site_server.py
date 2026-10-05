@@ -248,7 +248,7 @@ def _page(title: str, body: str, modal: str = "") -> str:
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"robots\" content=\"noindex\">"
         f"<title>{html.escape(title)} · Cheapcoding News</title>"
-        '<script src="/assets/layout.js?v=20261004"></script>'
+        '<script src="/assets/layout.js?v=20261005"></script>'
         "<style>"
         ":root{--ink:#1c1b17;--muted:#69665f;--paper:#f5f2eb;--sheet:#fff;"
         "--rule:#cbc5b9;--red:#a52f24;--green:#116b39}"

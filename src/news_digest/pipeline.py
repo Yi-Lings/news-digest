@@ -3,6 +3,7 @@
 import datetime
 import hashlib
 import json
+import re
 import shutil
 import time
 import zoneinfo
@@ -460,13 +461,20 @@ def build_editions(
         # Retained articles may lack a source snapshot, but still need the current reader layout.
         for retained_page in (build_dir / "issues").rglob("*.html"):
             retained_html = retained_page.read_text(encoding="utf-8")
+            original_html = retained_html
             if '/assets/layout.js' not in retained_html:
                 retained_html = retained_html.replace(
                     "</head>",
-                    '<script src="/assets/layout.js?v=20261004"></script>'
+                    '<script src="/assets/layout.js?v=20261005"></script>'
                     '<link rel="stylesheet" href="/assets/mobile.css?v=20261004"></head>',
                     1,
                 )
+            retained_html = re.sub(
+                r'(/assets/layout\.js)(?:\?[^\s\"\'<>]*)?',
+                r'\1?v=20261005',
+                retained_html,
+            )
+            if retained_html != original_html:
                 retained_page.write_text(retained_html, encoding="utf-8")
         known_dates = {edition.date for edition in editions}
         editions = list(editions)

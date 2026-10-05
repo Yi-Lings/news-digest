@@ -5,13 +5,20 @@
   var key = "news-digest-layout";
   var preference = "auto";
   var viewport = document.querySelector('meta[name="viewport"]');
+  var touchInput = window.matchMedia
+    ? window.matchMedia("(pointer: coarse) and (hover: none)") : null;
   try {
     var saved = localStorage.getItem(key);
     if (saved === "mobile" || saved === "desktop") preference = saved;
   } catch (error) { /* Storage is optional in private browsing. */ }
 
-  function touchPhone() {
-    return navigator.maxTouchPoints > 0 && window.screen.width <= 900;
+  function touchDevice() {
+    // Requesting a desktop site can disguise both the user agent and screen width.
+    // Use the primary input, rather than any touch support (also present on laptops).
+    return (touchInput && touchInput.matches)
+      || (navigator.userAgentData && navigator.userAgentData.mobile)
+      || /Android|iPhone|iPod|IEMobile/i.test(navigator.userAgent || "")
+      || (navigator.maxTouchPoints > 0 && window.screen.width <= 900);
   }
 
   function updateViewportInsets() {
@@ -24,14 +31,15 @@
   }
 
   function applyLayout() {
+    var touch = touchDevice();
     var mobile = preference === "mobile"
-      || (preference === "auto" && (touchPhone() || window.innerWidth <= 900));
+      || (preference === "auto" && (touch || window.innerWidth <= 900));
     root.setAttribute("data-layout", mobile ? "mobile" : "desktop");
     root.setAttribute("data-layout-preference", preference);
     if (viewport) {
       // Numeric width also helps touch browsers that initially request a desktop viewport.
-      var content = preference === "desktop" && touchPhone() ? "width=1200"
-        : "width=" + (touchPhone() ? window.screen.width : "device-width")
+      var content = preference === "desktop" && touch ? "width=1200"
+        : "width=" + (touch && window.screen.width <= 900 ? window.screen.width : "device-width")
           + ", initial-scale=1, viewport-fit=cover";
       if (viewport.content !== content) viewport.content = content;
     }
@@ -42,6 +50,7 @@
   }
   applyLayout();
   window.addEventListener("resize", applyLayout);
+  if (touchInput && touchInput.addEventListener) touchInput.addEventListener("change", applyLayout);
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", updateViewportInsets, { passive: true });
     window.visualViewport.addEventListener("scroll", updateViewportInsets, { passive: true });
