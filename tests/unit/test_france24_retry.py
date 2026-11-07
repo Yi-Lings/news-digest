@@ -23,7 +23,7 @@ def _collect(source, bodies, monkeypatch):
     responses = iter(bodies)
 
     def handler(request):
-        requests.append(request.url.path)
+        requests.append(str(request.url))
         return httpx.Response(200, content=next(responses), headers={"content-type": "text/html"})
 
     monkeypatch.setattr("news_digest.pipeline.time.sleep", slept.append)
@@ -34,19 +34,19 @@ def _collect(source, bodies, monkeypatch):
     return candidates, report, requests, slept
 
 
-def test_france24_recovers_after_two_bad_feed_responses(monkeypatch):
+def test_france24_recovers_after_three_bad_feed_responses(monkeypatch):
     candidates, report, requests, slept = _collect(
-        FRANCE24, [BAD, BAD, GOOD], monkeypatch
+        FRANCE24, [BAD, BAD, BAD, GOOD], monkeypatch
     )
     assert candidates
     assert report.per_source[FRANCE24.name].startswith("正常")
-    assert len(requests) == 3
-    assert slept == [120, 300]
+    assert len(requests) == 4
+    assert slept == [0, 120, 300]
     diag = report.diagnostics["france24"]
-    assert diag["feed_attempts"] == 3
+    assert diag["feed_attempts"] == 4
     assert diag["parse_warning"] is False
     assert diag["raw"] > 0
-    assert len(diag["feed_bad_samples"]) == 2
+    assert len(diag["feed_bad_samples"]) == 3
     assert diag["feed_bad_samples"][0] == {
         "attempt": 1,
         "bytes": len(BAD),
@@ -57,12 +57,12 @@ def test_france24_recovers_after_two_bad_feed_responses(monkeypatch):
 
 
 def test_france24_failure_after_bounded_retries(monkeypatch):
-    candidates, report, requests, slept = _collect(FRANCE24, [BAD] * 3, monkeypatch)
+    candidates, report, requests, slept = _collect(FRANCE24, [BAD] * 4, monkeypatch)
     assert not candidates
     assert report.per_source[FRANCE24.name] == "失败：FEED_PARSE_EMPTY"
-    assert len(requests) == 3
-    assert slept == [120, 300]
-    assert len(report.diagnostics["france24"]["feed_bad_samples"]) == 3
+    assert len(requests) == 4
+    assert slept == [0, 120, 300]
+    assert len(report.diagnostics["france24"]["feed_bad_samples"]) == 4
 
 
 def test_other_source_does_not_retry(monkeypatch):
@@ -82,3 +82,13 @@ def test_france24_good_first_attempt_never_sleeps(monkeypatch):
     assert report.diagnostics["france24"]["feed_attempts"] == 1
     assert "feed_bad_samples" not in report.diagnostics["france24"]
 
+
+
+def test_france24_immediate_cache_bust(monkeypatch):
+    candidates, report, requests, slept = _collect(FRANCE24, [BAD, GOOD], monkeypatch)
+    assert candidates
+    assert len(requests) == 2
+    assert slept == [0]
+    assert requests[0] == FRANCE24.feed_url
+    assert "nd_feed_retry=" in requests[1]
+    assert report.diagnostics["france24"]["feed_attempts"] == 2
