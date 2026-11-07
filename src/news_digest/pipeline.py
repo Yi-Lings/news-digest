@@ -2,6 +2,7 @@
 
 import datetime
 import hashlib
+import urllib.parse
 import json
 import shutil
 import time
@@ -88,12 +89,18 @@ def _collect_candidates(
         try:
             # Retry only France24's observed HTTP-200-but-unparseable RSS. Avoid
             # delaying or changing failure behavior for all other news sources.
-            retry_delays = _FRANCE24_RETRY_DELAYS_SECONDS if source.key == "france24" else ()
+            retry_delays = (0,) + _FRANCE24_RETRY_DELAYS_SECONDS if source.key == "france24" else ()
             for attempt in range(1, len(retry_delays) + 2):
                 response_info: dict[str, str] = {}
+                # Immediately bypass a malformed CDN cache response before
+                # falling back to the existing bounded delayed retries.
+                feed_url = source.feed_url
+                if source.key == "france24" and attempt > 1:
+                    separator = "&" if urllib.parse.urlsplit(feed_url).query else "?"
+                    feed_url += f"{separator}nd_feed_retry={int(now.timestamp())}-{attempt}"
                 raw = safe_get(
                     client,
-                    source.feed_url,
+                    feed_url,
                     source.allowed_domains,
                     skip_ip_check=skip_ip_check,
                     response_info=response_info,
