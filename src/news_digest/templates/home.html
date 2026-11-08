@@ -56,6 +56,7 @@
       <a href="/issues/{{ edition.date }}/{{ lead.slug }}.html">{{ bilingual(lead.title_en, lead.title_zh) }}</a>
     </h2>
     <p class="lead-summary">{{ bilingual(lead.summary_en, lead.summary_zh) }}</p>
+    <a class="mobile-read-link" href="/issues/{{ edition.date }}/{{ lead.slug }}.html">阅读全文 →</a>
   </article>
 
   <div class="front-side">
@@ -69,6 +70,7 @@
         <a href="/issues/{{ edition.date }}/{{ article.slug }}.html">{{ bilingual(article.title_en, article.title_zh) }}</a>
       </h3>
       <p class="card-summary">{{ bilingual(article.summary_en, article.summary_zh) }}</p>
+      <a class="mobile-read-link" href="/issues/{{ edition.date }}/{{ article.slug }}.html">阅读全文 →</a>
     </article>
     {% endfor %}
   </div>
@@ -86,6 +88,7 @@
       <a href="/issues/{{ edition.date }}/{{ article.slug }}.html">{{ bilingual(article.title_en, article.title_zh) }}</a>
     </h3>
     <p class="card-summary">{{ bilingual(article.summary_en, article.summary_zh) }}</p>
+    <a class="mobile-read-link" href="/issues/{{ edition.date }}/{{ article.slug }}.html">阅读全文 →</a>
   </article>
   {% endfor %}
 </section>

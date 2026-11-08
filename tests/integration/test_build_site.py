@@ -2,6 +2,7 @@
 
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -187,7 +188,9 @@ def test_internal_links_resolve_and_resources_are_local(site):
         collector = _collect(page)
         for resource in collector.resources:
             assert resource.startswith("/"), f"{page}: 非本地资源 {resource}"
-            assert (current / resource.lstrip("/")).is_file(), f"{page}: 资源缺失 {resource}"
+            assert (current / urlsplit(resource).path.lstrip("/")).is_file(), (
+                f"{page}: 资源缺失 {resource}"
+            )
         for href in collector.links:
             if href.startswith("#"):
                 continue

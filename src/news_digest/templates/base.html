@@ -6,7 +6,9 @@
 <meta name="color-scheme" content="light">
 <meta name="robots" content="noindex">
 <title>{{ page_title }}</title>
-<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/layout.js?v=20261005-edge"></script>
+<link rel="stylesheet" href="/assets/style.css?v=20261005-edge">
+<link rel="stylesheet" href="/assets/mobile.css?v=20261004">
 <link rel="icon" type="image/svg+xml" href="/assets/brandmark.svg">
 </head>
 <body>
@@ -34,9 +36,10 @@
       <p class="logotype"><a href="/">{{ site_name }}</a></p>
       {% block dateline %}{% endblock %}
     </div>
+    <button type="button" class="mobile-nav-toggle" data-nav-toggle aria-controls="site-menu" aria-expanded="false">菜单</button>
   </div>
   <nav class="topnav" aria-label="站点导航">
-    <div class="topnav-links">
+    <div class="topnav-links" id="site-menu">
       <a href="/"{% if nav_active == "today" %} class="is-active" aria-current="page"{% endif %}>今日</a>
       <a href="/archive/"{% if nav_active == "archive" %} class="is-active" aria-current="page"{% endif %}>往期归档</a>
       <a class="member-entry" href="/subscribe">会员订阅</a>
@@ -61,6 +64,12 @@
 {% block content %}{% endblock %}
 </main>
 <footer class="footer">
+  <div class="layout-switch" role="group" aria-label="页面版本">
+    <span>页面版本</span>
+    <button type="button" data-layout-btn="auto" aria-pressed="true">自动</button>
+    <button type="button" data-layout-btn="mobile" aria-pressed="false">手机版</button>
+    <button type="button" data-layout-btn="desktop" aria-pressed="false">电脑版</button>
+  </div>
   {% if is_demo %}
   <p>本页所有标题、正文与图片均为演示用预览数据，非真实报道。正式版本中每篇文章将链接并标注原始来源。</p>
   {% else %}
